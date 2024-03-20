@@ -179,9 +179,7 @@
          (srs/update-cards-due-count!)
          (state/pub-event! [:graph/ready graph])
          (if db-based?
-           (p/do!
-             (rtc-handler/<rtc-stop!)
-             (rtc-handler/<rtc-start! graph))
+           (rtc-handler/<rtc-start! graph)
            (file-sync-restart!))
          (when-let [dir-name (and (not db-based?) (config/get-repo-dir graph))]
            (fs/watch-dir! dir-name)))))))
@@ -355,13 +353,11 @@
 
 (defmethod handle :modal/toggle-accent-colors-modal [_]
   (let [label "accent-colors-picker"]
-    (if (or (= label (state/get-modal-id))
-          (= label (some-> (state/get-sub-modals) (first) :modal/id)))
-      (state/close-sub-modal! label)
-      (state/set-sub-modal!
+    (if (shui/dialog-get label)
+      (shui/dialog-close! label)
+      (shui/dialog-open!
         #(settings/modal-accent-colors-inner)
-        {:center? true
-         :id      label
+        {:id      label
          :label   label}))))
 
 (rum/defc modal-output
@@ -457,7 +453,7 @@
 (defmethod handle :go/proxy-settings [[_ agent-opts]]
   (shui/dialog-open!
     (plugin/user-proxy-settings-panel agent-opts)
-    {:id :https-proxy-panel :center? true}))
+    {:id :https-proxy-panel :center? true :class "lg:max-w-2xl"}))
 
 
 (defmethod handle :redirect-to-home [_]

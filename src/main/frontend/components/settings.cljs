@@ -5,7 +5,6 @@
             [frontend.colors :as colors]
             [frontend.components.assets :as assets]
             [frontend.components.file-sync :as fs]
-            [frontend.components.plugins :as plugins]
             [frontend.components.svg :as svg]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
@@ -333,7 +332,9 @@
                              :action     pick-theme
                              :desc       (ui/render-keyboard-shortcut (shortcut-helper/gen-shortcut-seq :ui/toggle-theme))})))
 
-(defn accent-color-row [_in-modal?]
+(rum/defc accent-color-row
+  < rum/reactive
+  [_in-modal?]
   (let [color-accent (state/sub :ui/radix-color)
         pick-theme [:div.cp__accent-colors-list-wrap
                     {:class (if _in-modal? "as-modal-picker" "")}
@@ -342,38 +343,38 @@
                                 none? (= color :none)]]
                       [:div.flex.items-center {:style {:height 28}}
                        (ui/tippy
-                        {:html (case color
-                                 :none [:p {:style {:max-width "300px"}}
-                                        "Cancel accent color. This is currently in beta stage and mainly used for compatibility with custom themes."]
-                                 :logseq "Logseq classical color"
-                                 (str (name color) " color"))
-                         :delay [1000, 100]}
-                        (shui/button
-                         {:class      "w-5 h-5 px-1 rounded-full flex justify-center items-center transition ease-in duration-100 hover:cursor-pointer hover:opacity-100"
-                          :auto-focus (and _in-modal? active?)
-                          :style      {:background-color (colors/variable color :09)
-                                       :outline-color    (colors/variable color (if active? :07 :06))
-                                       :outline-width    (if active? "4px" "1px")
-                                       :outline-style    :solid
-                                       :opacity          (if active? 1 0.5)}
-                          :variant    :text
-                          :on-click   (fn [_e] (state/set-color-accent! color))}
-                         [:strong
-                          {:class (if none? "h-0.5 w-full bg-red-700"
-                                      "w-2 h-2 rounded-full transition ease-in duration-100")
-                           :style {:background-color (if-not none? (str "var(--rx-" (name color) "-07)") "")
-                                   :opacity          (if (or none? active?) 1 0)}}]))
+                         {:html (case color
+                                  :none [:p {:style {:max-width "300px"}}
+                                         "Cancel accent color. This is currently in beta stage and mainly used for compatibility with custom themes."]
+                                  :logseq "Logseq classical color"
+                                  (str (name color) " color"))
+                          :delay [1000, 100]}
+                         (shui/button
+                           {:class "w-5 h-5 px-1 rounded-full flex justify-center items-center transition ease-in duration-100 hover:cursor-pointer hover:opacity-100"
+                            :auto-focus (and _in-modal? active?)
+                            :style {:background-color (colors/variable color :09)
+                                    :outline-color (colors/variable color (if active? :07 :06))
+                                    :outline-width (if active? "4px" "1px")
+                                    :outline-style :solid
+                                    :opacity (if active? 1 0.5)}
+                            :variant :text
+                            :on-click (fn [_e] (state/set-color-accent! color))}
+                           [:strong
+                            {:class (if none? "h-0.5 w-full bg-red-700"
+                                              "w-2 h-2 rounded-full transition ease-in duration-100")
+                             :style {:background-color (if-not none? (str "var(--rx-" (name color) "-07)") "")
+                                     :opacity (if (or none? active?) 1 0)}}]))
                        ])]]
 
     [:<>
-     (row-with-button-action {:left-label  "Accent color"
+     (row-with-button-action {:left-label "Accent color"
                               :description "Choosing an accent color may override any theme you have selected."
-                              :-for        "toggle_radix_theme"
-                              :desc        (when-not _in-modal?
-                                             [:span.pl-6 (ui/render-keyboard-shortcut
-                                                           (shortcut-helper/gen-shortcut-seq :ui/accent-colors-picker))])
-                              :stretch     (boolean _in-modal?)
-                              :action      pick-theme})]))
+                              :-for "toggle_radix_theme"
+                              :desc (when-not _in-modal?
+                                      [:span.pl-6 (ui/render-keyboard-shortcut
+                                                    (shortcut-helper/gen-shortcut-seq :ui/accent-colors-picker))])
+                              :stretch (boolean _in-modal?)
+                              :action pick-theme})]))
 
 (rum/defc modal-accent-colors-inner
   []
@@ -1129,7 +1130,6 @@
 (rum/defcs settings-collaboration < rum/reactive
   (rum/local "" ::invite-email)
   {:will-mount (fn [state]
-                 ;; TODO: get all members including offline members
                  (rtc-handler/<rtc-get-online-info)
                  state)}
   [state]
@@ -1145,7 +1145,7 @@
           [:div user-name]
           (when user-email [:div.opacity-50.text-sm user-email])
           (when graph<->user-user-type [:div.opacity-50.text-sm graph<->user-user-type])])]
-      [:div.flex.flex-col.gap-2.mt-4
+      [:div.flex.flex-col.gap-4.mt-4
        (shui/input
         {:placeholder   "Email address"
          :on-change     #(reset! *invite-email (util/evalue %))})

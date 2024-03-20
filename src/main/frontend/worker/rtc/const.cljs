@@ -22,7 +22,7 @@
 (def general-attr-set
   (into #{} (map first) general-attrs-schema-coll))
 
-(def block-type-schema [:enum "property" "class" "whiteboard" "hidden" "closed value"])
+(def block-type-schema [:enum "property" "class" "whiteboard" "hidden" "closed value" "macro"])
 (def block-pos-schema
   ":sibling:  sibling of target-block(:target-uuid)
   :child: child of target-block(:target-uuid)
@@ -101,7 +101,7 @@
                [:op :keyword]
                [:self :uuid]
                [:parents [:sequential :uuid]]
-               [:left :uuid]
+               [:left [:maybe :uuid]]   ;nil when it's :no-order block
                [:content {:optional true} :string]]
               general-attrs-schema-coll)]
       [:remove
@@ -114,7 +114,7 @@
                [:op :keyword]
                [:self :uuid]
                [:parents {:optional true} [:sequential :uuid]]
-               [:left {:optional true} :uuid]
+               [:left {:optional true} [:maybe :uuid]] ;nil when it's :no-order block
                [:content {:optional true} :string]]
               general-attrs-schema-coll)]
       [:update-page

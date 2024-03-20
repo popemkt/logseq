@@ -234,7 +234,7 @@
                   (do
                     (upsert-property! repo k-name (assoc property-schema :type property-type)
                                       {:property-uuid property-uuid})
-                    (let [status? (= :task/status (:db/ident property))
+                    (let [status? (= :logseq.task/status (:db/ident property))
                           new-value (cond
                                       (and multiple-values? old-value
                                            (not= old-value :frontend.components.property/new-value-placeholder))
@@ -386,7 +386,7 @@
             (upsert-property! repo (name k-name) (assoc (:block/schema property) :type property-type)
                               {:property-uuid property-uuid}))
         {:keys [cardinality]} (:block/schema property)
-        status? (= :task/status (:db/ident property))
+        status? (= :logseq.task/status (:db/ident property))
         txs (mapcat
              (fn [id]
                (when-let [block (db/entity [:block/uuid id])]
@@ -674,7 +674,7 @@
 (defn re-init-commands!
   "Update commands after task status and priority's closed values has been changed"
   [property]
-  (when (contains? #{:task/status :task/priority} (:db/ident property))
+  (when (contains? #{:logseq.task/status :logseq.task/priority} (:db/ident property))
     (state/pub-event! [:init/commands])))
 
 (defn replace-closed-value
@@ -682,7 +682,7 @@
   (assert (and (uuid? new-id) (uuid? old-id)))
   (let [schema (-> (:block/schema property)
                    (update :values (fn [values]
-                                     (conj (remove #{old-id} values) new-id))))]
+                                     (vec (conj (remove #{old-id} values) new-id)))))]
     (db/transact! (state/get-current-repo)
                   [{:db/id (:db/id property)
                     :block/schema schema}]
@@ -773,7 +773,7 @@
     (let [values' (remove string/blank? values)
           property-schema (:block/schema property)]
       (if (every? uuid? values')
-        (p/let [new-value-ids (remove #(nil? (db/entity [:block/uuid %])) values')]
+        (p/let [new-value-ids (vec (remove #(nil? (db/entity [:block/uuid %])) values'))]
           (when (seq new-value-ids)
             (let [property-tx {:db/id (:db/id property)
                                :block/schema (assoc property-schema :values new-value-ids)}]

@@ -46,13 +46,22 @@
 (rum/defc repos-inner
   "Graph list in `All graphs` page"
   [repos]
-  (for [{:keys [url remote? GraphUUID GraphName] :as repo} repos
-        :let [only-cloud? (and remote? (nil? url))
+  (for [{:keys [root url remote? GraphUUID GraphName] :as repo} repos
+        :let [only-cloud? (and remote? (nil? root))
               db-based? (config/db-based-graph? url)]]
     [:div.flex.justify-between.mb-4.items-center {:key (or url GraphUUID)}
-     (normalized-graph-label repo #(if only-cloud?
-                                     (state/pub-event! [:graph/pull-down-remote-graph repo])
-                                     (state/pub-event! [:graph/switch url])))
+     (normalized-graph-label repo
+                             (fn []
+                               (when-not (state/sub :rtc/downloading-graph-uuid)
+                                 (cond
+                                   root ; exists locally
+                                   (state/pub-event! [:graph/switch url])
+
+                                   (and db-based? remote?)
+                                   (state/pub-event! [:rtc/download-remote-graph GraphName GraphUUID])
+
+                                   :else
+                                   (state/pub-event! [:graph/pull-down-remote-graph repo])))))
 
      [:div.controls
       [:div.flex.flex-row.items-center
@@ -107,7 +116,7 @@
                                  (if has-prompt?
                                    (state/set-modal! (confirm-fn))
                                    (unlink-or-remote-fn))))}
-                  (if (or db-based? only-cloud?) "Remove" "Unlink")])]]]))
+                  (if only-cloud? "Remove (server)" "Unlink (local)")])]]]))
 
 (rum/defc repos < rum/reactive
   []
@@ -195,11 +204,11 @@
                                                                  (not (and rtc-graph? remote?)))
                                                           (state/pub-event! [:graph/open-new-window url])
                                                           (cond
+                                                            (:root graph) ; exists locally
+                                                            (state/pub-event! [:graph/switch url])
+
                                                             (and rtc-graph? remote?)
                                                             (state/pub-event! [:rtc/download-remote-graph GraphName GraphUUID])
-
-                                                            (or local? db-only?)
-                                                            (state/pub-event! [:graph/switch url])
 
                                                             :else
                                                             (state/pub-event! [:graph/pull-down-remote-graph graph])))))}})))
