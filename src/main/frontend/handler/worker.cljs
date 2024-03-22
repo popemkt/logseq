@@ -5,8 +5,8 @@
             [frontend.handler.notification :as notification]
             [frontend.state :as state]
             [promesa.core :as p]
-            [frontend.util :as util]
-            [logseq.db :as ldb]))
+            [logseq.db :as ldb]
+            [frontend.db.react :as react]))
 
 (defmulti handle identity)
 
@@ -28,7 +28,7 @@
 
 (defmethod handle :add-repo [_ _worker data]
   (state/add-repo! {:url (:repo data)})
-  (state/pub-event! [:graph/switch (:repo data) {}]))
+  (state/pub-event! [:graph/switch (:repo data) {:rtc-download? true}]))
 
 (defmethod handle :rtc-sync-state [_ _worker data]
   (let [state data]
@@ -36,6 +36,9 @@
 
 (defmethod handle :sync-db-changes [_ _worker data]
   (state/pub-event! [:db/sync-changes data]))
+
+(defmethod handle :refresh-ui [_ _worker {:keys [affected-keys]}]
+  (react/refresh! (state/get-current-repo) affected-keys))
 
 (defmethod handle :default [_ _worker data]
   (prn :debug "Worker data not handled: " data))

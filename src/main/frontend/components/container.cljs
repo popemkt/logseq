@@ -16,7 +16,6 @@
             [frontend.components.icon :as icon]
             [frontend.components.handbooks :as handbooks]
             [dommy.core :as d]
-            [frontend.components.page-menu :as page-menu]
             [frontend.components.content :as cp-content]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
@@ -35,9 +34,6 @@
             [frontend.handler.user :as user-handler]
             [frontend.handler.whiteboard :as whiteboard-handler]
             [frontend.handler.recent :as recent-handler]
-            [frontend.handler.property :as property-handler]
-            [frontend.handler.property.util :as pu]
-            [frontend.components.export :as export]
             [frontend.mixins :as mixins]
             [frontend.mobile.action-bar :as action-bar]
             [frontend.mobile.footer :as footer]
@@ -48,8 +44,6 @@
             [frontend.state :as state]
             [frontend.ui :as ui]
             [logseq.shui.ui :as shui]
-            [logseq.common.util.block-ref :as block-ref]
-            [frontend.util.url :as url-util]
             [logseq.shui.toaster.core :as shui-toaster]
             [logseq.shui.dialog.core :as shui-dialog]
             [logseq.shui.popup.core :as shui-popup]
@@ -737,16 +731,6 @@
        :style {:z-index 999
                :left (str (first position) "px")
                :top (str (second position) "px")}} links]]))
-
-(rum/defc page-title-custom-context-menu-content
-  [page]
-  (when-not (string/blank? page)
-    (let [page-menu-options (page-menu/page-menu page)]
-      [:.menu-links-wrapper
-       (for [{:keys [title options]} page-menu-options]
-         (rum/with-key
-           (ui/menu-link options title)
-           title))])))
 
 (rum/defc custom-context-menu < rum/reactive
   []

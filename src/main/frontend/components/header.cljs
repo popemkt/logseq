@@ -67,27 +67,32 @@
                            (js/setInterval
                             (fn []
                               (if (= :open (:rtc-state @(:rtc/state @state/state)))
-                                (rtc-handler/<rtc-get-online-info)
+                                (rtc-handler/<rtc-get-users-info)
                                 (when @*interval (js/clearInterval @*interval))))
-                            5000)))
-                 state)}
+                            5000))
+                   (assoc state ::interval *interval)))
+   :will-unmount (fn [state]
+                   (when-let [interval @(::interval state)]
+                     (js/clearInterval interval))
+                   state)}
   []
   (let [rtc-graph-id (ldb/get-graph-rtc-uuid (db/get-db))
-        users (get (state/sub :rtc/online-info) (state/get-current-repo))]
+        online-users (->> (get (state/sub :rtc/users-info) (state/get-current-repo))
+                          (filter :user-online?))]
     (when rtc-graph-id
       [:div.rtc-collaborators.flex.gap-2.text-sm.py-2.bg-gray-01.px-2.flex-1.ml-2
        [:a.opacity-70.text-xs
         {:class "pt-[3px] pr-1"
          :on-click #(shui/dialog-open!
-                      (fn []
-                        [:div
-                         [:h1.text-lg.-mt-6.-ml-2 "Collaborators:"]
-                         (settings/settings-collaboration)]))}
-        (if (not (seq users))
+                     (fn []
+                       [:div
+                        [:h1.text-lg.-mt-6.-ml-2 "Collaborators:"]
+                        (settings/settings-collaboration)]))}
+        (if (not (seq online-users))
           (shui/tabler-icon "user-plus")
           (shui/tabler-icon "user-plus"))]
-       (when (seq users)
-         (for [{:keys [user-email user-name user-uuid]} users
+       (when (seq online-users)
+         (for [{:keys [user-email user-name user-uuid]} online-users
                :let [color (shui-util/uuid-color user-uuid)]]
            (when user-name
              (shui/avatar

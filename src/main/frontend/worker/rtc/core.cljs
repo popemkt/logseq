@@ -6,7 +6,6 @@
             [cljs.core.async :as async :refer [<! >! chan go]]
             [cljs.core.async.interop :include-macros true :refer [<p!]]
             [clojure.set :as set]
-            [clojure.string :as string]
             [cognitect.transit :as transit]
             [datascript.core :as d]
             [frontend.worker.async-util :include-macros true :refer [<? go-try]]
@@ -19,9 +18,9 @@
             [frontend.worker.rtc.ws :as ws]
             [frontend.worker.state :as worker-state]
             [frontend.worker.util :as worker-util]
+            [frontend.worker.react :as worker-react]
             [logseq.common.config :as common-config]
             [logseq.common.util :as common-util]
-            [logseq.common.util.page-ref :as page-ref]
             [logseq.db :as ldb]
             [logseq.db.frontend.content :as db-content]
             [logseq.db.frontend.property :as db-property]
@@ -351,20 +350,6 @@
         (assert (some? shape) properties*)
         (transact-db! :upsert-whiteboard-block conn [(gp-whiteboard/shape->block repo db shape page-name)])))))
 
-(defn- special-id-ref->page
-  "Convert special id ref backs to page name."
-  [db content]
-  (let [matches (distinct (re-seq db-content/special-id-ref-pattern content))]
-    (if (seq matches)
-      (reduce (fn [content [full-text id]]
-                (if-let [page (d/entity db [:block/uuid (uuid id)])]
-                  (string/replace content full-text
-                                  (str page-ref/left-brackets
-                                       (:block/original-name page)
-                                       page-ref/right-brackets))
-                  content)) content matches)
-      content)))
-
 (defn- need-update-block?
   [conn block-uuid op-value]
   (let [ent (d/entity @conn [:block/uuid block-uuid])]
@@ -409,7 +394,7 @@
                        (not= (:content op-value)
                              (:block/raw-content b-ent)))
                   (assoc :block/content
-                         (special-id-ref->page @conn (:content op-value)))
+                         (db-content/db-special-id-ref->page @conn (:content op-value)))
 
                   (contains? key-set :updated-at)     (assoc :block/updated-at (:updated-at op-value))
                   (contains? key-set :created-at)     (assoc :block/created-at (:created-at op-value))
@@ -613,7 +598,7 @@
               update-page-ops (vals update-page-ops-map)
               remove-page-ops (vals remove-page-ops-map)]
 
-          ;; (worker-state/start-batch-tx-mode!)
+          (worker-state/start-batch-tx-mode!)
           (js/console.groupCollapsed "rtc/apply-remote-ops-log")
           (worker-util/profile :apply-remote-update-page-ops (apply-remote-update-page-ops repo conn date-formatter update-page-ops))
           (worker-util/profile :apply-remote-remove-ops (apply-remote-remove-ops repo conn date-formatter remove-ops))
@@ -621,9 +606,14 @@
           (worker-util/profile :apply-remote-update-ops (apply-remote-update-ops repo conn date-formatter update-ops))
           (worker-util/profile :apply-remote-remove-page-ops (apply-remote-remove-page-ops repo conn remove-page-ops))
           (js/console.groupEnd)
-          ;; (let [txs (worker-state/get-batch-txs)
-          ;;       affected-keys (worker-react/get-affected-queries-keys {:tx-data txs :db-after @conn})]
-          ;;   (worker-state/exit-batch-tx-mode!))
+          (let [txs (worker-state/get-batch-txs)]
+            (worker-state/exit-batch-tx-mode!)
+            (when (seq txs)
+              (let [affected-keys (worker-react/get-affected-queries-keys {:db-after @conn
+                                                                           :tx-data txs})]
+                (when (seq affected-keys)
+                  (worker-util/post-message :refresh-ui
+                                            {:affected-keys affected-keys})))))
 
           (op-mem-layer/update-local-tx! repo remote-t)
           (update-log state {:remote-update-map affected-blocks-map}))
@@ -830,6 +820,14 @@
                           (op-mem-layer/intersection-block-uuids repo depend-on-block-uuids))
                (assoc r current-handling-block-uuid (into {} remote-ops)))))))
 
+(defn- merge-remove-remove-ops
+  [remote-remove-ops]
+  (when-let [block-uuids (->> remote-remove-ops
+                              (mapcat (fn [[_ {:keys [block-uuids]}]] block-uuids))
+                              distinct
+                              seq)]
+    [[:remove {:block-uuids block-uuids}]]))
+
 (defn sort-remote-ops
   [block-uuid->remote-ops]
   (let [block-uuid->dep-uuid
@@ -855,10 +853,11 @@
                            (some->> (get-in block-uuid->remote-ops [block-uuid :move])
                                     (vector :move)))
                          sorted-uuids)
-        remove-ops (keep
-                    (fn [[_ remote-ops]]
-                      (some->> (:remove remote-ops) (vector :remove)))
-                    block-uuid->remote-ops)
+        remove-ops (merge-remove-remove-ops
+                    (keep
+                     (fn [[_ remote-ops]]
+                       (some->> (:remove remote-ops) (vector :remove)))
+                     block-uuid->remote-ops))
         update-ops (keep
                     (fn [[_ remote-ops]]
                       (some->> (:update remote-ops) (vector :update)))
@@ -872,6 +871,7 @@
                            (some->> (:remove-page remote-ops) (vector :remove-page)))
                          block-uuid->remote-ops)]
     (concat update-page-ops remove-ops sorted-move-ops update-ops remove-page-ops)))
+
 
 (defmulti handle-remote-genernal-exception
   "throw `ex-break-rtc-loop` when need to quit current rtc-loop"
@@ -1200,11 +1200,11 @@
             false)
         true))))
 
-(defn <get-online-info
+(defn <get-users-info
   [state]
   (go
     (when (and state @(:*graph-uuid state))
-      (bean/->js (:users (<? (ws/<send&receive state {:action "get-online-info"})))))))
+      (bean/->js (:users (<? (ws/<send&receive state {:action "get-users-info"})))))))
 
 ;;; APIs (ends)
 

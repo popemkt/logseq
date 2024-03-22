@@ -12,7 +12,7 @@
             [frontend.search :as search]
             [frontend.util :as util]
             [frontend.mixins :as mixins]
-            [logseq.shui.ui :as shui]
+            [frontend.config :as config]
             [electron.ipc :as ipc]
             [promesa.core :as p]
             [frontend.components.svg :as svg]
@@ -235,14 +235,11 @@
       [:li {:on-click #(plugin-handler/open-plugin-settings! id false)} (t :plugin/open-settings)]
       [:li {:on-click #(js/apis.openPath url)} (t :plugin/open-package)]
       [:li {:on-click
-            #(let [confirm-fn
-                   (ui/make-confirm-modal
-                     {:title      (t :plugin/delete-alert name)
-                      :on-confirm (fn [_ {:keys [close-fn]}]
-                                    (close-fn)
-                                    (plugin-common-handler/unregister-plugin id)
-                                    (plugin-config-handler/remove-plugin id))})]
-               (state/set-sub-modal! confirm-fn {:center? true}))}
+            #(-> (shui/dialog-confirm!
+                   [:b (t :plugin/delete-alert name)])
+               (p/then (fn []
+                         (plugin-common-handler/unregister-plugin id)
+                         (plugin-config-handler/remove-plugin id))))}
        (t :plugin/uninstall)]]]
 
     (when (seq sponsors)
@@ -1404,7 +1401,7 @@
   (shui/dialog-open!
     (plugins-page)
     {:label :plugins-dashboard
-     :side :start}))
+     :side :center}))
 
 (defn open-waiting-updates-modal!
   []
@@ -1429,3 +1426,13 @@
        (focused-settings-content title)])
     {:label   "plugin-settings-modal"
      :id      "ls-focused-settings-modal"}))
+
+(defn hook-custom-routes
+  [routes]
+  (cond-> routes
+    config/lsp-enabled?
+    (concat (some->> (plugin-handler/hook-routes-renderer)
+              (mapv #(when-let [{:keys [name path render]} %]
+                       (when (not (string/blank? path))
+                         [path {:name name :view (fn [r] (render r %))}])))
+              (remove nil?)))))

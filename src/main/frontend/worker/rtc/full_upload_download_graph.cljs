@@ -13,7 +13,11 @@
             [frontend.worker.state :as worker-state]
             [frontend.worker.util :as worker-util]
             [logseq.db.frontend.schema :as db-schema]
-            [promesa.core :as p]))
+            [logseq.outliner.core :as outliner-core]
+            [logseq.db.frontend.content :as db-content]
+            [promesa.core :as p]
+            [clojure.string :as string]
+            [logseq.common.util.page-ref :as page-ref]))
 
 (def transit-r (transit/reader :json))
 
@@ -68,7 +72,7 @@
   {:block-type/property     "property"
    :block-type/class        "class"
    :block-type/whiteboard   "whiteboard"
-   :block-type/macros       "macros"
+   :block-type/macro        "macro"
    :block-type/hidden       "hidden"
    :block-type/closed-value "closed value"})
 
@@ -116,7 +120,6 @@
 (defn- fill-block-fields
   [blocks]
   (let [groups (group-by #(boolean (:block/name %)) blocks)
-        ;; _page-blocks (get groups true)
         other-blocks (set (get groups false))
         id->block (into {} (map (juxt :db/id identity) blocks))
         block-id->page-id (into {} (map (fn [b] [(:db/id b) (:db/id (page-of-block id->block b))]) other-blocks))]
@@ -126,6 +129,27 @@
                 (assoc b :block/page page-id)
                 b)))
           blocks)))
+
+(defn- transact-block-refs!
+  [repo]
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (let [date-formatter (worker-state/get-date-formatter repo)
+          db @conn
+          ;; get all the block datoms
+          datoms (d/datoms db :avet :block/uuid)
+          refs-tx (keep
+                   (fn [d]
+                     (let [block (d/entity @conn (:e d))
+                           block' (let [content (:block/content block)]
+                                    (if (and content (string/includes? content (str page-ref/left-brackets db-content/page-ref-special-chars)))
+                                      (assoc block :block/content (db-content/db-special-id-ref->page db content))
+                                      block))
+                           refs (outliner-core/rebuild-block-refs repo conn date-formatter block' {})]
+                       (when (seq refs)
+                         {:db/id (:db/id block)
+                          :block/refs refs})))
+                   datoms)]
+      (d/transact! conn refs-tx {:outliner-op :rtc-download-rebuild-block-refs}))))
 
 (defn- <transact-remote-all-blocks-to-sqlite
   [all-blocks repo graph-uuid]
@@ -140,7 +164,7 @@
                (.createOrOpenDB worker-obj repo {:close-other-db? false})
                (.exportDB worker-obj repo)
                (.transact worker-obj repo tx-data {:rtc-download-graph? true} (worker-state/get-context))
-               (.closeDB worker-obj repo))]
+               (transact-block-refs! repo))]
      (<? (p->c work))
 
      (worker-util/post-message :add-repo {:repo repo})
@@ -162,7 +186,7 @@
            (op-mem-layer/init-empty-ops-store! repo)
            (<? (<transact-remote-all-blocks-to-sqlite all-blocks repo graph-uuid))
            (op-mem-layer/update-graph-uuid! repo graph-uuid)
-           (prn ::download-graph repo (@@#'op-mem-layer/*ops-store repo))
+           ;; (prn ::download-graph repo (@@#'op-mem-layer/*ops-store repo))
            (<! (op-mem-layer/<sync-to-idb-layer! repo))
            (<! (p->c (.storeMetadata worker-obj repo (pr-str {:graph/uuid graph-uuid}))))
            (worker-state/set-rtc-downloading-graph! false)))))))
