@@ -3,11 +3,12 @@
   (:require [clojure.set :as set]
             [clojure.string :as string]
             [frontend.db :as db]
-            [logseq.db.frontend.default :as default-db]
             [frontend.state :as state]
             [frontend.util :as util]
             [frontend.handler.property.util :as pu]
             [frontend.config :as config]
+            [logseq.graph-parser.db :as gp-db]
+            [logseq.db.sqlite.create-graph :as sqlite-create-graph]
             [logseq.common.util :as common-util]))
 
 (defn- build-links
@@ -107,12 +108,14 @@
               (not journal?)
               (remove :block/journal?)
               (not excluded-pages?)
-              (remove (fn [p] (true? (pu/get-block-property-value p :exclude-from-graph-view)))))
+              (remove (fn [p] (true? (pu/get-block-property-value p :logseq.property/exclude-from-graph-view)))))
             links (concat (seq relation)
                           (seq tagged-pages)
                           (seq namespaces))
             linked (set (flatten links))
-            build-in-pages (set (map string/lower-case default-db/built-in-pages-names))
+            build-in-pages (->> (if (config/db-based-graph? repo) sqlite-create-graph/built-in-pages-names gp-db/built-in-pages-names)
+                                (map string/lower-case)
+                                set)
             nodes (cond->> (map :block/name full-pages')
                     (not builtin-pages?)
                     (remove (fn [p] (contains? build-in-pages (string/lower-case p))))

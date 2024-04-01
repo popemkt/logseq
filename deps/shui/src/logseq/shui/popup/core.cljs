@@ -9,10 +9,13 @@
 (def popover (util/lsui-wrap "Popover"))
 (def popover-trigger (util/lsui-wrap "PopoverTrigger"))
 (def popover-content (util/lsui-wrap "PopoverContent"))
+(def popover-arrow (util/lsui-wrap "PopoverArrow"))
+(def popover-close (util/lsui-wrap "PopoverClose"))
 (def popover-remove-scroll (util/lsui-wrap "PopoverRemoveScroll"))
 (def dropdown-menu (util/lsui-wrap "DropdownMenu"))
 (def dropdown-menu-trigger (util/lsui-wrap "DropdownMenuTrigger"))
 (def dropdown-menu-content (util/lsui-wrap "DropdownMenuContent"))
+(def dropdown-menu-arrow (util/lsui-wrap "DropdownMenuArrow"))
 (def dropdown-menu-group (util/lsui-wrap "DropdownMenuGroup"))
 (def dropdown-menu-item (util/lsui-wrap "DropdownMenuItem"))
 (def dropdown-menu-checkbox-item (util/lsui-wrap "DropdownMenuCheckboxItem"))
@@ -96,9 +99,13 @@
                           (assoc :align (name align)))}))))
 
 (defn hide!
-  ([] (when-let [id (some-> (get-popups) (last) :id)] (hide! id)))
-  ([id]
-   (update-popup! id :open? false)))
+  ([] (when-let [id (some-> (get-popups) (last) :id)] (hide! id 0)))
+  ([id] (hide! id 0))
+  ([id delay]
+   (let [f #(update-popup! id :open? false)]
+     (if (and (number? delay) (> delay 0))
+       (js/setTimeout f delay)
+       (f)))))
 
 (defn hide-all!
   []

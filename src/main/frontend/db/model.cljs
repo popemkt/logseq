@@ -14,7 +14,9 @@
             [frontend.util :as util :refer [react]]
             [logseq.db.frontend.rules :as rules]
             [logseq.db.frontend.content :as db-content]
+            [logseq.db.sqlite.create-graph :as sqlite-create-graph]
             [logseq.graph-parser.text :as text]
+            [logseq.graph-parser.db :as gp-db]
             [logseq.common.util :as common-util]
             [logseq.common.util.date-time :as date-time-util]
             [frontend.config :as config]
@@ -527,7 +529,7 @@ independent of format as format specific heading characters are stripped"
    (get-page-file (state/get-current-repo) page-name))
   ([repo page-name]
    (when-let [db (conn/get-db repo)]
-     (ldb/get-page-file db page-name))))
+     (gp-db/get-page-file db page-name))))
 
 (defn get-block-file-path
   [block]
@@ -935,7 +937,12 @@ independent of format as format specific heading characters are stripped"
 (defn get-orphaned-pages
   [opts]
   (let [db (conn/get-db)]
-    (ldb/get-orphaned-pages db opts)))
+    (ldb/get-orphaned-pages db
+                            (merge opts
+                                   {:built-in-pages-names
+                                    (if (config/db-based-graph? (state/get-current-repo))
+                                      sqlite-create-graph/built-in-pages-names
+                                      gp-db/built-in-pages-names)}))))
 
 ;; FIXME: replace :logseq.macro-name with id
 (defn get-macro-blocks
@@ -980,7 +987,7 @@ independent of format as format specific heading characters are stripped"
 (defn get-whiteboard-id-nonces
   [repo page-name]
   (let [key (if (config/db-based-graph? repo)
-              (:block/uuid (db-utils/entity [:block/name "logseq.tldraw.shape"]))
+              (:block/uuid (db-utils/entity :logseq.property.tldraw/shape))
               :logseq.tldraw.shape)
         page (db-utils/entity [:block/name (util/page-name-sanity-lc page-name)])]
     (->> (:block/_page page)
@@ -1000,33 +1007,33 @@ independent of format as format specific heading characters are stripped"
      [?page :block/uuid ?id]]
     (conn/get-db repo)))
 
-(defn get-namespace-children
+(defn get-class-children
   [repo eid]
   (->>
    (d/q '[:find [?children ...]
           :in $ ?parent %
           :where
-          (namespace ?parent ?children)]
+          (class-parent ?parent ?children)]
         (conn/get-db repo)
         eid
-        (:namespace rules/rules))
+        (:class-parent rules/rules))
    distinct))
 
 ;; FIXME: async query
 (defn get-class-objects
   [repo class-id]
   (when-let [class (db-utils/entity repo class-id)]
-    (if (first (:block/_namespace class))        ; has children classes
+    (if (first (:class/_parent class))        ; has children classes
       (d/q
        '[:find [?object ...]
          :in $ % ?parent
          :where
-         (namespace ?parent ?c)
+         (class-parent ?parent ?c)
          (or-join [?object ?c]
           [?object :block/tags ?parent]
           [?object :block/tags ?c])]
        (conn/get-db repo)
-       (:namespace rules/rules)
+       (:class-parent rules/rules)
        class-id)
       (map :db/id (:block/_tags class)))))
 

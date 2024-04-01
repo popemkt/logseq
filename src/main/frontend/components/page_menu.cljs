@@ -20,7 +20,7 @@
             [frontend.handler.file-sync :as file-sync-handler]
             [logseq.common.path :as path]
             [frontend.handler.property.util :as pu]
-            [logseq.db.frontend.property :as db-property]))
+            [logseq.db :as ldb]))
 
 (defn- delete-page!
   [page-name]
@@ -59,7 +59,7 @@
           block? (and page (util/uuid-string? page-name) (not whiteboard?))
           contents? (= page-name "contents")
           properties (:block/properties page)
-          public? (true? (pu/lookup properties :public))
+          public? (true? (pu/lookup properties :logseq.property/public))
           _favorites-updated? (state/sub :favorites/updated?)
           favorited? (page-handler/favorited? page-name)
           developer-mode? (state/sub [:ui/developer-mode?])
@@ -71,7 +71,7 @@
                                     (file-sync-handler/current-graph-sync-on?)
                                     (file-sync-handler/get-current-graph-uuid))
           built-in-property? (and (contains? (:block/type page) "property")
-                                  (contains? db-property/built-in-properties-keys-str page-name))
+                                  (ldb/built-in? (db/get-db repo) page))
           db-based? (config/db-based-graph? repo)]
       (when (and page (not block?))
         (->>

@@ -19,6 +19,7 @@
             [frontend.worker.rtc.db-listener :as rtc-db-listener]
             [frontend.worker.rtc.full-upload-download-graph :as rtc-updown]
             [frontend.worker.rtc.op-mem-layer :as op-mem-layer]
+            [frontend.worker.rtc.snapshot :as rtc-snapshot]
             [frontend.worker.search :as search]
             [frontend.worker.state :as worker-state]
             [frontend.worker.util :as worker-util]
@@ -575,53 +576,79 @@
          :target-user-uuids target-user-uuids
          :target-user-emails target-user-emails)))))
 
-  (rtc-upload-graph
+  (rtc-async-upload-graph
    [this repo token remote-graph-name]
    (let [d (p/deferred)]
      (when-let [conn (worker-state/get-datascript-conn repo)]
        (async/go
          (try
-           (let [state (<? (rtc-core/<init-state repo token false))]
-             (<? (rtc-updown/<upload-graph state repo conn remote-graph-name))
+           (let [state (<? (rtc-core/<init-state token false))
+                 r (<? (rtc-updown/<async-upload-graph state repo conn remote-graph-name))]
              (rtc-db-listener/listen-db-to-generate-ops repo conn)
-             (p/resolve! d :success))
-           (worker-util/post-message :notification
-                                     [[:div
-                                       [:p "Upload graph successfully"]]])
+             (p/resolve! d r))
            (catch :default e
              (worker-util/post-message :notification
                                        [[:div
                                          [:p "upload graph failed"]]
                                         :error])
-             (prn ::download-graph-failed e)
              (p/reject! d e)))))
      d))
 
-  (rtc-download-graph
-   [this repo token graph-uuid]
+  (rtc-request-download-graph
+   [this token graph-uuid]
    (async-util/c->p
     (async/go
-      (let [state (<! (rtc-core/<init-state repo token false))]
-        (try
-          (<? (rtc-updown/<download-graph state repo graph-uuid))
-          (worker-util/post-message :notification
-                                    [[:div
-                                      [:p "download graph successfully"]]])
-          (catch :default e
-            (worker-util/post-message :notification
-                                      [[:div
-                                        [:p "download graph failed"]]
-                                       :error])
-            (prn ::download-graph-failed e)))))))
+      (let [state (or @rtc-core/*state
+                      (<! (rtc-core/<init-state token false)))]
+        (<? (rtc-updown/<request-download-graph state graph-uuid))))))
+
+  (rtc-wait-download-graph-info-ready
+   [this repo token download-info-uuid graph-uuid timeout-ms]
+   (async-util/c->p
+    (async/go
+      (let [state (or @rtc-core/*state
+                      (<! (rtc-core/<init-state token false)))]
+        (ldb/write-transit-str
+         (<? (rtc-updown/<wait-download-info-ready state download-info-uuid graph-uuid timeout-ms)))))))
+
+  (rtc-download-graph-from-s3
+   [this graph-uuid graph-name s3-url]
+   (async-util/c->p
+    (async/go
+      (rtc-updown/<download-graph-from-s3 graph-uuid graph-name s3-url))))
+
+  (rtc-download-info-list
+   [this token graph-uuid]
+   (async-util/c->p
+    (async/go
+      (let [state (or @rtc-core/*state
+                      (<! (rtc-core/<init-state token false)))]
+        (<? (rtc-updown/<download-info-list state graph-uuid))))))
+
+  (rtc-snapshot-graph
+   [this token graph-uuid]
+   (async-util/c->p
+    (async/go
+      (let [state (or @rtc-core/*state
+                      (<! (rtc-core/<init-state token false)))]
+        (<? (rtc-snapshot/<snapshot-graph state graph-uuid))))))
+
+  (rtc-snapshot-list
+   [this token graph-uuid]
+   (async-util/c->p
+    (async/go
+      (let [state (or @rtc-core/*state
+                      (<! (rtc-core/<init-state token false)))]
+        (<? (rtc-snapshot/<snapshot-list state graph-uuid))))))
 
   (rtc-push-pending-ops
    [_this]
    (async/put! (:force-push-client-ops-chan @rtc-core/*state) true))
 
   (rtc-get-graphs
-   [_this repo token]
+   [_this token]
    (async-util/c->p
-    (rtc-core/<get-graphs repo token)))
+    (rtc-core/<get-graphs token)))
 
   (rtc-delete-graph
    [_this token graph-uuid]

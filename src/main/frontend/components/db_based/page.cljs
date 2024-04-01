@@ -65,12 +65,12 @@
   [page]
   [:div.grid.grid-cols-5.gap-1.items-center
    [:label.col-span-2 "Icon:"]
-   (let [icon-value (pu/get-block-property-value page :icon)]
+   (let [icon-value (pu/get-block-property-value page :logseq.property/icon)]
      [:div.col-span-3.flex.flex-row.items-center.gap-2
       (icon-component/icon-picker icon-value
                                   {:disabled? config/publishing?
                                    :on-chosen (fn [_e icon]
-                                                (let [icon-property-id (db-pu/get-built-in-property-uuid :icon)]
+                                                (let [icon-property-id (db-pu/get-built-in-property-uuid :logseq.property/icon)]
                                                   (db-property-handler/<update-property!
                                                    (state/get-current-repo)
                                                    (:block/uuid page)
@@ -80,13 +80,13 @@
                                         (db-property-handler/remove-block-property!
                                          (state/get-current-repo)
                                          (:block/uuid page)
-                                         (db-pu/get-built-in-property-uuid :icon)))
+                                         (db-pu/get-built-in-property-uuid :logseq.property/icon)))
                             :title "Delete this icon"}
-        (ui/icon "X")])])])
+         (ui/icon "X")])])])
 
 (rum/defc tags
   [page]
-  (let [tags-property (pu/get-property :tags)]
+  (let [tags-property (db/entity :logseq.property/tags)]
     (pv/property-value page tags-property
                        (map :block/uuid (:block/tags page))
                        {:page-cp (fn [config page]
@@ -119,7 +119,8 @@
        [:<>
         (when (= mode :class)
           (class-component/configure page {:show-title? false}))
-        (when-not config/publishing? (tags-row page))
+        (when-not (or config/publishing? class?)
+          (tags-row page))
         (when-not config/publishing? (icon-row page))
         [:h2 "Properties: "]
         (page-properties page (assoc page-opts :mode mode))])]))
@@ -185,13 +186,12 @@
             true)
       [:div.page-info
        {:class (util/classnames [{:is-collapsed collapsed?}])}
-       [:div.py-2 {:class (if (or @*hover? (not collapsed?))
-                            "border rounded"
-                            "border rounded border-transparent")}
+       [:div.page-info-inner
         [:div.info-title.cursor
          {:on-mouse-over #(reset! *hover? true)
           :on-mouse-leave #(when-not (state/dropdown-opened?)
                              (reset! *hover? false))
+          :on-pointer-up #(reset! *hover? false)
           :on-click (if config/publishing?
                       (fn [_]
                         (when (seq (set/intersection #{"class" "property"} types))
@@ -223,11 +223,12 @@
                    [:span.opacity-80.flex.items-center
                     (ui/icon "adjustments-horizontal" {:size 16})]
                    (ui/icon "x")))])])]
+
         (when show-info?
           (if collapsed?
             (when (or (seq (:block/properties page))
                       (and class? (seq (:properties (:block/schema page)))))
-              [:div.px-4
+              [:div.properties-wrap
                (page-properties page {:mode (if class? :class :page)})])
-            [:div.pt-2.px-4
+            [:div.pt-2.configure-wrap
              (page-configure page *mode)]))]])))

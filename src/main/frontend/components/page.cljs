@@ -11,6 +11,7 @@
             [frontend.components.scheduled-deadlines :as scheduled]
             [frontend.components.icon :as icon-component]
             [frontend.components.db-based.page :as db-page]
+            [frontend.components.class :as class-component]
             [frontend.handler.property.util :as pu]
             [frontend.handler.db-based.property :as db-property-handler]
             [frontend.handler.db-based.property.util :as db-pu]
@@ -313,7 +314,7 @@
           page (db/sub-block (:db/id page))
           title (:block/original-name page)]
       (when title
-        (let [icon (pu/lookup (:block/properties page) :icon)
+        (let [icon (pu/lookup (:block/properties page) :logseq.property/icon)
               *title-value (get state ::title-value)
               *edit? (get state ::edit?)
               *input-value (get state ::input-value)
@@ -337,7 +338,7 @@
               (if (and (map? icon) db-based?)
                 (icon-component/icon-picker icon
                                             {:on-chosen (fn [_e icon]
-                                                          (let [icon-property-id (db-pu/get-built-in-property-uuid :icon)]
+                                                          (let [icon-property-id (db-pu/get-built-in-property-uuid :logseq.property/icon)]
                                                             (db-property-handler/<update-property!
                                                              repo
                                                              (:block/uuid page)
@@ -513,8 +514,7 @@
 
                   (cond
                     (and db-based? (not block?))
-                    [:div.pb-2
-                     (db-page/page-info page (::hover-title? state))]
+                    (db-page/page-info page (::hover-title? state))
 
                     (and (not db-based?) (not block?))
                     [:div.pb-2])
@@ -555,6 +555,9 @@
                     (rum/with-key
                       (reference/references route-page-name)
                       (str route-page-name "-refs"))]))
+
+               (when (contains? (:block/type page) "class")
+                 (class-component/class-children page))
 
                (when-not block-or-whiteboard?
                  (when (not journal?)
@@ -1319,7 +1322,7 @@
                   {:on-change (fn []
                                 (swap! *checks update idx not))})]
                [:td.icon.w-4.p-0.overflow-hidden
-                (when-let [icon (pu/get-block-property-value page :icon)]
+                (when-let [icon (pu/get-block-property-value page :logseq.property/icon)]
                   icon)]
                [:td.name [:a {:on-click (fn [e]
                                           (.preventDefault e)

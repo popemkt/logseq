@@ -270,10 +270,11 @@
                  :transform-fn (fn [results input]
                                  (if-let [[_ new-page class-input] (and (empty? results) (re-find #"(.*)#(.*)$" input))]
                                    (let [repo (state/get-current-repo)
-                                         class-names (map #(:block/original-name (db/entity repo [:block/uuid %])) string-classes)
-                                         descendent-classes (->> class-names
-                                                                 (mapcat #(db/get-namespace-pages repo %))
-                                                                 (map :block/original-name))]
+                                         class-ents (map #(db/entity repo [:block/uuid %]) string-classes)
+                                         class-names (map :block/original-name class-ents)
+                                         descendent-classes (->> class-ents
+                                                                 (mapcat #(model/get-class-children repo (:db/id %)))
+                                                                 (map #(:block/original-name (db/entity repo %))))]
                                      (->> (concat class-names descendent-classes)
                                           (filter #(string/includes? % class-input))
                                           (mapv #(hash-map :value (str new-page "#" %)))))
@@ -414,7 +415,7 @@
             items (if closed-values?
                     (keep (fn [id]
                             (when-let [block (when id (db/entity [:block/uuid id]))]
-                              (let [icon (pu/get-block-property-value block :icon)
+                              (let [icon (pu/get-block-property-value block :logseq.property/icon)
                                     value (db-property/closed-value-name block)]
                                 {:label (if icon
                                           [:div.flex.flex-row.gap-2
@@ -552,7 +553,7 @@
       [:div.text-sm.opacity-70 "loading"]
       (when-let [block (db/sub-block (:db/id (db/entity [:block/uuid value])))]
         (let [value' (get-in block [:block/schema :value])
-              icon (pu/get-block-property-value block :icon)]
+              icon (pu/get-block-property-value block :logseq.property/icon)]
           (cond
             (:block/name block)
             (page-cp {:disable-preview? true
@@ -605,7 +606,9 @@
      {:open open?}
      (shui/dropdown-menu-trigger
       {:class "jtrigger flex flex-1 w-full"
-       :on-click #(set-open! (not open?))
+       :on-click (if config/publishing?
+                   (constantly nil)
+                   #(set-open! (not open?)))
        :on-key-down (fn [^js e]
                       (case (util/ekey e)
                         (" " "Enter")
