@@ -675,12 +675,15 @@
    (transit/write transit-w (rtc-core/get-block-update-log (uuid block-uuid))))
 
   (undo
-   [_this repo]
-   (undo-redo/undo repo)
+   [_this repo page-block-uuid-str]
+   (when-let [conn (worker-state/get-datascript-conn repo)]
+     (undo-redo/undo repo (uuid page-block-uuid-str) conn))
    nil)
+
   (redo
-   [_this repo]
-   (undo-redo/redo repo))
+   [_this repo page-block-uuid-str]
+   (when-let [conn (worker-state/get-datascript-conn repo)]
+     (undo-redo/redo repo (uuid page-block-uuid-str) conn)))
 
   (keep-alive
    [_this]

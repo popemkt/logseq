@@ -450,7 +450,7 @@
                  page-name' (get-sanity-page-name state page-name)]
              (db-async/<get-block (state/get-current-repo) page-name')
              (assoc state ::page-name page-name')))}
-  [state {:keys [repo page-name preview? sidebar?] :as option}]
+  [state {:keys [repo page-name config preview? sidebar? linked-refs? unlinked-refs?] :as option}]
   (let [loading? (when (::page-name state)  (state/sub-async-query-loading (::page-name state)))]
     (when-let [path-page-name (get-path-page-name state page-name)]
       (let [current-repo (state/sub :git/current-repo)
@@ -521,8 +521,8 @@
 
                   [:div
                    (when (and block? (not sidebar?) (not whiteboard?))
-                     (let [config {:id "block-parent"
-                                   :block? true}]
+                     (let [config (merge config {:id "block-parent"
+                                                 :block? true})]
                        [:div.mb-4
                         (component-block/breadcrumb config repo block-id {:level-limit 3})]))
 
@@ -537,7 +537,7 @@
                      (let [_ (and block? page (reset! *current-block-page (:block/name (:block/page page))))
                            _ (when (and block? (not page))
                                (route-handler/redirect-to-page! @*current-block-page))]
-                       (page-blocks-cp repo page {:sidebar? sidebar? :whiteboard? whiteboard?})))]])
+                       (page-blocks-cp repo page (merge config {:sidebar? sidebar? :whiteboard? whiteboard?}))))]])
 
                (when today?
                  (today-queries repo today? sidebar?))
@@ -550,7 +550,7 @@
 
                ;; referenced blocks
                (when-not block-or-whiteboard?
-                 (when page
+                 (when (and page (not (false? linked-refs?)))
                    [:div {:key "page-references"}
                     (rum/with-key
                       (reference/references route-page-name)
@@ -563,7 +563,8 @@
                  (when (not journal?)
                    (hierarchy/structures route-page-name)))
 
-               (when-not (or block-or-whiteboard? sidebar? home?)
+               (when (and (not (false? unlinked-refs?))
+                       (not (or block-or-whiteboard? sidebar? home?)))
                  [:div {:key "page-unlinked-references"}
                   (reference/unlinked-references route-page-name)])])))))))
 

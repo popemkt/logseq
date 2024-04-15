@@ -1,12 +1,11 @@
 (ns ^:no-doc frontend.handler.history
-  (:require [frontend.config :as config]
-            [frontend.db :as db]
+  (:require [frontend.db :as db]
             [frontend.db.transact :as db-transact]
             [frontend.handler.editor :as editor]
             [frontend.handler.route :as route-handler]
-            [frontend.modules.editor.undo-redo :as undo-redo]
             [frontend.state :as state]
             [frontend.util :as util]
+            [frontend.util.page :as page-util]
             [goog.dom :as gdom]
             [promesa.core :as p]))
 
@@ -30,40 +29,47 @@
 
 (defn restore-app-state!
   [state]
-  (when-not (:history/page-only-mode? @state/state)
-   (let [route-match (:route-match state)
-         current-route (:route-match @state/state)
-         prev-route-data (get-route-data route-match)
-         current-route-data (get-route-data current-route)]
-     (when (and (not= prev-route-data current-route-data)
-                prev-route-data)
-       (route-handler/redirect! prev-route-data))
-     (swap! state/state merge state))))
+  (let [route-match (:route-match state)
+        current-route (:route-match @state/state)
+        prev-route-data (get-route-data route-match)
+        current-route-data (get-route-data current-route)]
+    (when (and (not= prev-route-data current-route-data)
+               prev-route-data)
+      (route-handler/redirect! prev-route-data))
+    (swap! state/state merge state)))
 
-(defn undo!
-  [e]
-  (when-let [repo (state/get-current-repo)]
-    (when (db-transact/request-finished?)
-      (util/stop e)
-      (p/do!
-       (state/set-state! [:editor/last-replace-ref-content-tx repo] nil)
-       (editor/save-current-block!)
-       (state/clear-editor-action!)
-       (state/set-block-op-type! nil)
-       (if (config/db-based-graph? repo)
-         (let [^js worker @state/*db-worker]
-           (.undo worker repo))
-         (let [cursor-state (undo-redo/undo)]
-           (state/set-state! :ui/restore-cursor-state (select-keys cursor-state [:editor-cursor :app-state]))))))))
+(let [*last-request (atom nil)]
+  (defn undo!
+    [e]
+    (p/do!
+     @*last-request
+     (when-let [repo (state/get-current-repo)]
+       (when-let [current-page-uuid-str (some->> (page-util/get-latest-edit-page-id)
+                                                 db/entity
+                                                 :block/uuid
+                                                 str)]
+         (when (db-transact/request-finished?)
+           (util/stop e)
+           (p/do!
+            (state/set-state! [:editor/last-replace-ref-content-tx repo] nil)
+            (editor/save-current-block!)
+            (state/clear-editor-action!)
+            (state/set-block-op-type! nil)
+            (let [^js worker @state/*db-worker]
+              (reset! *last-request (.undo worker repo current-page-uuid-str))))))))))
 
-(defn redo!
-  [e]
-  (when-let [repo (state/get-current-repo)]
-    (when (db-transact/request-finished?)
-      (util/stop e)
-      (state/clear-editor-action!)
-      (if (config/db-based-graph? repo)
-        (let [^js worker @state/*db-worker]
-          (.redo worker repo))
-        (let [cursor-state (undo-redo/redo)]
-          (state/set-state! :ui/restore-cursor-state (select-keys cursor-state [:editor-cursor :app-state])))))))
+(let [*last-request (atom nil)]
+  (defn redo!
+    [e]
+    (p/do!
+     @*last-request
+     (when-let [repo (state/get-current-repo)]
+       (when-let [current-page-uuid-str (some->> (page-util/get-latest-edit-page-id)
+                                                 db/entity
+                                                 :block/uuid
+                                                 str)]
+         (when (db-transact/request-finished?)
+           (util/stop e)
+           (state/clear-editor-action!)
+           (let [^js worker @state/*db-worker]
+             (reset! *last-request (.redo worker repo current-page-uuid-str)))))))))

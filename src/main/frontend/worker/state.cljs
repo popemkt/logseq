@@ -1,7 +1,14 @@
 (ns frontend.worker.state
   "State hub for worker"
   (:require [logseq.common.util :as common-util]
-            [logseq.common.config :as common-config]))
+            [logseq.common.config :as common-config]
+            [frontend.schema-register :include-macros true :as sr]))
+
+(sr/defkeyword :undo/repo->pege-block-uuid->undo-ops
+  "{repo {<page-block-uuid> [op1 op2 ...]}}")
+
+(sr/defkeyword :undo/repo->pege-block-uuid->redo-ops
+  "{repo {<page-block-uuid> [op1 op2 ...]}}")
 
 (defonce *state (atom {:worker/object nil
 
@@ -11,12 +18,14 @@
                        ;; FIXME: this name :config is too general
                        :config {}
                        :git/current-repo nil
-                       :rtc/batch-processing? false
-                       :rtc/remote-batch-txs nil
+
+                       :batch/txs []
+                       :batch/db-before nil
+
                        :rtc/downloading-graph? false
 
-                       :undo/repo->undo-stack (atom {})
-                       :undo/repo->redo-stack (atom {})}))
+                       :undo/repo->pege-block-uuid->undo-ops (atom {})
+                       :undo/repo->pege-block-uuid->redo-ops (atom {})}))
 
 (defonce *rtc-ws-url (atom nil))
 
@@ -98,24 +107,3 @@
 (defn rtc-downloading-graph?
   []
   (:rtc/downloading-graph? @*state))
-
-(defn start-batch-tx-mode!
-  []
-  (swap! *state assoc :rtc/batch-processing? true))
-
-(defn rtc-batch-processing?
-  []
-  (:rtc/batch-processing? @*state))
-
-(defn get-batch-txs
-  []
-  (:rtc/remote-batch-txs @*state))
-
-(defn conj-batch-txs!
-  [tx-data]
-  (swap! *state update :rtc/remote-batch-txs (fn [data] (into data tx-data))))
-
-(defn exit-batch-tx-mode!
-  []
-  (swap! *state assoc :rtc/batch-processing? false)
-  (swap! *state assoc :rtc/remote-batch-txs nil))

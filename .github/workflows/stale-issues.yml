@@ -30,7 +30,7 @@ jobs:
           stale-issue-label: ':status/automatic-stale'
           close-issue-label: ':status/automatic-closing'
           # trunk-ignore(yamllint/line-length)
-          exempt-issue-labels: ':status/hold, :status/WIP, :type/enhancement, type/can-be-reproduced, priority-A'
+          exempt-issue-labels: 'hold, WIP, :type/enhancement, can-be-reproduced, priority-A, :type/bug, :type/feature-request'
           remove-stale-when-updated: true
           stale-issue-message: |
             Hi There! 👋
@@ -47,13 +47,6 @@ jobs:
               - **Docs**: https://docs.logseq.com
 
             Thanks for your contributions to Logseq! If you have any other [**issues**](https://github.com/logseq/logseq/issues/new/choose) or [**feature requests**](https://discuss.logseq.com/c/feedback/feature-requests/), please don't hesitate to [let us know](https://github.com/logseq/logseq/issues/new/choose). We always welcome pull requests too!
-
-      - name: 'Print outputs'
-        run: |
-          for key in steps.stale_issues.outputs
-            do
-              printf '%s: %s\n' "${key}" "${steps.stale_issues.outputs[key]}"
-            done
 
       - name: '🧹 Close stale awaiting response issues'
         id: awaiting_issues
@@ -83,9 +76,4 @@ jobs:
 
             Thanks for your contributions to Logseq! If you have any other [**issues**](https://github.com/logseq/logseq/issues/new/choose) or [**feature requests**](https://discuss.logseq.com/c/feedback/feature-requests/), please don't hesitate to [let us know](https://github.com/logseq/logseq/issues/new/choose). We always welcome pull requests too!
 
-      - name: 'Print outputs'
-        run: |
-          for key in steps.awaiting_issues.outputs
-            do
-              printf '%s: %s\n' "${key}" "${steps.awaiting_issues.outputs[key]}"
-            done
+

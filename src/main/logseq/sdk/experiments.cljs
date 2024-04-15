@@ -2,13 +2,27 @@
   (:require [frontend.state :as state]
             [frontend.components.page :as page]
             [frontend.util :as util]
+            [logseq.sdk.utils :as sdk-util]
+            [camel-snake-kebab.core :as csk]
+            [goog.object :as gobj]
             [frontend.handler.plugin :as plugin-handler]))
 
 (defn ^:export cp_page_editor
   [^js props]
-  (let [p (some-> props (aget "page"))]
-    (when-let [e (page/get-page-entity p)]
-      (page/page-blocks-cp (state/get-current-repo) e {}))))
+  (let [props1 (sdk-util/jsx->clj props)
+        page-name (some-> props1 :page)
+        linked-refs? (some-> props1 :include-linked-refs)
+        unlinked-refs? (some-> props1 :include-unlinked-refs)
+        config (some-> props1 (dissoc :page :include-linked-refs :include-unlinked-refs))]
+    (when-let [_entity (page/get-page-entity page-name)]
+      (page/page
+        {:repo (state/get-current-repo)
+         :page-name page-name
+         :preview? false
+         :sidebar? false
+         :linked-refs? (not (false? linked-refs?))
+         :unlinked-refs? (not (false? unlinked-refs?))
+         :config config}))))
 
 (defn ^:export register_fenced_code_renderer
   [pid type ^js opts]
@@ -34,7 +48,7 @@
   (when-let [^js _pl (plugin-handler/get-plugin-inst pid)]
     (plugin-handler/register-daemon-renderer
       (keyword pid) key (reduce #(assoc %1 %2 (aget opts (name %2))) {}
-                           [:before :subs :render]))))
+                          [:before :subs :render]))))
 
 (defn ^:export register_extensions_enhancer
   [pid type enhancer]

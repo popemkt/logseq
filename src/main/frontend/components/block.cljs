@@ -541,7 +541,8 @@
         (state/pub-event! [:page/create page-name-in-block])
 
         :else
-        (route-handler/redirect-to-page! redirect-page-name))))
+        (-> (or (:on-redirect-to-page config) route-handler/redirect-to-page!)
+          (apply [redirect-page-name])))))
   (when (and contents-page?
              (util/mobile?)
              (state/get-left-sidebar-open?))
@@ -1735,7 +1736,7 @@
   (reset! *dragging-block block))
 
 (defn- bullet-on-click
-  [e block uuid]
+  [e block uuid {:keys [on-redirect-to-page]}]
   (cond
     (pu/shape-block? block)
     (route-handler/redirect-to-whiteboard! (get-in block [:block/page :block/name]) {:block-id uuid})
@@ -1755,7 +1756,9 @@
         (util/stop e))
 
     :else
-    (when uuid (route-handler/redirect-to-page! uuid))))
+    (when uuid
+      (-> (or on-redirect-to-page route-handler/redirect-to-page!)
+        (apply [(str uuid)])))))
 
 (declare block-list)
 (rum/defc block-children < rum/reactive
@@ -1814,16 +1817,19 @@
                        (state/toggle-collapsed-block! uuid)
                        (if collapsed?
                          (editor-handler/expand-block! uuid)
-                         (editor-handler/collapse-block! uuid))))}
+                         (editor-handler/collapse-block! uuid)))
+                     ;; debug config context
+                     (when (and (state/developer-mode?) (.-metaKey event))
+                       (js/console.debug "[block config]==" config)))}
         [:span {:class (if (or (and control-show?
-                                    (or collapsed?
-                                        (editor-handler/collapsable? uuid {:semantic? true})))
-                               (and collapsed? (or order-list? config/publishing?)))
+                                 (or collapsed?
+                                   (editor-handler/collapsable? uuid {:semantic? true})))
+                             (and collapsed? (or order-list? config/publishing?)))
                          "control-show cursor-pointer"
                          "control-hide")}
          (ui/rotating-arrow collapsed?)]])
 
-     (let [bullet [:a.bullet-link-wrap {:on-click #(bullet-on-click % block uuid)}
+     (let [bullet [:a.bullet-link-wrap {:on-click #(bullet-on-click % block uuid config)}
                    [:span.bullet-container.cursor
                     {:id (str "dot-" uuid)
                      :draggable true
@@ -2545,9 +2551,12 @@
                                                    (p/do!
                                                     (state/set-editor-op! :escape)
                                                     (editor-handler/save-block! (editor-handler/get-state) value)
-                                                    (js/setTimeout #(editor-handler/escape-editing select?) 10))))}
-                                     edit-input-id
-                                     config))]
+                                                    (js/setTimeout (fn []
+                                                                     (editor-handler/escape-editing select?)
+                                                                     (some-> config :on-escape-editing
+                                                                       (apply [(str uuid) (= event :esc)]))) 10))))}
+                           edit-input-id
+                           config))]
           [:div.flex.flex-1.flex-row.gap-1.items-start
            editor-cp
            (when (and (seq (:block/tags block)) db-based?)
@@ -2559,8 +2568,8 @@
           [:div.flex.flex-row
            [:div.flex-1.w-full {:style {:display (if (:slide? config) "block" "flex")}}
             (ui/catch-error
-             (ui/block-error "Block Render Error:"
-                             {:content (:block/content block)
+              (ui/block-error "Block Render Error:"
+                {:content (:block/content block)
                               :section-attrs
                               {:on-click #(let [content (or (:block/original-name block)
                                                             (:block/content block))]
@@ -2643,7 +2652,9 @@
                (if (:block/name block) :page :block)]))
 
            :else
-           (route-handler/redirect-to-page! (:block/uuid block))))}
+           (when-let [uuid (:block/uuid block)]
+             (-> (or (:on-redirect-to-page config) route-handler/redirect-to-page!)
+               (apply [(str uuid)])))))}
    label])
 
 (rum/defc breadcrumb-separator
@@ -2653,13 +2664,13 @@
 
 ;; "block-id - uuid of the target block of breadcrumb. page uuid is also acceptable"
 (rum/defc breadcrumb < rum/reactive
-  {:init (fn [state]
-           (let [args (:rum/args state)
-                 block-id (nth args 2)
-                 depth (:level-limit (last args))]
-             (p/let [id (:db/id (db/entity [:block/uuid block-id]))]
-               (when id (db-async/<get-block-parents (state/get-current-repo) id depth)))
-             state))}
+                       {:init (fn [state]
+                                (let [args (:rum/args state)
+                                      block-id (nth args 2)
+                                      depth (:level-limit (last args))]
+                                  (p/let [id (:db/id (db/entity [:block/uuid block-id]))]
+                                    (when id (db-async/<get-block-parents (state/get-current-repo) id depth)))
+                                  state))}
   [config repo block-id {:keys [show-page? indent? end-separator? level-limit _navigating-block]
                          :or {show-page? true
                               level-limit 3}
