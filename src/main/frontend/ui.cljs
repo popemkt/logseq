@@ -7,7 +7,6 @@
             ["react-tippy" :as react-tippy]
             ["react-transition-group" :refer [CSSTransition TransitionGroup]]
             ["@emoji-mart/data" :as emoji-data]
-            ;; ["@emoji-mart/react" :as Picker]
             ["emoji-mart" :as emoji-mart]
             [cljs-bean.core :as bean]
             [clojure.string :as string]
@@ -27,17 +26,16 @@
             [frontend.rum :as r]
             [frontend.state :as state]
             [frontend.storage :as storage]
-            [frontend.ui.date-picker]
             [frontend.util :as util]
             [frontend.util.cursor :as cursor]
             [goog.dom :as gdom]
             [goog.functions :refer [debounce]]
             [goog.object :as gobj]
             [lambdaisland.glogi :as log]
+            [logseq.shui.icon.v2 :as shui.icon.v2]
             [medley.core :as medley]
             [promesa.core :as p]
             [rum.core :as rum]
-            [logseq.shui.core :as shui-core]
             [logseq.shui.ui :as shui]))
 
 (declare icon)
@@ -196,7 +194,7 @@
                        (string/split #" "))
                    sequence)]
     [:span.keyboard-shortcut
-     (shui-core/shortcut sequence opts)]))
+     (shui/shortcut sequence opts)]))
 
 (rum/defc menu-link
   [{:keys [only-child? no-padding? class shortcut] :as options} child]
@@ -562,15 +560,16 @@
                    :on-mouse-move  #(reset! *current-idx idx)}
                   (let [chosen? (= @*current-idx idx)]
                     (menu-link
-                     {:id            (str "ac-" idx)
-                      :tab-index     "0"
-                      :class         (when chosen? "chosen")
-                      :on-pointer-down (fn [e]
-                                       (util/stop e)
-                                       (if (and (gobj/get e "shiftKey") on-shift-chosen)
-                                         (on-shift-chosen item)
-                                         (on-chosen item e)))}
-                     (if item-render (item-render item chosen?) item)))]]
+                      {:id (str "ac-" idx)
+                       :tab-index "0"
+                       :class (when chosen? "chosen")
+                       :on-pointer-down #(util/stop %)
+                       :on-click (fn [e]
+                                   (util/stop e)
+                                   (if (and (gobj/get e "shiftKey") on-shift-chosen)
+                                     (on-shift-chosen item)
+                                     (on-chosen item e)))}
+                      (if item-render (item-render item chosen?) item)))]]
 
              (if get-group-name
                (if-let [group-name (get-group-name item)]
@@ -582,8 +581,6 @@
                item-cp))])]
        (when empty-placeholder
          empty-placeholder))]))
-
-(def datepicker frontend.ui.date-picker/date-picker)
 
 (defn toggle
   ([on? on-click] (toggle on? on-click false))
@@ -988,7 +985,7 @@
                     :popperOptions {:modifiers {:flip {:enabled (not fixed-position?)}
                                                 :hide {:enabled false}
                                                 :preventOverflow {:enabled false}}}
-                    :onShow #(when-not (or (some? @state/*editor-editing-ref)
+                    :onShow #(when-not (or (state/editing?)
                                            @(:ui/scrolling? @state/state))
                                (reset! *mounted? true))
                     :onHide #(reset! *mounted? false)}
@@ -1036,7 +1033,7 @@
              :options               {:theme (when (= (state/sub :ui/theme) "dark") "dark")}
              :on-tweet-load-success #(reset! *loading? false)})]]))
 
-(def icon shui-core/icon)
+(def icon shui.icon.v2/root)
 
 (rum/defc button-inner
   [text & {:keys [theme background variant href size class intent small? icon icon-props disabled? button-props]
@@ -1158,7 +1155,8 @@
                                      :rootMargin (str root-margin "px")
                                      :triggerOnce trigger-once?
                                      :onChange (fn [in-view? _entry]
-                                                 (set-visible! in-view?))})
+                                                 (when-not (= in-view? visible?)
+                                                   (set-visible! in-view?)))})
          ref (.-ref inViewState)]
      (lazy-visible-inner visible? content-fn ref fade-in?))))
 

@@ -8,7 +8,8 @@
             [frontend.state :as state]
             [frontend.util.cursor :as cursor]
             [goog.dom :as gdom]
-            [frontend.util :as util]))
+            [frontend.util :as util]
+            [logseq.db :as ldb]))
 
 (use-fixtures :each test-helper/start-and-destroy-db)
 
@@ -248,7 +249,8 @@
     (test-helper/load-test-files [{:file/path "foo.md"
                                    :file/content "# foo"}])
     (let [repo test-helper/test-db
-          block-uuid (:block/uuid (model/get-block-by-page-name-and-block-route-name repo "foo" "foo"))]
+          page-uuid (:block/uuid (db/get-page "foo"))
+          block-uuid (:block/uuid (model/get-block-by-page-name-and-block-route-name repo (str page-uuid) "foo"))]
       (editor/save-block! repo block-uuid "# bar")
       (is (= "# bar" (:block/content (model/query-block-by-uuid block-uuid))))
 
@@ -260,8 +262,8 @@
 
 (defn- delete-block
   [db block {:keys [embed?]}]
-  (let [sibling-block (d/entity db (get-in block [:block/left :db/id]))
-        first-block (d/entity db (get-in sibling-block [:block/left :db/id]))
+  (let [sibling-block (ldb/get-left-sibling (d/entity db (:db/id block)))
+        first-block (ldb/get-left-sibling sibling-block)
         block-dom-id "ls-block-block-to-delete"]
     (with-redefs [editor/get-state (constantly {:block-id (:block/uuid block)
                                                 :block-parent-id block-dom-id
@@ -284,7 +286,7 @@
                                                              :block-uuid (:block/uuid sibling-block)}
                                                             {:id block-dom-id
                                                              :block-uuid (:block/uuid block)}]))]
-      (editor/delete-block! test-helper/test-db false))))
+      (editor/delete-block! test-helper/test-db))))
 
 (deftest delete-block!
   (testing "backspace deletes empty block"
@@ -295,7 +297,9 @@
 -"}])
     (let [conn (db/get-db test-helper/test-db false)
           block (->> (d/q '[:find (pull ?b [*])
-                            :where [?b :block/content ""] [?b :block/page [:block/name "page1"]]]
+                            :where [?b :block/content ""]
+                                   [?p :block/name "page1"]
+                                   [?b :block/page ?p]]
                           @conn)
                      ffirst)
           _ (delete-block @conn block {})
@@ -316,7 +320,9 @@
 -"}])
     (let [conn (db/get-db test-helper/test-db false)
           block (->> (d/q '[:find (pull ?b [*])
-                            :where [?b :block/content ""] [?b :block/page [:block/name "page1"]]]
+                            :where [?b :block/content ""]
+                                   [?p :block/name "page1"]
+                                   [?b :block/page ?p]]
                           @conn)
                      ffirst)
           _ (delete-block @conn block {:embed? true})

@@ -55,9 +55,7 @@
 }
 
 #main-content-container {
-  @apply p-4 sm:px-8;
-
-  font-size: 1em;
+  @apply py-4 sm:pl-8 sm:pr-4;
 }
 
 #main-content-container[data-is-margin-less-pages=true] {
@@ -531,7 +529,7 @@
 }
 
 .ui__dialog-content[label=app-settings] {
-  @apply w-auto md:max-w-4xl overflow-hidden;
+  @apply w-auto md:max-w-5xl overflow-hidden;
 
   .settings-modal {
     @apply -mx-6 -mt-6 -mb-6 rounded-xl;
@@ -745,10 +743,6 @@
       }
     }
   }
-
-  .page-hierarchy {
-    @apply pl-[28px];
-  }
 }
 
 .cp__sidebar-main-content[data-is-full-width='true'] {
@@ -818,4 +812,8 @@ html[data-theme='dark'] {
       background-color: var(--lx-gray-03, var(--ls-secondary-background-color));
     }
   }
+}
+
+.blocks-selection-mode .page-title, .blocks-selection-mode .block-content-inner, .blocks-selection-mode .block-body, .blocks-selection-mode .ls-properties-area {
+    user-select: none;
 }

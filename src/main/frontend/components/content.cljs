@@ -1,9 +1,7 @@
 (ns frontend.components.content
-  (:require [cljs-bean.core :as bean]
-            [cljs-time.coerce :as tc]
+  (:require [cljs-time.coerce :as tc]
             [cljs.pprint :as pp]
             [clojure.string :as string]
-            [cognitect.transit :as transit]
             [dommy.core :as d]
             [frontend.commands :as commands]
             [frontend.components.editor :as editor]
@@ -23,6 +21,7 @@
             [frontend.persist-db.browser :as db-browser]
             [frontend.state :as state]
             [frontend.ui :as ui]
+            [logseq.shui.ui :as shui]
             [frontend.util :as util]
             [frontend.util.url :as url-util]
             [goog.dom :as gdom]
@@ -30,89 +29,98 @@
             [logseq.common.util :as common-util]
             [logseq.common.util.block-ref :as block-ref]
             [promesa.core :as p]
-            [rum.core :as rum]))
-
-(defonce transit-r (transit/reader :json))
+            [rum.core :as rum]
+            [logseq.db :as ldb]))
 
 ;; TODO i18n support
 
 (rum/defc custom-context-menu-content
   []
   (let [repo (state/get-current-repo)]
-    [:.menu-links-wrapper
-     (ui/menu-background-color #(property-handler/batch-set-block-property! repo (state/get-selection-block-ids) :background-color %)
-                               #(property-handler/batch-remove-block-property! repo (state/get-selection-block-ids) :background-color))
-
+    [:<>
+     (ui/menu-background-color #(property-handler/batch-set-block-property! repo
+                                                                            (state/get-selection-block-ids)
+                                                                            (pu/get-pid :logseq.property/background-color)
+                                                                            %)
+                               #(property-handler/batch-remove-block-property! repo
+                                                                               (state/get-selection-block-ids)
+                                                                               (pu/get-pid :logseq.property/background-color)))
      (ui/menu-heading #(editor-handler/batch-set-heading! (state/get-selection-block-ids) %)
                       #(editor-handler/batch-set-heading! (state/get-selection-block-ids) true)
                       #(editor-handler/batch-remove-heading! (state/get-selection-block-ids)))
 
-     [:hr.menu-separator]
+     (shui/dropdown-menu-separator)
 
-     (ui/menu-link
+     (shui/dropdown-menu-item
       {:key "cut"
-       :on-click #(editor-handler/cut-selection-blocks true)
-       :shortcut (ui/keyboard-shortcut-from-config :editor/cut)}
-      (t :editor/cut))
-     (ui/menu-link
+       :on-click #(editor-handler/cut-selection-blocks true)}
+      (t :editor/cut)
+      (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/cut)))
+
+     (shui/dropdown-menu-item
       {:key "delete"
        :on-click #(do (editor-handler/delete-selection %)
-                      (state/hide-custom-context-menu!))
-       :shortcut (ui/keyboard-shortcut-from-config :editor/delete)}
-      (t :editor/delete-selection))
-     (ui/menu-link
+                      (state/hide-custom-context-menu!))}
+
+      (t :editor/delete-selection)
+      (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/delete)))
+
+     (shui/dropdown-menu-item
       {:key "copy"
-       :on-click editor-handler/copy-selection-blocks
-       :shortcut (ui/keyboard-shortcut-from-config :editor/copy)}
-      (t :editor/copy))
-     (ui/menu-link
+       :on-click editor-handler/copy-selection-blocks}
+      (t :editor/copy)
+      (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/copy)))
+
+     (shui/dropdown-menu-item
       {:key "copy as"
        :on-click (fn [_]
                    (let [block-uuids (editor-handler/get-selected-toplevel-block-uuids)]
                      (state/set-modal!
                       #(export/export-blocks block-uuids {:whiteboard? false}))))}
       (t :content/copy-export-as))
-     (ui/menu-link
+
+     (shui/dropdown-menu-item
       {:key "copy block refs"
        :on-click editor-handler/copy-block-refs}
       (t :content/copy-block-ref))
-     (ui/menu-link
+
+     (shui/dropdown-menu-item
       {:key "copy block embeds"
        :on-click editor-handler/copy-block-embeds}
       (t :content/copy-block-emebed))
 
-     [:hr.menu-separator]
+     (shui/dropdown-menu-separator)
 
      (when (state/enable-flashcards?)
-       (ui/menu-link
+       (shui/dropdown-menu-item
         {:key "Make a Card"
          :on-click #(srs/batch-make-cards!)}
         (t :context-menu/make-a-flashcard)))
 
-     (ui/menu-link
+     (shui/dropdown-menu-item
       {:key "Toggle number list"
        :on-click #(state/pub-event! [:editor/toggle-own-number-list (state/get-selection-block-ids)])}
       (t :context-menu/toggle-number-list))
 
-     (ui/menu-link
+     (shui/dropdown-menu-item
       {:key "cycle todos"
-       :on-click editor-handler/cycle-todos!
-       :shortcut (ui/keyboard-shortcut-from-config :editor/cycle-todo)}
-      (t :editor/cycle-todo))
+       :on-click editor-handler/cycle-todos!}
+      (t :editor/cycle-todo)
+      (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/cycle-todo)))
 
-     [:hr.menu-separator]
+     (shui/dropdown-menu-separator)
 
-     (ui/menu-link
+     (shui/dropdown-menu-item
       {:key "Expand all"
-       :on-click editor-handler/expand-all-selection!
-       :shortcut (ui/keyboard-shortcut-from-config :editor/expand-block-children)}
-      (t :editor/expand-block-children))
+       :on-click editor-handler/expand-all-selection!}
+      (t :editor/expand-block-children)
+      (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/expand-block-children)))
 
-     (ui/menu-link
+     (shui/dropdown-menu-item
       {:key "Collapse all"
-       :on-click editor-handler/collapse-all-selection!
-       :shortcut (ui/keyboard-shortcut-from-config :editor/collapse-block-children)}
-      (t :editor/collapse-block-children))]))
+       :on-click editor-handler/collapse-all-selection!}
+      (t :editor/collapse-block-children)
+      (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/collapse-block-children)))]))
 
 (defonce *template-including-parent? (atom nil))
 
@@ -163,12 +171,14 @@
                                           [:p (t :context-menu/template-exists-warning)]
                                           :error)
                                          (p/do!
-                                           (property-handler/set-block-property! repo block-id :template title)
-                                           (when (false? template-including-parent?)
-                                             (property-handler/set-block-property! repo block-id :template-including-parent false))
-                                           (state/hide-custom-context-menu!))))))))]
-         [:hr.menu-separator]])
-      (ui/menu-link
+                                          (property-handler/set-block-property! repo block-id (pu/get-pid :logseq.property/template) title)
+                                          (when (false? template-including-parent?)
+                                            (property-handler/set-block-property! repo block-id
+                                                                                  (pu/get-pid :logseq.property/template-including-parent)
+                                                                                  false))
+                                          (state/hide-custom-context-menu!))))))))]
+         (shui/dropdown-menu-separator)])
+      (shui/dropdown-menu-item
        {:key "Make a Template"
         :on-click (fn [e]
                     (util/stop e)
@@ -184,33 +194,36 @@
       (let [properties (:block/properties block)
             heading (or (pu/lookup properties :logseq.property/heading)
                         false)]
-        [:.menu-links-wrapper
-         (ui/menu-background-color #(property-handler/set-block-property! repo block-id :background-color %)
-                                   #(property-handler/remove-block-property! repo block-id :background-color))
+        [:<>
+         (ui/menu-background-color #(property-handler/set-block-property! repo block-id
+                                                                          (pu/get-pid :logseq.property/background-color)
+                                                                          %)
+                                   #(property-handler/remove-block-property! repo block-id
+                                                                             (pu/get-pid :logseq.property/background-color)))
 
          (ui/menu-heading heading
                           #(editor-handler/set-heading! block-id %)
                           #(editor-handler/set-heading! block-id true)
                           #(editor-handler/remove-heading! block-id))
 
-         [:hr.menu-separator]
+         (shui/dropdown-menu-separator)
 
-         (ui/menu-link
+         (shui/dropdown-menu-item
           {:key      "Open in sidebar"
            :on-click (fn [_e]
-                       (editor-handler/open-block-in-sidebar! block-id))
-           :shortcut ["⇧+click"]}
-          (t :content/open-in-sidebar))
+                       (editor-handler/open-block-in-sidebar! block-id))}
+          (t :content/open-in-sidebar)
+          (shui/dropdown-menu-shortcut "⇧+click"))
 
-         [:hr.menu-separator]
+         (shui/dropdown-menu-separator)
 
-         (ui/menu-link
+         (shui/dropdown-menu-item
           {:key      "Copy block ref"
            :on-click (fn [_e]
                        (editor-handler/copy-block-ref! block-id block-ref/->block-ref))}
           (t :content/copy-block-ref))
 
-         (ui/menu-link
+         (shui/dropdown-menu-item
           {:key      "Copy block embed"
            :on-click (fn [_e]
                        (editor-handler/copy-block-ref! block-id #(util/format "{{embed ((%s))}}" %)))}
@@ -218,7 +231,7 @@
 
          ;; TODO Logseq protocol mobile support
          (when (util/electron?)
-           (ui/menu-link
+           (shui/dropdown-menu-item
             {:key      "Copy block URL"
              :on-click (fn [_e]
                          (let [current-repo (state/get-current-repo)
@@ -227,157 +240,150 @@
                            (editor-handler/copy-block-ref! block-id tap-f)))}
             (t :content/copy-block-url)))
 
-         (ui/menu-link
+         (shui/dropdown-menu-item
           {:key      "Copy as"
            :on-click (fn [_]
                        (state/set-modal! #(export/export-blocks [block-id] {:whiteboard? false})))}
           (t :content/copy-export-as))
 
-         (ui/menu-link
-          {:key      "Cut"
+         (shui/dropdown-menu-item
+          {:key "Cut"
            :on-click (fn [_e]
-                       (editor-handler/cut-block! block-id))
-           :shortcut (ui/keyboard-shortcut-from-config :editor/cut)}
-          (t :editor/cut))
+                       (editor-handler/cut-block! block-id))}
+          (t :editor/cut)
+          (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/cut)))
 
-         (ui/menu-link
-          {:key      "delete"
-           :on-click #(editor-handler/delete-block-aux! block true)
-           :shortcut (ui/keyboard-shortcut-from-config :editor/delete)}
-          (t :editor/delete-selection))
+         (shui/dropdown-menu-item
+          {:key "delete"
+           :on-click #(editor-handler/delete-block-aux! block)}
+          (t :editor/delete-selection)
+          (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/delete)))
 
-         [:hr.menu-separator]
+         (shui/dropdown-menu-separator)
 
          (when-not db?
            (block-template block-id))
 
          (cond
            (srs/card-block? block)
-           (ui/menu-link
+           (shui/dropdown-menu-item
             {:key      "Preview Card"
              :on-click #(srs/preview (:db/id block))}
             (t :context-menu/preview-flashcard))
            (state/enable-flashcards?)
-           (ui/menu-link
+           (shui/dropdown-menu-item
             {:key      "Make a Card"
              :on-click #(srs/make-block-a-card! block-id)}
             (t :context-menu/make-a-flashcard))
            :else
            nil)
 
-         (ui/menu-link
+         (shui/dropdown-menu-item
           {:key "Toggle number list"
            :on-click #(state/pub-event! [:editor/toggle-own-number-list (state/get-selection-block-ids)])}
           (t :context-menu/toggle-number-list))
 
-         [:hr.menu-separator]
+         (shui/dropdown-menu-separator)
 
-         (ui/menu-link
-          {:key      "Expand all"
+         (shui/dropdown-menu-item
+          {:key "Expand all"
            :on-click (fn [_e]
-                       (editor-handler/expand-all! block-id))
-           :shortcut (ui/keyboard-shortcut-from-config :editor/expand-block-children)}
-          (t :editor/expand-block-children))
+                       (editor-handler/expand-all! block-id))}
+          (t :editor/expand-block-children)
+          (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/expand-block-children)))
 
-         (ui/menu-link
-          {:key      "Collapse all"
+         (shui/dropdown-menu-item
+          {:key "Collapse all"
            :on-click (fn [_e]
-                       (editor-handler/collapse-all! block-id {}))
-           :shortcut (ui/keyboard-shortcut-from-config :editor/collapse-block-children)}
-          (t :editor/collapse-block-children))
+                       (editor-handler/collapse-all! block-id {}))}
+          (t :editor/collapse-block-children)
+          (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/collapse-block-children)))
 
          (when (state/sub [:plugin/simple-commands])
            (when-let [cmds (state/get-plugins-commands-with-type :block-context-menu-item)]
              (for [[_ {:keys [key label] :as cmd} action pid] cmds]
-               (ui/menu-link
+               (shui/dropdown-menu-item
                 {:key      key
                  :on-click #(commands/exec-plugin-simple-command!
                              pid (assoc cmd :uuid block-id) action)}
                 label))))
 
          (when (state/sub [:ui/developer-mode?])
-           (ui/menu-link
-            {:key      "(Dev) Show block data"
-             :on-click (fn []
-                         (dev-common-handler/show-entity-data [:block/uuid block-id]))}
-            (t :dev/show-block-data)))
+           [:<>
+            (shui/dropdown-menu-separator)
+            (shui/dropdown-menu-sub
+             (shui/dropdown-menu-sub-trigger
+              "Developer tools")
 
-         (when (state/sub [:ui/developer-mode?])
-           (ui/menu-link
-            {:key      "(Dev) Show block AST"
-             :on-click (fn []
-                         (let [block (db/pull [:block/uuid block-id])]
-                           (dev-common-handler/show-content-ast (:block/content block) (:block/format block))))}
-            (t :dev/show-block-ast)))
-         (when (state/sub [:ui/developer-mode?])
-           (ui/menu-link
-            {:key "(Dev) Show block content history"
-             :on-click
-             (fn []
-               (let [^object worker @db-browser/*worker]
-                 (p/let [result (.rtc-get-block-content-versions worker block-id)
-                         blocks-versions (bean/->clj result)]
-                   (prn :Dev-show-block-content-history)
-                   (doseq [[block-uuid versions] blocks-versions]
-                     (prn :block-uuid block-uuid)
-                     (pp/print-table [:content :created-at]
-                                     (map (fn [version]
-                                            {:created-at (tc/from-long (* (:created-at version) 1000))
-                                             :content (:value version)})
-                                          versions))))))}
+             (shui/dropdown-menu-sub-content
+              (shui/dropdown-menu-item
+               {:key "(Dev) Show block data"
+                :on-click (fn []
+                            (dev-common-handler/show-entity-data [:block/uuid block-id]))}
+               (t :dev/show-block-data))
+              (shui/dropdown-menu-item
+               {:key "(Dev) Show block AST"
+                :on-click (fn []
+                            (let [block (db/pull [:block/uuid block-id])]
+                              (dev-common-handler/show-content-ast (:block/content block) (:block/format block))))}
+               (t :dev/show-block-ast))
+              (shui/dropdown-menu-item
+               {:key "(Dev) Show block content history"
+                :on-click
+                (fn []
+                  (let [^object worker @db-browser/*worker
+                        token (state/get-auth-id-token)
+                        graph-uuid (ldb/get-graph-rtc-uuid (db/get-db))]
+                    (p/let [result (.rtc-get-block-content-versions2 worker token graph-uuid (str block-id))
+                            blocks-versions (ldb/read-transit-str result)]
+                      (prn :Dev-show-block-content-history)
+                      (doseq [[block-uuid versions] blocks-versions]
+                        (prn :block-uuid block-uuid)
+                        (pp/print-table [:content :created-at]
+                                        (map (fn [version]
+                                               {:created-at (tc/from-long (* (:created-at version) 1000))
+                                                :content (:value version)})
+                                             versions))))))}
 
-            "(Dev) Show block content history"))
-         (when (state/sub [:ui/developer-mode?])
-           (ui/menu-link
-            {:key "(Dev) Show block RTC log"
-             :on-click
-             (fn []
-               (let [^object worker @db-browser/*worker]
-                 (p/let [result (.rtc-get-block-update-log worker (str block-id))
-                         logs (transit/read transit-r result)]
-                   (prn :Dev-show-block-RTC-log block-id)
-                   (apply js/console.log logs))))}
-            "(Dev) Show block RTC log"))]))))
+               "(Dev) Show block content history")))])]))))
 
 (rum/defc block-ref-custom-context-menu-content
   [block block-ref-id]
   (when (and block block-ref-id)
-    [:.menu-links-wrapper
-     (ui/menu-link
+    [:<>
+     (shui/dropdown-menu-item
       {:key "open-in-sidebar"
        :on-click (fn []
                    (state/sidebar-add-block!
                     (state/get-current-repo)
                     block-ref-id
-                    :block-ref))
-       :shortcut ["⇧+click"]}
-      (t :content/open-in-sidebar))
-     (ui/menu-link
+                    :block-ref))}
+      (t :content/open-in-sidebar)
+      (shui/dropdown-menu-shortcut ["⇧+click"]))
+     (shui/dropdown-menu-item
       {:key "copy"
        :on-click (fn [] (editor-handler/copy-current-ref block-ref-id))}
       (t :content/copy-ref))
-     (ui/menu-link
+     (shui/dropdown-menu-item
       {:key "delete"
        :on-click (fn [] (editor-handler/delete-current-ref! block block-ref-id))}
       (t :content/delete-ref))
-     (ui/menu-link
+     (shui/dropdown-menu-item
       {:key "replace-with-text"
        :on-click (fn [] (editor-handler/replace-ref-with-text! block block-ref-id))}
       (t :content/replace-with-text))
-     (ui/menu-link
+     (shui/dropdown-menu-item
       {:key "replace-with-embed"
        :on-click (fn [] (editor-handler/replace-ref-with-embed! block block-ref-id))}
       (t :content/replace-with-embed))]))
 
 (rum/defc page-title-custom-context-menu-content
   [page]
-  (when-not (string/blank? page)
+  (when page
     (let [page-menu-options (page-menu/page-menu page)]
-      [:.menu-links-wrapper
+      [:<>
        (for [{:keys [title options]} page-menu-options]
-         (rum/with-key
-           (ui/menu-link options title)
-           title))])))
+         (shui/dropdown-menu-item options title))])))
 
 ;; TODO: content could be changed
 ;; Also, keyboard bindings should only be activated after

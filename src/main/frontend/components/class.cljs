@@ -37,9 +37,9 @@
                {:on-pointer-down
                 (fn [e]
                   (when (util/meta-key? e)
-                    (if-let [page-name (:block/name (db/entity [:block/uuid (some-> (util/evalue e) uuid)]))]
+                    (if-let [page (db/entity [:block/uuid (some-> (util/evalue e) uuid)])]
                       (do
-                        (route-handler/redirect-to-page! page-name)
+                        (route-handler/redirect-to-page! (:block/uuid page))
                         (.preventDefault e))
                       (js/console.error "No selected option found to navigate to"))))})))
 
@@ -70,36 +70,36 @@
       [:div.property-configure.grid.gap-2
        (when show-title? [:h1.title.mb-4 "Configure class"])
 
-       [:div.grid.grid-cols-5.gap-1.items-center.class-parent
-        [:div.col-span-2 "Parent class:"]
-        (if config/publishing?
-          [:div.col-span-3
-           (if-let [parent-class (some-> (:db/id (:class/parent page))
-                                         db/entity
-                                         :block/original-name)]
-             [:a {:on-click #(route-handler/redirect-to-page! parent-class)}
-              parent-class]
-             "None")]
-          [:div.col-span-3
-           (let [parent (some-> (:db/id (:class/parent page))
-                                db/entity)]
-             (page-parent page parent))])]
+       (when-not (= (:db/ident page) :logseq.class/base)
+         [:div.grid.grid-cols-5.gap-1.items-center.class-parent
+          [:div.col-span-2 "Parent class:"]
+          (if config/publishing?
+            [:div.col-span-3
+             (if-let [parent-class (some-> (:db/id (:class/parent page))
+                                           db/entity)]
+               [:a {:on-click #(route-handler/redirect-to-page! (:block/uuid parent-class))}
+                (:block/original-name parent-class)]
+               "None")]
+            [:div.col-span-3
+             (let [parent (some-> (:db/id (:class/parent page))
+                                  db/entity)]
+               (page-parent page parent))])])
 
        (when (:class/parent page)
          (let [ancestor-pages (loop [parents [page]]
                                 (if-let [parent (:class/parent (last parents))]
                                   (recur (conj parents parent))
                                   parents))
-               class-ancestors (map :block/original-name (reverse ancestor-pages))]
+               class-ancestors (reverse ancestor-pages)]
            (when (> (count class-ancestors) 2)
              [:div.grid.grid-cols-5.gap-1.items-center.class-ancestors
               [:div.col-span-2 "Ancestor classes:"]
               [:div.col-span-3
                (interpose [:span.opacity-50.text-sm " > "]
-                          (map (fn [class-name]
+                          (map (fn [{class-name :block/original-name :as ancestor}]
                                  (if (= class-name (:block/original-name page))
                                    [:span class-name]
-                                   [:a {:on-click #(route-handler/redirect-to-page! class-name)} class-name]))
+                                   [:a {:on-click #(route-handler/redirect-to-page! (:block/uuid ancestor))} class-name]))
                                class-ancestors))]])))])))
 
 (defn class-children-aux

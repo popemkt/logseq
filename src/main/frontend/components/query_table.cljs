@@ -8,19 +8,16 @@
             [frontend.format.block :as block]
             [frontend.handler.common :as common-handler]
             [frontend.handler.property :as property-handler]
-            [frontend.shui :refer [get-shui-component-version make-shui-context]]
             [frontend.state :as state]
             [frontend.util :as util]
             [frontend.util.clock :as clock]
             [frontend.handler.file-based.property :as file-property-handler]
-            [logseq.shui.core :as shui]
             [medley.core :as medley]
             [rum.core :as rum]
             [promesa.core :as p]
             [logseq.graph-parser.text :as text]
             [logseq.db.frontend.property :as db-property]
             [frontend.handler.property.util :as pu]
-            [frontend.handler.db-based.property.util :as db-pu]
             [logseq.db.frontend.content :as db-content]))
 
 ;; Util fns
@@ -77,7 +74,7 @@
         properties (:block/properties current-block)
         query-sort-by (pu/lookup properties :logseq.property/query-sort-by)
         ;; Starting with #6105, we started putting properties under namespaces.
-        nlp-date? (and (not db-graph?) (pu/lookup-by-name properties :logseq.query/nlp-date))
+        nlp-date? (and (not db-graph?) (:logseq.query/nlp-date properties))
         sort-by-column (or (if (uuid? query-sort-by) query-sort-by (keyword query-sort-by))
                            (if (query-dsl/query-contains-filter? (:block/content current-block) "sort-by")
                              nil
@@ -94,8 +91,12 @@
     [:th.whitespace-nowrap
      [:a {:on-click (fn []
                       (p/do!
-                       (property-handler/set-block-property! repo block-id :query-sort-by (if (uuid? column) column (name column)))
-                       (property-handler/set-block-property! repo block-id :query-sort-desc (not sort-desc?))))}
+                       (property-handler/set-block-property! repo block-id
+                                                             (pu/get-pid :logseq.property/query-sort-by)
+                                                             (if (uuid? column) column (name column)))
+                       (property-handler/set-block-property! repo block-id
+                                                             (pu/get-pid :logseq.property/query-sort-desc)
+                                                             (not sort-desc?))))}
       [:div.flex.items-center
        [:span.mr-1 title]
        (when (= sort-by-column column)
@@ -112,8 +113,7 @@
         hidden-properties (if db-graph?
                             ;; TODO: Support additional hidden properties e.g. from user config
                             ;; or gp-property/built-in-extended properties
-                            (set (map #(db-pu/get-built-in-property-uuid repo %)
-                                      (keys db-property/built-in-properties)))
+                            (set (keys db-property/built-in-properties))
                             (conj (file-property-handler/built-in-properties) :template))
         prop-keys* (->> (distinct (mapcat keys (map :block/properties result)))
                         (remove hidden-properties))
@@ -175,18 +175,6 @@
                    ;; Fallback to original properties for page blocks
                    (get-in row [:block/properties column])))]))
 
-(defn build-column-text [row column]
-  (case column
-    :page  (or (get-in row [:block/page :block/original-name])
-               (get-in row [:block/original-name])
-               (get-in row [:block/content]))
-    :block (or (get-in row [:block/original-name])
-               (get-in row [:block/content]))
-
-           (or (get-in row [:block/properties column])
-               (get-in row [:block/properties-text-values column])
-               (get-in row [(keyword :block column)]))))
-
 (defn- render-column-value
   [{:keys [row-block row-format cell-format value]} page-cp inline-text {:keys [uuid-names db-graph?]}]
   (cond
@@ -206,7 +194,7 @@
     (boolean? value) (str value)
     ;; string values will attempt to be rendered as pages, falling back to
     ;; inline-text when no page entity is found
-    (string? value) (if-let [page (db/entity [:block/name (util/page-name-sanity-lc value)])]
+    (string? value) (if-let [page (db/get-page value)]
                       (page-cp {} page)
                       (inline-text row-block row-format value))
     ;; render uuids as page refs
@@ -287,7 +275,7 @@
                                          :db-graph? db-graph?}))]))]))]]]))
 
 (rum/defc result-table < rum/reactive
-  [config current-block result {:keys [page?] :as options} map-inline page-cp ->elem inline-text inline]
+  [config current-block result {:keys [page?] :as options} map-inline page-cp ->elem inline-text]
   (when current-block
     (let [db-graph? (config/db-based-graph? (state/get-current-repo))
           result' (cond-> (if page? result (attach-clock-property result))
@@ -295,27 +283,15 @@
                     ((fn [res]
                        (map #(if (:block/content %)
                                (update % :block/content
-                                       db-content/special-id-ref->page-ref
-                                       ;; Lookup here instead of initial query as advanced queries
-                                       ;; won't usually have a ref's name
-                                       (map (fn [m] (db/entity (:db/id m))) (:block/refs %)))
+                                 db-content/special-id-ref->page-ref
+                                 ;; Lookup here instead of initial query as advanced queries
+                                 ;; won't usually have a ref's name
+                                 (map (fn [m] (db/entity (:db/id m))) (:block/refs %)))
                                %)
-                            res))))
+                         res))))
           columns (get-columns current-block result' {:page? page?})
           ;; Sort state needs to be in sync between final result and sortable title
           ;; as user needs to know if there result is sorted
           sort-state (get-sort-state current-block {:db-graph? db-graph?})
-          sort-result (sort-result result' (assoc sort-state :page? page?))
-          table-version (get-shui-component-version :table config)]
-      (case table-version
-        2 (let [v2-columns (mapv #(if (uuid? %) (db-pu/get-property-name %) %) columns)
-                v2-config (cond-> config
-                            db-graph?
-                            (assoc-in [:block :properties]
-                                      (db-pu/readable-properties (get-in config [:block :block/properties]))))
-                result-as-text (for [row result']
-                                 (for [column columns]
-                                   (build-column-text row column)))]
-            (shui/table-v2 {:data (conj [[v2-columns]] result-as-text)}
-                           (make-shui-context v2-config inline)))
-        1 (result-table-v1 config current-block sort-result sort-state columns options map-inline page-cp ->elem inline-text)))))
+          sort-result (sort-result result' (assoc sort-state :page? page?))]
+      (result-table-v1 config current-block sort-result sort-state columns options map-inline page-cp ->elem inline-text))))

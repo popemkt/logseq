@@ -132,7 +132,6 @@
  :right-side-bar/switch-theme "テーマ"
  :right-side-bar/contents "目次"
  :right-side-bar/page-graph "ページグラフ"
- :right-side-bar/history "(開発) 「元に戻す/やり直し」の履歴"
  :right-side-bar/block-ref "ブロック参照"
  :right-side-bar/graph-view "グラフビュー"
  :right-side-bar/all-pages "全ページ"
@@ -449,7 +448,6 @@
 
  :home "ホーム"
  :new-page "新しいページ："
- :whiteboard "ホワイトボード"
  :whiteboards "ホワイトボード"
  :new-graph "新規グラフを追加"
  :graph "グラフ"
@@ -618,15 +616,6 @@
  :header/more "もっと見る"
  :header/go-back "戻る"
  :header/go-forward "進む"
-
-
-
-
- :command.date-picker/complete "日付選択：選択した日で決定"
- :command.date-picker/prev-day "日付選択：前の日を選ぶ"
- :command.date-picker/next-day "日付選択：次の日を選ぶ"
- :command.date-picker/prev-week "日付選択：前の週を選ぶ"
- :command.date-picker/next-week "日付選択：次の週を選ぶ"
  :command.pdf/next-page "PDF：現在のPDF文書で次のページへ"
  :command.pdf/previous-page "PDF：現在のPDF文書で前のページへ"
  :command.pdf/close "PDF：現在のPDF文書を閉じる"

@@ -63,8 +63,12 @@
 (defn set-selection-to [input n m]
   (.setSelectionRange input n m))
 
-(defn move-cursor-to [input n]
-  (.setSelectionRange input n n))
+(defn move-cursor-to
+  ([input n] (move-cursor-to input n false))
+  ([input n delay?]
+   (.setSelectionRange input n n)
+   (let [focus #(.focus input)]
+     (if delay? (js/setTimeout focus 16) (focus)))))
 
 (defn move-cursor-forward
   ([input]
@@ -173,7 +177,7 @@
     (move-cursor-to input idx)))
 
 (defn textarea-cursor-rect-first-row? [cursor]
-  (let [elms   (-> (gdom/getElement "mock-text")
+  (let [elms   (some-> (gdom/getElement "mock-text")
                    gdom/getChildren
                    array-seq)
         tops   (->> elms
@@ -187,7 +191,7 @@
 
 
 (defn textarea-cursor-rect-last-row? [cursor]
-  (let [elms   (-> (gdom/getElement "mock-text")
+  (let [elms   (some-> (gdom/getElement "mock-text")
                    gdom/getChildren
                    array-seq)
         tops   (->> elms

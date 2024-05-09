@@ -133,7 +133,6 @@
  :right-side-bar/switch-theme "Theme"
  :right-side-bar/contents "Contents"
  :right-side-bar/page-graph "Page graph"
- :right-side-bar/history "(Dev) Undo/Redo history"
  :right-side-bar/block-ref "Block references"
  :right-side-bar/graph-view "Graph view"
  :right-side-bar/all-pages "All pages"
@@ -475,7 +474,6 @@
  :new-page "New page:"
  :new-class "New class:"
  ;; :new-class "New class:"
- :whiteboard "Whiteboard"
  :whiteboards "Whiteboards"
  :new-graph "Add new graph"
  :graph "Graph"
@@ -650,12 +648,7 @@
  ;; Commands are nested for now to stay in sync with the shortcuts system.
  ;; Other languages should not nest keys under :commands
  :commands
- {:date-picker/complete         "Date picker: Choose selected day"
-  :date-picker/prev-day         "Date picker: Select previous day"
-  :date-picker/next-day         "Date picker: Select next day"
-  :date-picker/prev-week        "Date picker: Select previous week"
-  :date-picker/next-week        "Date picker: Select next week"
-  :pdf/previous-page            "Pdf: Previous page of current pdf doc"
+ {:pdf/previous-page            "Pdf: Previous page of current pdf doc"
   :pdf/next-page                "Pdf: Next page of current pdf doc"
   :pdf/close                    "Pdf: Close current pdf doc"
   :pdf/find                     "Pdf: Search text of current pdf doc"
@@ -759,6 +752,7 @@
   :go/electron-jump-to-the-next   "Jump to the next match to your Find bar search"
   :go/electron-jump-to-the-previous "Jump to the previous match to your Find bar search"
   :go/search                      "Search pages and blocks"
+  :go/search-themes               "Search themes"
   :go/search-in-page              "Search blocks in page"
   :command-palette/toggle         "Search commands"
   :go/journals                    "Go to journals"

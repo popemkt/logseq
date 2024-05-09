@@ -1,6 +1,7 @@
 (ns logseq.shui.ui
   (:require [logseq.shui.util :as util]
             [logseq.shui.icon.v2 :as icon-v2]
+            [logseq.shui.shortcut.v1 :as shui.shortcut.v1]
             [logseq.shui.toaster.core :as toaster-core]
             [logseq.shui.select.core :as select-core]
             [logseq.shui.select.multi :as select-multi]
@@ -12,6 +13,8 @@
 (def button base-core/button)
 (def link base-core/link)
 (def trigger-as base-core/trigger-as)
+(def trigger-child-wrap base-core/trigger-child-wrap)
+(def ^:todo shortcut shui.shortcut.v1/root)
 (def ^:export tabler-icon icon-v2/root)
 
 (def alert (util/lsui-wrap "Alert"))

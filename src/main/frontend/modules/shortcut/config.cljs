@@ -33,7 +33,9 @@
 (defn- search
   [mode]
   (editor-handler/escape-editing false)
-  (route-handler/go-to-search! mode))
+  (if (state/get-search-mode)
+    (js/setTimeout #(route-handler/go-to-search! mode) 128)
+    (route-handler/go-to-search! mode)))
 
 ;; TODO: Namespace all-default-keyboard-shortcuts keys with `:command` e.g.
 ;; `:command.date-picker/complete`. They are namespaced in translation but
@@ -51,25 +53,7 @@
 ;;  * :file-graph? - Optional boolean to identify a command to only be run in file graphs
 ;;    and warned gracefully in db graphs
 (def ^:large-vars/data-var all-built-in-keyboard-shortcuts
-  ;; BUG: Actually, "enter" is registered by mixin behind a "when inputing" guard
-  ;; So this setting item does not cover all cases.
-  ;; See-also: frontend.components.datetime/time-repeater
-  {:date-picker/complete                    {:binding "enter"
-                                             :fn      ui-handler/shortcut-complete}
-
-   :date-picker/prev-day                    {:binding "left"
-                                             :fn      ui-handler/shortcut-prev-day}
-
-   :date-picker/next-day                    {:binding "right"
-                                             :fn      ui-handler/shortcut-next-day}
-
-   :date-picker/prev-week                   {:binding ["up" "ctrl+p"]
-                                             :fn      ui-handler/shortcut-prev-week}
-
-   :date-picker/next-week                   {:binding ["down" "ctrl+n"]
-                                             :fn      ui-handler/shortcut-next-week}
-
-   :pdf/previous-page                       {:binding "alt+p"
+  {:pdf/previous-page                       {:binding "alt+p"
                                              :fn      pdf-utils/prev-page}
 
    :pdf/next-page                           {:binding "alt+n"
@@ -353,7 +337,7 @@
    :editor/select-parent                    {:binding "mod+a"
                                              :fn      editor-handler/select-parent}
 
-   :editor/zoom-in                          {:binding (if mac? "mod+." "alt+right")
+   :editor/zoom-in                          {:binding (if mac? ["mod+." "mod+shift+."] "alt+right") ; FIXME: mod+. not works on Chrome
                                              :fn      editor-handler/zoom-in!}
 
    :editor/zoom-out                         {:binding (if mac? "mod+," "alt+left")
@@ -372,8 +356,13 @@
 
    :go/search                               {:binding "mod+k"
                                              :fn      #(search :global)}
+
+   :go/search-themes                        {:binding "mod+shift+i"
+                                             :fn      #(search :themes)}
+
    :command-palette/toggle                  {:binding "mod+shift+p"
                                              :fn      #(search :commands)}
+
    :go/search-in-page                       {:binding "mod+shift+k"
                                              :fn      #(search :current-page)}
 
@@ -724,6 +713,7 @@
             :ui/toggle-brackets
             :go/search-in-page
             :go/search
+            :go/search-themes
             :go/electron-find-in-page
             :go/electron-jump-to-the-next
             :go/electron-jump-to-the-previous
@@ -791,6 +781,7 @@
   (atom
     {:shortcut.category/basics
      [:go/search
+      :go/search-themes
       :editor/new-block
       :editor/new-line
       :editor/indent
@@ -953,11 +944,6 @@
       :auto-complete/shift-complete
       :auto-complete/meta-complete
       :auto-complete/open-link
-      :date-picker/prev-day
-      :date-picker/next-day
-      :date-picker/prev-week
-      :date-picker/next-week
-      :date-picker/complete
       :git/commit
       :dev/show-block-data
       :dev/show-block-ast

@@ -43,6 +43,7 @@
    * :show-new-when-not-exact-match? - Boolean to allow new values be entered. Default is false
    * :exact-match-exclude-items - A set of strings that can't be added as a new item. Default is #{}
    * :transform-fn - Optional fn to transform search results given results and current input
+   * :new-case-sensitive? - Boolean to allow new values to be case sensitive
    TODO: Describe more options"
   < rum/reactive
   shortcut/disable-all-shortcuts
@@ -58,7 +59,7 @@
                  prompt-key input-default-placeholder close-modal?
                  extract-fn extract-chosen-fn host-opts on-input input-opts
                  item-cp transform-fn tap-*input-val
-                 multiple-choices? on-apply
+                 multiple-choices? on-apply new-case-sensitive?
                  dropdown? show-new-when-not-exact-match? exact-match-exclude-items
                  input-container initial-open?]
           :or {limit 100
@@ -81,8 +82,9 @@
                           (fn? transform-fn)
                           (transform-fn @input))
                         (remove nil?))
-        exact-match? (contains? (set (map (comp string/lower-case str extract-fn) search-result'))
-                                (string/lower-case @input))
+        exact-transform-fn (if new-case-sensitive? identity string/lower-case)
+        exact-match? (contains? (set (map (comp exact-transform-fn str extract-fn) search-result'))
+                                (exact-transform-fn @input))
         search-result' (if multiple-choices?
                          (sort-by (fn [item]
                                     (not (contains? selected-choices (:value item))))
@@ -127,24 +129,27 @@
                                                    (let [chosen (extract-chosen-fn raw-chosen)]
                                                      (if multiple-choices?
                                                        (if (selected-choices chosen)
-                                                         (swap! *selected-choices disj chosen)
-                                                         (swap! *selected-choices conj chosen))
+                                                         (do
+                                                           (swap! *selected-choices disj chosen)
+                                                           (when on-chosen (on-chosen chosen false)))
+                                                         (do
+                                                           (swap! *selected-choices conj chosen)
+                                                           (when on-chosen (on-chosen chosen true))))
                                                        (do
                                                          (when (and close-modal? (not multiple-choices?))
                                                            (state/close-modal!))
                                                          (when on-chosen
-                                                           (on-chosen (if multiple-choices? selected-choices chosen)))))))
+                                                           (on-chosen chosen true))))))
                               :empty-placeholder (empty-placeholder t)})]
 
-                           (when multiple-choices?
+                           (when (and multiple-choices? (fn? on-apply))
                              [:div.p-4 (ui/button "Apply"
                                                   {:small? true
                                                    :on-pointer-down (fn [e]
-                                                                    (util/stop e)
-                                                                    (when @*toggle (@*toggle))
-                                                                    (when (fn? on-apply)
+                                                                      (util/stop e)
+                                                                      (when @*toggle (@*toggle))
                                                                       (on-apply selected-choices)
-                                                                      (when close-modal? (state/close-modal!))))})])]]
+                                                                      (when close-modal? (state/close-modal!)))})])]]
     (when (fn? tap-*input-val)
       (tap-*input-val input))
     [:div.cp__select

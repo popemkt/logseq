@@ -6,21 +6,18 @@
             [cljs.core.async :as async]
             [clojure.edn :as edn]
             [clojure.string :as string]
-            [cognitect.transit :as transit]
             [datascript.core :as d]
             [datascript.storage :refer [IStorage]]
-            [frontend.worker.async-util :include-macros true :refer [<?] :as async-util]
             [frontend.worker.db-listener :as db-listener]
             [frontend.worker.db-metadata :as worker-db-metadata]
             [frontend.worker.export :as worker-export]
             [frontend.worker.file :as file]
             [frontend.worker.handler.page :as worker-page]
-            [frontend.worker.handler.page.rename :as worker-page-rename]
-            [frontend.worker.rtc.core :as rtc-core]
+            [frontend.worker.handler.page.file-based.rename :as file-worker-page-rename]
+            [frontend.worker.handler.page.db-based.rename :as db-worker-page-rename]
+            [frontend.worker.rtc.core2 :as rtc-core2]
             [frontend.worker.rtc.db-listener]
-            [frontend.worker.rtc.full-upload-download-graph :as rtc-updown]
             [frontend.worker.rtc.op-mem-layer :as op-mem-layer]
-            [frontend.worker.rtc.snapshot :as rtc-snapshot]
             [frontend.worker.search :as search]
             [frontend.worker.state :as worker-state]
             [frontend.worker.undo-redo :as undo-redo]
@@ -30,15 +27,16 @@
             [logseq.db.sqlite.util :as sqlite-util]
             [logseq.outliner.op :as outliner-op]
             [promesa.core :as p]
-            [shadow.cljs.modern :refer [defclass]]))
+            [shadow.cljs.modern :refer [defclass]]
+            [logseq.common.util :as common-util]
+            [frontend.worker.db.fix :as db-fix]
+            [logseq.db.frontend.order :as db-order]))
 
 (defonce *sqlite worker-state/*sqlite)
 (defonce *sqlite-conns worker-state/*sqlite-conns)
 (defonce *datascript-conns worker-state/*datascript-conns)
 (defonce *opfs-pools worker-state/*opfs-pools)
 (defonce *publishing? (atom false))
-
-(defonce transit-w (transit/writer :json))
 
 (defn- <get-opfs-pool
   [graph]
@@ -66,7 +64,6 @@
                                                 :printErr js/console.error}))]
       (reset! *sqlite sqlite)
       nil)))
-
 
 (def repo-path "/db.sqlite")
 
@@ -104,9 +101,9 @@
                            ffirst)]
       (try
         (let [data (sqlite-util/transit-read content)]
-         (if-let [addresses (:addresses data)]
-           (assoc data :addresses (bean/->js addresses))
-           data))
+          (if-let [addresses (:addresses data)]
+            (assoc data :addresses (bean/->js addresses))
+            data))
         (catch :default _e              ; TODO: remove this once db goes to test
           (edn/read-string content))))))
 
@@ -247,6 +244,9 @@
   [repo]
   (worker-state/get-sqlite-conn repo {:search? true}))
 
+(defn- with-write-transit-str
+  [p]
+  (p/chain p ldb/write-transit-str))
 
 #_:clj-kondo/ignore
 (defclass DBWorker
@@ -302,8 +302,10 @@
    (when-let [conn (worker-state/get-datascript-conn repo)]
      (let [selector (ldb/read-transit-str selector-str)
            id (ldb/read-transit-str id-str)
-           result (->> (d/pull @conn selector id)
-                       (sqlite-common-db/with-parent-and-left @conn))]
+           eid (when (and (vector? id) (= :block/name (first id)))
+                 (:db/id (ldb/get-page @conn (second id))))
+           result (->> (d/pull @conn selector (or eid id))
+                       (sqlite-common-db/with-parent @conn))]
        (ldb/write-transit-str result))))
 
   (pull-many
@@ -317,14 +319,14 @@
   (get-right-sibling
    [_this repo db-id]
    (when-let [conn (worker-state/get-datascript-conn repo)]
-     (let [result (ldb/get-right-sibling @conn db-id)]
+     (let [result (ldb/get-right-sibling (d/entity @conn db-id))]
        (ldb/write-transit-str result))))
 
   (get-block-and-children
-   [_this repo name children?]
-   (assert (string? name))
+   [_this repo id opts]
    (when-let [conn (worker-state/get-datascript-conn repo)]
-     (ldb/write-transit-str (sqlite-common-db/get-block-and-children @conn name children?))))
+     (let [id (if (and (string? id) (common-util/uuid-string? id)) (uuid id) id)]
+       (ldb/write-transit-str (sqlite-common-db/get-block-and-children @conn id (ldb/read-transit-str opts))))))
 
   (get-block-refs
    [_this repo id]
@@ -361,27 +363,37 @@
              tx-meta (if (string? tx-meta)
                        (ldb/read-transit-str tx-meta)
                        tx-meta)
+             tx-data' (if (and (= :update-property (:outliner-op tx-meta))
+                               (:many->one? tx-meta) (:property-id tx-meta))
+                        (concat tx-data
+                                (db-fix/fix-cardinality-many->one @conn (:property-id tx-meta)))
+                        tx-data)
+             tx-data' (if (contains? #{:new-property :insert-blocks} (:outliner-op tx-meta))
+                        (map (fn [m]
+                               (if (and (map? m) (nil? (:block/order m)))
+                                 (assoc m :block/order (db-order/gen-key nil))
+                                 m)) tx-data')
+                        tx-data')
              context (if (string? context)
                        (ldb/read-transit-str context)
                        context)
              _ (when context (worker-state/set-context! context))
-             tx-meta' (if (:new-graph? tx-meta)
-                        tx-meta
-                        (cond-> tx-meta
-                          (and (not (:whiteboard/transact? tx-meta))
-                               (not (:rtc-download-graph? tx-meta))) ; delay writes to the disk
-                          (assoc :skip-store? true)
+             tx-meta' (cond-> tx-meta
+                        (and (not (:whiteboard/transact? tx-meta))
+                             (not (:rtc-download-graph? tx-meta))) ; delay writes to the disk
+                        (assoc :skip-store? true)
 
-                          true
-                          (dissoc :insert-blocks?)))]
+                        true
+                        (dissoc :insert-blocks?))]
          (when-not (and (:create-today-journal? tx-meta)
                         (:today-journal-name tx-meta)
-                        (seq tx-data)
-                        (d/entity @conn [:block/name (:today-journal-name tx-meta)])) ; today journal created already
+                        (seq tx-data')
+                        (ldb/get-page @conn (:today-journal-name tx-meta))) ; today journal created already
 
-           ;; (prn :debug :transact :tx-data tx-data :tx-meta tx-meta')
+           ;; (prn :debug :transact :tx-data tx-data' :tx-meta tx-meta')
+
            (worker-util/profile "Worker db transact"
-                                (ldb/transact! conn tx-data tx-meta')))
+                                (ldb/transact! conn tx-data' tx-meta')))
          nil)
        (catch :default e
          (prn :debug :error)
@@ -397,10 +409,10 @@
      (ldb/write-transit-str (sqlite-common-db/get-initial-data @conn))))
 
   (fetch-all-pages
-   [_this repo]
+   [_this repo exclude-page-ids-str]
    (when-let [conn (worker-state/get-datascript-conn repo)]
      (async/go
-       (let [all-pages (sqlite-common-db/get-all-pages @conn)
+       (let [all-pages (sqlite-common-db/get-all-pages @conn (ldb/read-transit-str exclude-page-ids-str))
              partitioned-data (map-indexed (fn [idx p] [idx p]) (partition-all 2000 all-pages))]
          (doseq [[idx tx-data] partitioned-data]
            (worker-util/post-message :sync-db-changes {:repo repo
@@ -482,19 +494,24 @@
      (search/page-search repo @conn q limit)))
 
   (page-rename
-   [this repo old-name new-name]
+   [this repo page-uuid-str new-name]
+   (assert (common-util/uuid-string? page-uuid-str))
    (when-let [conn (worker-state/get-datascript-conn repo)]
      (let [config (worker-state/get-config repo)
-           result (worker-page-rename/rename! repo conn config old-name new-name)]
+           f (if (sqlite-util/db-based-graph? repo)
+               db-worker-page-rename/rename!
+               file-worker-page-rename/rename!)
+           result (f repo conn config (uuid page-uuid-str) new-name)]
        (bean/->js {:result result}))))
 
   (page-delete
-   [this repo page-name]
+   [this repo page-uuid-str]
+   (assert (common-util/uuid-string? page-uuid-str))
    (when-let [conn (worker-state/get-datascript-conn repo)]
      (let [error-handler (fn [{:keys [msg]}]
                            (worker-util/post-message :notification
                                                      [[:div [:p msg]] :error]))
-           result (worker-page/delete! repo conn page-name {:error-handler error-handler})]
+           result (worker-page/delete! repo conn (uuid page-uuid-str) {:error-handler error-handler})]
        (bean/->js {:result result}))))
 
   (apply-outliner-ops
@@ -535,11 +552,13 @@
 
   ;; Export
   (block->content
-   [this repo block-uuid-or-page-name tree->file-opts context]
-   (when-let [conn (worker-state/get-datascript-conn repo)]
-     (worker-export/block->content repo @conn block-uuid-or-page-name
-                                   (ldb/read-transit-str tree->file-opts)
-                                   (ldb/read-transit-str context))))
+   [this repo block-uuid-str tree->file-opts context]
+   (assert (common-util/uuid-string? block-uuid-str))
+   (let [block-uuid (uuid block-uuid-str)]
+     (when-let [conn (worker-state/get-datascript-conn repo)]
+       (worker-export/block->content repo @conn block-uuid
+                                     (ldb/read-transit-str tree->file-opts)
+                                     (ldb/read-transit-str context)))))
 
   (get-all-pages
    [this repo]
@@ -552,138 +571,105 @@
      (ldb/write-transit-str (worker-export/get-all-page->content repo @conn))))
 
   ;; RTC
-  (rtc-start
-   [this repo token dev-mode?]
-   (async-util/c->p
-    (when-let [conn (worker-state/get-datascript-conn repo)]
-      (rtc-core/<start-rtc repo conn token dev-mode?))))
+  (rtc-start2
+   [this repo token]
+   (with-write-transit-str
+     (js/Promise. (rtc-core2/new-task--rtc-start repo token))))
 
-  (rtc-stop
+  (rtc-stop2
    [this]
-   (when-let [state @rtc-core/*state]
-     (rtc-core/stop-rtc state)))
+   (rtc-core2/rtc-stop))
 
-  (rtc-toggle-sync
-   [this repo]
-   (async-util/c->p (rtc-core/<toggle-sync)))
+  (rtc-toggle-auto-push
+   [this]
+   (rtc-core2/rtc-toggle-auto-push))
 
-  (rtc-grant-graph-access
-   [this graph-uuid target-user-uuids-str target-user-emails-str]
-   (async-util/c->p
-    (when-let [state @rtc-core/*state]
-      (let [target-user-uuids (ldb/read-transit-str target-user-uuids-str)
-            target-user-emails (ldb/read-transit-str target-user-emails-str)]
-        (rtc-core/<grant-graph-access-to-others
-         state graph-uuid
-         :target-user-uuids target-user-uuids
-         :target-user-emails target-user-emails)))))
+  (rtc-grant-graph-access2
+   [this token graph-uuid target-user-uuids-str target-user-emails-str]
+   (let [target-user-uuids (ldb/read-transit-str target-user-uuids-str)
+         target-user-emails (ldb/read-transit-str target-user-emails-str)]
+     (with-write-transit-str
+       (js/Promise.
+        (rtc-core2/new-task--grant-access-to-others token graph-uuid
+                                                    :target-user-uuids target-user-uuids
+                                                    :target-user-emails target-user-emails)))))
 
-  (rtc-async-upload-graph
+  (rtc-get-graphs2
+   [this token]
+   (with-write-transit-str
+     (js/Promise. (rtc-core2/new-task--get-graphs token))))
+
+  (rtc-delete-graph2
+   [this token graph-uuid]
+   (with-write-transit-str
+     (js/Promise. (rtc-core2/new-task--delete-graph token graph-uuid))))
+
+  (rtc-get-users-info2
+   [this token graph-uuid]
+   (with-write-transit-str
+     (js/Promise. (rtc-core2/new-task--get-user-info token graph-uuid))))
+
+  (rtc-get-block-content-versions2
+   [this token graph-uuid block-uuid]
+   (with-write-transit-str
+     (js/Promise. (rtc-core2/new-task--get-block-content-versions token graph-uuid block-uuid))))
+
+  (rtc-get-debug-state2
+   [this]
+   (with-write-transit-str
+     (js/Promise. (rtc-core2/new-task--get-debug-state))))
+
+  (rtc-async-upload-graph2
    [this repo token remote-graph-name]
-   (let [d (p/deferred)]
-     (when-let [conn (worker-state/get-datascript-conn repo)]
-       (async/go
-         (try
-           (let [state (<? (rtc-core/<init-state token false))
-                 r (<? (rtc-updown/<async-upload-graph state repo conn remote-graph-name))]
-             (p/resolve! d r))
-           (catch :default e
-             (worker-util/post-message :notification
-                                       [[:div
-                                         [:p "upload graph failed"]]
-                                        :error])
-             (p/reject! d e)))))
-     d))
+   (with-write-transit-str
+     (js/Promise. (rtc-core2/new-task--upload-graph token repo remote-graph-name))))
 
+  ;; ================================================================
   (rtc-request-download-graph
    [this token graph-uuid]
-   (async-util/c->p
-    (async/go
-      (let [state (or @rtc-core/*state
-                      (<! (rtc-core/<init-state token false)))]
-        (<? (rtc-updown/<request-download-graph state graph-uuid))))))
+   (with-write-transit-str
+     (js/Promise. (rtc-core2/new-task--request-download-graph token graph-uuid))))
 
   (rtc-wait-download-graph-info-ready
-   [this repo token download-info-uuid graph-uuid timeout-ms]
-   (async-util/c->p
-    (async/go
-      (let [state (or @rtc-core/*state
-                      (<! (rtc-core/<init-state token false)))]
-        (ldb/write-transit-str
-         (<? (rtc-updown/<wait-download-info-ready state download-info-uuid graph-uuid timeout-ms)))))))
+   [this token download-info-uuid graph-uuid timeout-ms]
+   (with-write-transit-str
+     (js/Promise.
+      (rtc-core2/new-task--wait-download-info-ready token download-info-uuid graph-uuid timeout-ms))))
 
   (rtc-download-graph-from-s3
    [this graph-uuid graph-name s3-url]
-   (async-util/c->p
-    (async/go
-      (rtc-updown/<download-graph-from-s3 graph-uuid graph-name s3-url))))
+   (with-write-transit-str
+     (js/Promise. (rtc-core2/new-task--download-graph-from-s3 graph-uuid graph-name s3-url))))
 
   (rtc-download-info-list
    [this token graph-uuid]
-   (async-util/c->p
-    (async/go
-      (let [state (or @rtc-core/*state
-                      (<! (rtc-core/<init-state token false)))]
-        (<? (rtc-updown/<download-info-list state graph-uuid))))))
+   (with-write-transit-str
+     (js/Promise. (rtc-core2/new-task--download-info-list token graph-uuid))))
 
   (rtc-snapshot-graph
    [this token graph-uuid]
-   (async-util/c->p
-    (async/go
-      (let [state (or @rtc-core/*state
-                      (<! (rtc-core/<init-state token false)))]
-        (<? (rtc-snapshot/<snapshot-graph state graph-uuid))))))
+   (with-write-transit-str
+     (js/Promise. (rtc-core2/new-task--snapshot-graph token graph-uuid))))
 
   (rtc-snapshot-list
    [this token graph-uuid]
-   (async-util/c->p
-    (async/go
-      (let [state (or @rtc-core/*state
-                      (<! (rtc-core/<init-state token false)))]
-        (<? (rtc-snapshot/<snapshot-list state graph-uuid))))))
-
-  (rtc-push-pending-ops
-   [_this]
-   (async/put! (:force-push-client-ops-chan @rtc-core/*state) true))
-
-  (rtc-get-graphs
-   [_this token]
-   (async-util/c->p
-    (rtc-core/<get-graphs token)))
-
-  (rtc-delete-graph
-   [_this token graph-uuid]
-   (async-util/c->p
-    (rtc-core/<delete-graph token graph-uuid)))
-
-  (rtc-get-users-info
-   [_this]
-   (async-util/c->p
-    (rtc-core/<get-users-info @rtc-core/*state)))
-
-  (rtc-get-block-content-versions
-   [_this block-id]
-   (async-util/c->p
-    (rtc-core/<get-block-content-versions @rtc-core/*state block-id)))
-
-  (rtc-get-debug-state
-   [_this repo]
-   (ldb/write-transit-str (rtc-core/get-debug-state repo)))
-
-  (rtc-get-block-update-log
-   [_this block-uuid]
-   (transit/write transit-w (rtc-core/get-block-update-log (uuid block-uuid))))
+   (with-write-transit-str
+     (js/Promise. (rtc-core2/new-task--snapshot-list token graph-uuid))))
 
   (undo
    [_this repo page-block-uuid-str]
    (when-let [conn (worker-state/get-datascript-conn repo)]
-     (undo-redo/undo repo (uuid page-block-uuid-str) conn))
-   nil)
+     (ldb/write-transit-str (undo-redo/undo repo (uuid page-block-uuid-str) conn))))
 
   (redo
    [_this repo page-block-uuid-str]
    (when-let [conn (worker-state/get-datascript-conn repo)]
-     (undo-redo/redo repo (uuid page-block-uuid-str) conn)))
+     (ldb/write-transit-str (undo-redo/redo repo (uuid page-block-uuid-str) conn))))
+
+  (record-editor-info
+   [_this repo page-block-uuid-str editor-info-str]
+   (undo-redo/record-editor-info! repo (uuid page-block-uuid-str) (ldb/read-transit-str editor-info-str))
+   nil)
 
   (keep-alive
    [_this]
@@ -705,10 +691,10 @@
 
 (comment
   (defn <remove-all-files!
-   "!! Dangerous: use it only for development."
-   []
-   (p/let [all-files (<list-all-files)
-           files (filter #(= (.-kind %) "file") all-files)
-           dirs (filter #(= (.-kind %) "directory") all-files)
-           _ (p/all (map (fn [file] (.remove file)) files))]
-     (p/all (map (fn [dir] (.remove dir)) dirs)))))
+    "!! Dangerous: use it only for development."
+    []
+    (p/let [all-files (<list-all-files)
+            files (filter #(= (.-kind %) "file") all-files)
+            dirs (filter #(= (.-kind %) "directory") all-files)
+            _ (p/all (map (fn [file] (.remove file)) files))]
+      (p/all (map (fn [dir] (.remove dir)) dirs)))))

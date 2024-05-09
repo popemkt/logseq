@@ -132,7 +132,6 @@
  :right-side-bar/switch-theme "Tema modları"
  :right-side-bar/contents "İçindekiler"
  :right-side-bar/page-graph "Sayfa grafı"
- :right-side-bar/history "(Dev) Geri Al / Yinele geçmişi"
  :right-side-bar/block-ref "Blok referansı"
  :right-side-bar/graph-view "Graf görünümü"
  :right-side-bar/all-pages "Bütün sayfalar"
@@ -469,7 +468,6 @@
 
  :home "Başlangıç"
  :new-page "Yeni sayfa:"
- :whiteboard "Beyaz tahta"
  :whiteboards "Beyaz tahtalar"
  :new-graph "Yeni graf ekle"
  :graph "Graf"
@@ -637,12 +635,6 @@
  :header/more                        "Diğer"
  :header/go-back                     "Geri git"
  :header/go-forward                  "İleri git"
-
- :command.date-picker/complete         "Tarih seçici: Seçilen günü seç"
- :command.date-picker/prev-day         "Tarih seçici: Önceki günü seç"
- :command.date-picker/next-day         "Tarih seçici: Sonraki günü seç"
- :command.date-picker/prev-week        "Tarih seçici: Önceki haftayı seç"
- :command.date-picker/next-week        "Tarih seçici: Sonraki haftayı seç"
  :command.pdf/previous-page            "Pdf: Geçerli pdf belgesinin önceki sayfası"
  :command.pdf/next-page                "Pdf: Geçerli pdf belgesinin sonraki sayfası"
  :command.pdf/close                    "Pdf: Geçerli pdf görüntüleyiciyi kapat"

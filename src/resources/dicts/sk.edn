@@ -128,7 +128,6 @@
  :right-side-bar/switch-theme                      "Motívy"
  :right-side-bar/contents                          "Obsah"
  :right-side-bar/page-graph                        "Graf stránok"
- :right-side-bar/history                           "(Dev) Historia Späť/Znova"
  :right-side-bar/block-ref                         "Referencie bloku"
  :right-side-bar/graph-view                        "Zobrazenie grafu"
  :right-side-bar/all-pages                         "Všetky stránky"
@@ -441,7 +440,6 @@
 
  :home                                             "Domov"
  :new-page                                         "Nová stránka:"
- :whiteboard                                       "Tabuľa"
  :whiteboards                                      "Tabule"
  :new-graph                                        "Pridať nový graf"
  :graph                                            "Graf"
@@ -606,12 +604,6 @@
  :header/more                                      "Viac"
  :header/go-back                                   "Späť"
  :header/go-forward                                "Vpred"
-
- :command.date-picker/complete                     "Výber dátumu: Potvrdiť vybraný deň"
- :command.date-picker/prev-day                     "Výber dátumu: Vybrať predchádzajúci deň"
- :command.date-picker/next-day                     "Výber dátumu: Vybrať nasledujúci deň"
- :command.date-picker/prev-week                    "Výber dátumu: Vybrať predchádzajúci týždeň"
- :command.date-picker/next-week                    "Výber dátumu: Vybrať nasledujúci týždeň"
  :command.pdf/previous-page                        "PDF: Predchádzajúca strana aktuálneho PDF dokumentu"
  :command.pdf/next-page                            "PDF: Nasledujúca strana aktuálneho PDF dokumentu"
  :command.pdf/close                                "PDF: Zatvoriť aktuálny PDF dokument"

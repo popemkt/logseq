@@ -26,7 +26,7 @@
 (def block-pos-schema
   ":sibling:  sibling of target-block(:target-uuid)
   :child: child of target-block(:target-uuid)
-  :no-order: this block doesn't have :block/left attr"
+  :no-order: this block doesn't have :block/order attr"
   [:enum :sibling :child :no-order])
 
 
@@ -97,36 +97,38 @@
      [:multi {:dispatch :op :decode/string #(update % :op keyword)}
       [:move
        (apply conj
-              [:map {:closed true}
+              [:map
                [:op :keyword]
                [:self :uuid]
                [:parents [:sequential :uuid]]
                [:left [:maybe :uuid]]   ;nil when it's :no-order block
-               [:content {:optional true} :string]]
+               [:content {:optional true} :string]
+               [:hash {:optional true} :int]]
               general-attrs-schema-coll)]
       [:remove
-       [:map {:closed true}
+       [:map
         [:op :keyword]
         [:block-uuid :uuid]]]
       [:update-attrs
        (apply conj
-              [:map {:closed true}
+              [:map
                [:op :keyword]
                [:self :uuid]
                [:parents {:optional true} [:sequential :uuid]]
                [:left {:optional true} [:maybe :uuid]] ;nil when it's :no-order block
-               [:content {:optional true} :string]]
+               [:content {:optional true} :string]
+               [:hash {:optional true} :int]]
               general-attrs-schema-coll)]
       [:update-page
        (apply conj
-              [:map {:closed true}
+              [:map
                [:op :keyword]
                [:self :uuid]
                [:page-name :string]
                [:original-name :string]]
               general-attrs-schema-coll)]
       [:remove-page
-       [:map {:closed true}
+       [:map
         [:op :keyword]
         [:block-uuid :uuid]]]]]]
    [:ex-data {:optional true} [:map [:type :keyword]]]
@@ -158,17 +160,6 @@
      [:map
       [:req-id :string]
       [:action :string]]]
-    ["full-download-graph"
-     [:map
-      [:req-id :string]
-      [:action :string]
-      [:graph-uuid :string]]]
-    ["full-upload-graph"
-     [:map
-      [:req-id :string]
-      [:action :string]
-      [:s3-key :string]
-      [:graph-name :string]]]
     ["upload-graph"
      [:map
       [:req-id :string]
@@ -205,7 +196,8 @@
     ["get-users-info"
      [:map
       [:req-id :string]
-      [:action :string]]]
+      [:action :string]
+      [:graph-uuid {:optional true} :uuid]]] ;TODO: remove optional
     ["delete-graph"
      [:map
       [:req-id :string]
@@ -217,12 +209,12 @@
       [:action :string]
       [:graph-uuid :string]
       [:block-uuids [:sequential :uuid]]]]
-    ["query-blocks"
+    ["query-block-tree"
      [:map
       [:req-id :string]
       [:action :string]
-      [:graph-uuid :uuid]
-      [:block-uuids [:sequential :uuid]]]]
+      [:graph-uuid :string]
+      [:root-block-uuid :uuid]]]
     ["update-assets"
      [:map
       [:req-id :string]

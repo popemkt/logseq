@@ -107,7 +107,7 @@
    :between
    '[(between ?b ?start ?end)
      [?b :block/page ?p]
-     [?p :block/journal? true]
+     [?p :block/type "journal"]
      [?p :block/journal-day ?d]
      [(>= ?d ?start)]
      [(<= ?d ?end)]]
@@ -154,101 +154,108 @@
   (merge
    query-dsl-rules
    {:page-tags
-   '[(page-tags ?p ?tags)
-     [?p :block/tags ?t]
-     [?t :block/name ?tag]
-     [(missing? $ ?p :block/link)]
-     [(contains? ?tags ?tag)]]
+    '[(page-tags ?p ?tags)
+      [?p :block/tags ?t]
+      [?t :block/name ?tag]
+      [(missing? $ ?p :block/link)]
+      [(contains? ?tags ?tag)]]
 
     :has-page-property
     '[(has-page-property ?p ?prop)
       [?p :block/name]
-      [?p :block/properties ?bp]
-      [(name ?prop) ?prop-name-str]
-      [?prop-b :block/name ?prop-name-str]
-      [?prop-b :block/type "property"]
-      [?prop-b :block/uuid ?prop-uuid]
-      [(get ?bp ?prop-uuid) ?v]
+      [?p ?prop ?v]
+      [?prop-e :db/ident ?prop]
+      [?prop-e :block/type "property"]
       ;; Some deleted properties leave #{} which this rule shouldn't match on
       [(not= #{} ?v)]]
+    ;; TODO: Delete when DB_GRAPH query-dsl tests are passing
+    #_'[(has-page-property ?p ?prop)
+        [?p :block/name]
+        [?p :block/properties ?bp]
+        [(name ?prop) ?prop-name-str]
+        [?prop-b :block/name ?prop-name-str]
+        [?prop-b :block/type "property"]
+        [?prop-b :block/uuid ?prop-uuid]
+        [(get ?bp ?prop-uuid) ?v]
+      ;; Some deleted properties leave #{} which this rule shouldn't match on
+        [(not= #{} ?v)]]
 
     :page-property
-    '[;; Clause 1: Match non-ref values
-      [(page-property ?p ?key ?val)
+    '[[(page-property ?p ?prop ?val)
        [?p :block/name]
-       [?p :block/properties ?prop]
-       [(name ?key) ?key-str]
-       [?prop-b :block/name ?key-str]
-       [?prop-b :block/type "property"]
-       [?prop-b :block/uuid ?prop-uuid]
-       [(get ?prop ?prop-uuid) ?v]
-       (or ([= ?v ?val])
-           [(contains? ?v ?val)])]
+       [?p ?prop ?val]
+       [?prop-e :db/ident ?prop]
+       [?prop-e :block/type "property"]]
+      ;; TODO: Delete when DB_GRAPH query-dsl tests are passing
+      ;; Clause 1: Match non-ref values
+      #_[(page-property ?p ?key ?val)
+         [?p :block/name]
+         [?p :block/properties ?prop]
+         [(name ?key) ?key-str]
+         [?prop-b :block/name ?key-str]
+         [?prop-b :block/type "property"]
+         [?prop-b :block/uuid ?prop-uuid]
+         [(get ?prop ?prop-uuid) ?v]
+         (or ([= ?v ?val])
+             [(contains? ?v ?val)])]
 
       ;; Clause 2: Match values joined by refs
-      [(page-property ?p ?key ?val)
-       [?p :block/name]
-       [?p :block/properties ?prop]
-       [(name ?key) ?key-str]
-       [?prop-b :block/name ?key-str]
-       [?prop-b :block/type "property"]
-       [?prop-b :block/uuid ?prop-uuid]
-       [(get ?prop ?prop-uuid) ?v]
-       [(str ?val) ?str-val]
+      #_[(page-property ?p ?key ?val)
+         [?p :block/name]
+         [?p :block/properties ?prop]
+         [(name ?key) ?key-str]
+         [?prop-b :block/name ?key-str]
+         [?prop-b :block/type "property"]
+         [?prop-b :block/uuid ?prop-uuid]
+         [(get ?prop ?prop-uuid) ?v]
+         [(str ?val) ?str-val]
       ;; str-val is for integer pages that aren't strings
-       [?prop-val-b :block/original-name ?str-val]
-       [?prop-val-b :block/uuid ?val-uuid]
-       (or ([= ?v ?val-uuid])
-           [(contains? ?v ?val-uuid)])]]
+         [?prop-val-b :block/original-name ?str-val]
+         [?prop-val-b :block/uuid ?val-uuid]
+         (or ([= ?v ?val-uuid])
+             [(contains? ?v ?val-uuid)])]]
 
     :has-property
     '[(has-property ?b ?prop)
-      [?b :block/properties ?bp]
+      [?b ?prop ?v]
       [(missing? $ ?b :block/name)]
-      [(name ?prop) ?prop-name-str]
-      [?prop-b :block/name ?prop-name-str]
-      [?prop-b :block/type "property"]
-      [?prop-b :block/uuid ?prop-uuid]
-      [(get ?bp ?prop-uuid) ?v]
+      [?prop-e :db/ident ?prop]
+      [?prop-e :block/type "property"]
       ;; Some deleted properties leave #{} which this rule shouldn't match on
       [(not= #{} ?v)]]
 
     :property
-    '[;; Clause 1: Match non-ref values
-      [(property ?b ?key ?val)
-       [?b :block/properties ?prop]
-       [(missing? $ ?b :block/name)]
-       [(name ?key) ?key-str]
-       [?prop-b :block/name ?key-str]
-       [?prop-b :block/type "property"]
-       [?prop-b :block/uuid ?prop-uuid]
-       [(get ?prop ?prop-uuid) ?v]
-       (or [(= ?v ?val)]
-           [(contains? ?v ?val)])]
+    '[(property ?b ?prop ?val)
+      [?b ?prop ?val]
+      [(missing? $ ?b :block/name)]
+      [?prop-e :db/ident ?prop]
+      [?prop-e :block/type "property"]]
 
-      ;; Clause 2: Match values joined by refs
-      [(property ?b ?key ?val)
-       [?b :block/properties ?prop]
-       [(missing? $ ?b :block/name)]
-       [(name ?key) ?key-str]
-       [?prop-b :block/name ?key-str]
-       [?prop-b :block/type "property"]
-       [?prop-b :block/uuid ?prop-uuid]
-       [(get ?prop ?prop-uuid) ?v]
-       [(str ?val) ?str-val]
-      ;; str-val is for integer pages that aren't strings
-       [?prop-val-b :block/original-name ?str-val]
-       [?prop-val-b :block/uuid ?val-uuid]
-       (or ([= ?v ?val-uuid])
-           [(contains? ?v ?val-uuid)])]]}))
+    :task
+    '[(task ?b ?statuses)
+      (property ?b :logseq.task/status ?v)
+      [?v :block/content ?status]
+      [(contains? ?statuses ?status)]]}))
+
+(def rules-dependencies
+  "For db graphs, a map of rule names and the rules they depend on. If this map
+  becomes long or brittle, we could do scan rules for their deps with something
+  like find-rules-in-where"
+  {:task #{:property}})
 
 (defn extract-rules
   "Given a rules map and the rule names to extract, returns a vector of rules to
-  be passed to datascript.core/q. Can handle rules with multiple or single clauses"
+  be passed to datascript.core/q. Can handle rules with multiple or single clauses.
+  Takes following options:
+   * :deps - A map of rule names to their dependencies. Only one-level of dependencies are resolved.
+   No dependencies are detected by default though we could add it later e.g. find-rules-in-where"
   ([rules-m] (extract-rules rules-m (keys rules-m)))
-  ([rules-m rules]
-   (vec
-    (mapcat #(let [val (rules-m %)]
-              ;; if vector?, rule has multiple clauses
-               (if (vector? (first val)) val [val]))
-            rules))))
+  ([rules-m rules & {:keys [deps]}]
+   (let [rules-with-deps (concat rules
+                                 (when (map? deps)
+                                   (mapcat deps rules)))]
+     (vec
+      (mapcat #(let [val (rules-m %)]
+                 ;; if vector?, rule has multiple clauses
+                 (if (vector? (first val)) val [val]))
+              rules-with-deps)))))
