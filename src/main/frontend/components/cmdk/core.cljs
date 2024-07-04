@@ -13,6 +13,7 @@
    [frontend.handler.page :as page-handler]
    [frontend.handler.route :as route-handler]
    [frontend.handler.whiteboard :as whiteboard-handler]
+   [frontend.handler.notification :as notification]
    [frontend.modules.shortcut.core :as shortcut]
    [frontend.search :as search]
    [frontend.state :as state]
@@ -113,7 +114,7 @@
                  [["Pages"          :pages          (visible-items :pages)]]
 
                  include-slash?
-                 [["Filters" :filters (visible-items :filters)]
+                 [
                   (when page-exists?
                     ["Pages" :pages (visible-items :pages)])
 
@@ -122,7 +123,8 @@
 
                   ["Current page"   :current-page   (visible-items :current-page)]
                   ["Blocks"         :blocks         (visible-items :blocks)]
-                  ["Files"          :files          (visible-items :files)]]
+                  ["Files"          :files          (visible-items :files)]
+                  ["Filters" :filters (visible-items :filters)]]
 
                  filter-group
                  [(when (= filter-group :blocks)
@@ -139,11 +141,11 @@
                    [["Pages"          :pages          (visible-items :pages)]
                     (when-not page-exists?
                       ["Create"         :create       (create-items input)])
-                    ["Filters"        :filters        (visible-items :filters)]
                     ["Commands"       :commands       (visible-items :commands)]
                     ["Current page"   :current-page   (visible-items :current-page)]
                     ["Blocks"         :blocks         (visible-items :blocks)]
-                    ["Files"          :files          (visible-items :files)]]
+                    ["Files"          :files          (visible-items :files)]
+                    ["Filters"        :filters        (visible-items :filters)]]
                    (remove nil?)))
         order (remove nil? order*)]
     (for [[group-name group-key group-items] order]
@@ -213,19 +215,18 @@
     (swap! !results assoc-in [group :status] :loading)
     (p/let [pages (search/page-search @!input)
             items (->> pages
-                    (remove nil?)
-                    (map
-                      (fn [page]
-                        (let [entity (db/get-page page)
-                              whiteboard? (= (:block/type entity) "whiteboard")
-                              source-page (model/get-alias-source-page repo (:db/id entity))]
-                          (hash-map :icon (if whiteboard? "whiteboard" "page")
-                            :icon-theme :gray
-                            :text page
-                            :source-page (if source-page
-                                           (:block/original-name source-page)
-                                           page))))))]
-      (swap! !results update group        merge {:status :success :items items}))))
+                       (map
+                        (fn [page]
+                          (let [entity (db/entity [:block/uuid (uuid (:id page))])
+                                whiteboard? (= (:block/type entity) "whiteboard")
+                                source-page (model/get-alias-source-page repo (:db/id entity))]
+                            (hash-map :icon (if whiteboard? "whiteboard" "page")
+                                      :icon-theme :gray
+                                      :text (:title page)
+                                      :source-page (if source-page
+                                                     (:block/original-name source-page)
+                                                     (:title page)))))))]
+      (swap! !results update group merge {:status :success :items items}))))
 
 (defmethod load-results :whiteboards [group state]
   (let [!input (::input state)
@@ -322,7 +323,8 @@
                  themes
                  (search/fuzzy-search themes @!input :limit 100 :extract-fn :name))
         themes (cons {:name "Logseq Default theme"
-                      :pid  "logseq-classic-theme"
+                      :pid "logseq-classic-theme"
+                      :mode (state/sub :ui/theme)
                       :url nil} themes)
         selected (state/sub :plugin/selected-theme)]
     (swap! !results assoc-in [group :status] :loading)
@@ -349,11 +351,12 @@
     (swap! !results update group merge {:status :success :items matched-items})))
 
 (defmethod load-results :current-page [group state]
-  (if-let [current-page (page-util/get-current-page-id)]
+  (if-let [current-page (when-let [id (page-util/get-current-page-id)]
+                          (db/entity id))]
     (let [!results (::results state)
           !input (::input state)
           repo (state/get-current-repo)
-          opts {:limit 100 :page current-page}]
+          opts {:limit 100 :page (str (:block/uuid current-page))}]
       (swap! !results assoc-in [group :status] :loading)
       (swap! !results assoc-in [:current-page :status] :loading)
       (p/let [blocks (search/block-search repo @!input opts)
@@ -364,7 +367,7 @@
                                       (uuid (:block/uuid block)))]
                              {:icon "block"
                               :icon-theme :gray
-                              :text (:block/content block)
+                              :text (highlight-content-query (:block/content block) @!input)
                               :header (block/breadcrumb {:search? true} repo id {})
                               :current-page? true
                               :source-block block})) blocks)]
@@ -462,11 +465,15 @@
       (let [file-fpath (path/path-join (config/get-repo-dir (state/get-current-repo)) file-path)]
         (ipc/ipc "openFileInFolder" file-fpath)))))
 
+(defn- page-item?
+  [item]
+  (let [block-uuid (:block/uuid (:source-block item))]
+    (or (boolean (:source-page item))
+        (and block-uuid (:block/name (db/entity [:block/uuid block-uuid]))))))
+
 (defmethod handle-action :open [_ state event]
   (when-let [item (some-> state state->highlighted-item)]
-    (let [block-uuid (:block/uuid (:source-block item))
-          page? (or (boolean (:source-page item))
-                  (and block-uuid (:block/name (db/entity [:block/uuid block-uuid]))))
+    (let [page? (page-item? item)
           block? (boolean (:source-block item))
           shift?  @(::shift? state)
           shift-or-sidebar? (or shift? (boolean (:open-sidebar? (:opts state))))
@@ -505,15 +512,15 @@
         class (when create-class? (get-class-from-input @!input))]
     (p/do!
       (cond
-        create-class? (page-handler/<create! class
-                        {:redirect? false
-                         :create-first-block? false
-                         :class? true})
+        create-class?
+        (page-handler/<create-class! class
+                                     {:redirect? false
+                                      :create-first-block? false})
         create-whiteboard? (whiteboard-handler/<create-new-whiteboard-and-redirect! @!input)
         create-page? (page-handler/<create! @!input {:redirect? true}))
-      (if create-class?
-        (state/pub-event! [:class/configure (db/get-page class)])
-        (state/close-modal!)))))
+      (state/close-modal!)
+      (when create-class?
+        (state/pub-event! [:class/configure (db/get-case-page class)])))))
 
 (defn- get-filter-user-input
   [input]
@@ -663,10 +670,14 @@
   ([state e input]
    (let [composing? (util/native-event-is-composing? e)
          e-type (gobj/getValueByKeys e "type")
+         composing-end? (= e-type "compositionend")
          !input (::input state)
+         input-ref @(::input-ref state)
          !load-results-throttled (::load-results-throttled state)]
+
      ;; update the input value in the UI
      (reset! !input input)
+     (set! (.-value input-ref) input)
 
      (reset! (::input-changed? state) true)
 
@@ -675,9 +686,42 @@
        (reset! !load-results-throttled (gfun/throttle load-results 50)))
 
      ;; retrieve the load-results function and update all the results
-     (when (or (not composing?) (= e-type "compositionend"))
+     (when (or (not composing?) composing-end?)
        (when-let [load-results-throttled @!load-results-throttled]
          (load-results-throttled :default state))))))
+
+(defn- open-current-item-link
+  "Opens a link for the current item if a page or block. For pages, opens the
+  first :url property if a db graph or for file graphs opens first property
+  value with a url. For blocks, opens the first url found in the block content"
+  [state]
+  (let [item (some-> state state->highlighted-item)
+        repo (state/get-current-repo)]
+    (cond
+      (page-item? item)
+      (p/let [page (some-> (get-highlighted-page-uuid-or-name state) db/get-page)
+              _ (db-async/<get-block repo (:block/uuid page) :children? false)
+              page' (db/entity repo [:block/uuid (:block/uuid page)])
+              link (if (config/db-based-graph? repo)
+                     (some (fn [[k v]]
+                             (when (= :url (get-in (db/entity repo k) [:block/schema :type]))
+                               (:block/content v)))
+                           (:block/properties page'))
+                     (some #(re-find editor-handler/url-regex (val %)) (:block/properties page')))]
+        (if link
+          (js/window.open link)
+          (notification/show! "No link found in this page's properties." :warning)))
+
+      (:source-block item)
+      (p/let [block-id (:block/uuid (:source-block item))
+              _ (db-async/<get-block repo block-id :children? false)
+              block (db/entity [:block/uuid block-id])
+              link (re-find editor-handler/url-regex (:block/content block))]
+        (if link
+          (js/window.open link)
+          (notification/show! "No link found in this block's content." :warning)))
+      :else
+      (notification/show! "No link for this search item." :warning))))
 
 (defn- keydown-handler
   [state e]
@@ -724,6 +768,8 @@
       (and meta? (= keyname "c")) (do
                                     (copy-block-ref state)
                                     (util/stop-propagation e))
+      (and meta? (= keyname "o"))
+      (open-current-item-link state)
       :else nil)))
 
 (defn- keyup-handler
@@ -757,7 +803,7 @@
       [all-items])
     (rum/use-effect! (fn [] (load-results :default state)) [])
     [:div {:class "bg-gray-02 border-b border-1 border-gray-07"}
-     [:input#search
+     [:input.cp__cmdk-search-input
       {:class "text-xl bg-transparent border-none w-full outline-none px-3 py-3"
        :auto-focus true
        :autoComplete "off"
@@ -787,7 +833,7 @@
                                   (and backspace? (= input ""))))
                           (reset! (::filter state) nil)
                           (load-results :default state))))
-       :value input}]]))
+       :default-value input}]]))
 
 (defn rand-tip
   []

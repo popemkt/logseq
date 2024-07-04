@@ -27,7 +27,6 @@
             [reitit.frontend.easy :as rfe]
             [rum.core :as rum]
             [clojure.string :as string]
-            [frontend.handler.db-based.rtc :as rtc-handler]
             [frontend.db :as db]
             [logseq.db :as ldb]))
 
@@ -61,20 +60,6 @@
           [:span.ml-2 (ui/loading "")])]])))
 
 (rum/defc rtc-collaborators < rum/reactive
-  {:will-mount (fn [state]
-                 (let [*interval (atom nil)]
-                   (reset! *interval
-                           (js/setInterval
-                            (fn []
-                              (if (= :open (:ws-state (:rtc-state @(:rtc/state @state/state))))
-                                (rtc-handler/<rtc-get-users-info)
-                                (when @*interval (js/clearInterval @*interval))))
-                            5000))
-                   (assoc state ::interval *interval)))
-   :will-unmount (fn [state]
-                   (when-let [interval @(::interval state)]
-                     (js/clearInterval interval))
-                   state)}
   []
   (let [rtc-graph-id (ldb/get-graph-rtc-uuid (db/get-db))
         online-users (->> (get (state/sub :rtc/users-info) (state/get-current-repo))
@@ -85,14 +70,16 @@
         {:class "pt-[3px] pr-1"
          :on-click #(shui/dialog-open!
                      (fn []
-                       [:div
-                        [:h1.text-lg.-mt-6.-ml-2 "Collaborators:"]
+                       [:div.p-2.-mb-8
+                        [:h1.text-3xl.-mt-2.-ml-2 "Collaborators:"]
                         (settings/settings-collaboration)]))}
         (if (not (seq online-users))
           (shui/tabler-icon "user-plus")
           (shui/tabler-icon "user-plus"))]
        (when (seq online-users)
-         (for [{:keys [user-email user-name user-uuid]} online-users
+         (for [{user-email :user/email
+                user-name :user/name
+                user-uuid :user/uuid} online-users
                :let [color (shui-util/uuid-color user-uuid)]]
            (when user-name
              (shui/avatar
@@ -132,7 +119,7 @@
 
 (rum/defc toolbar-dots-menu < rum/reactive
   [{:keys [current-repo t]}]
-  (let [page-menu (page-menu/page-menu nil)
+  (let [page-menu (page-menu/page-menu (some-> (sidebar/get-current-page) (db/get-page)))
         page-menu-and-hr (when (seq page-menu)
                            (concat page-menu [{:hr true}]))
         login? (and (state/sub :auth/id-token) (user-handler/logged-in?))
@@ -150,7 +137,7 @@
 
                    (when config/lsp-enabled?
                      {:title (t :themes)
-                      :options {:on-click #(plugins/open-select-theme!)}
+                      :options {:on-click #(plugin-handler/show-themes-modal!)}
                       :icon (ui/icon "palette")})
 
                    (when current-repo

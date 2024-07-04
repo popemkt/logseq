@@ -1,32 +1,28 @@
 (ns frontend.worker.rtc.remote-update
   "Fns about applying remote updates"
-  (:require [cljs-time.coerce :as tc]
-            [cljs-time.core :as t]
+  (:require [clojure.data :as data]
             [clojure.set :as set]
             [clojure.string :as string]
-            [cognitect.transit :as transit]
             [datascript.core :as d]
             [frontend.schema-register :as sr]
-            [frontend.worker.batch-tx :as batch-tx]
             [frontend.worker.handler.page :as worker-page]
-            [frontend.worker.handler.page.db-based.rename :as worker-page-rename]
             [frontend.worker.rtc.const :as rtc-const]
+            [frontend.worker.rtc.log-and-state :as rtc-log-and-state]
             [frontend.worker.rtc.op-mem-layer :as op-mem-layer]
             [frontend.worker.state :as worker-state]
             [frontend.worker.util :as worker-util]
+            [logseq.clj-fractional-indexing :as index]
             [logseq.common.util :as common-util]
             [logseq.db :as ldb]
-            [logseq.db.frontend.content :as db-content]
             [logseq.db.frontend.property.util :as db-property-util]
             [logseq.graph-parser.whiteboard :as gp-whiteboard]
+            [logseq.outliner.batch-tx :as batch-tx]
             [logseq.outliner.core :as outliner-core]
             [logseq.outliner.transaction :as outliner-tx]))
 
 (sr/defkeyword ::need-pull-remote-data
   "remote-update's :remote-t-before > :local-tx,
    so need to pull earlier remote-data from websocket.")
-
-(def ^:private transit-r (transit/reader :json))
 
 (defmulti ^:private transact-db! (fn [action & _args] action))
 
@@ -48,6 +44,43 @@
                     :conn (second args)}}
    (apply outliner-core/move-blocks! args)))
 
+(defmethod transact-db! :update-block-order-directly [_ _repo conn block-uuid block-parent-uuid block-order]
+  ;; transact :block/parent and :block/order directly,
+  ;; check :block/order has any conflicts with other blocks
+  (let [parent-ent (when block-parent-uuid (d/entity @conn [:block/uuid block-parent-uuid]))
+        sorted-order+block-uuid-coll (sort-by first (map (juxt :block/order :block/uuid) (:block/_parent parent-ent)))
+        block-order*
+        (if-let [[start-order end-order]
+                 (reduce
+                  (fn [[start-order] [current-order current-block-uuid]]
+                    (when start-order
+                      (if (= current-block-uuid block-uuid)
+                        (reduced nil)
+                        (reduced [start-order current-order])))
+                    (let [compare-order (compare current-order block-order)]
+                      (cond
+                        (and (zero? compare-order)
+                             (not= current-block-uuid block-uuid))
+                        ;; found conflict order
+                        [current-order nil]
+
+                        (and (zero? compare-order)
+                             (= current-block-uuid block-uuid))
+                        ;; this block already has expected :block/order
+                        (reduced nil)
+
+                        (pos? compare-order) ;not found conflict order
+                        (reduced nil)
+
+                        (neg? compare-order)
+                        nil)))
+                  nil sorted-order+block-uuid-coll)]
+          (index/generate-key-between start-order end-order)
+          block-order)]
+    (ldb/transact! conn [{:block/uuid block-uuid :block/order block-order*}])
+    ;; TODO: add ops when block-order* != block-order
+    ))
+
 (defmethod transact-db! :move-blocks&persist-op [_ & args]
   (outliner-tx/transact!
    {:persist-op? true
@@ -57,24 +90,23 @@
                     :conn (second args)}}
    (apply outliner-core/move-blocks! args)))
 
-(defmethod transact-db! :insert-blocks [_ & args]
+(defmethod transact-db! :insert-blocks [_ repo conn blocks target opts]
   (outliner-tx/transact!
    {:persist-op? false
     :gen-undo-ops? false
     :outliner-op :insert-blocks
-    :transact-opts {:repo (first args)
-                    :conn (second args)}}
-   (apply outliner-core/insert-blocks! args)))
+    :transact-opts {:repo repo
+                    :conn conn}}
+   (let [opts' (assoc opts :keep-block-order? true)]
+     (outliner-core/insert-blocks! repo conn blocks target opts'))))
 
-(defmethod transact-db! :insert-no-order-blocks [_ conn block-uuids]
+(defmethod transact-db! :insert-no-order-blocks [_ conn block-uuid+parent-coll]
   (ldb/transact! conn
-                 (mapv (fn [block-uuid]
+                 (mapv (fn [[block-uuid block-parent]]
                          ;; add block/content block/format to satisfy the normal-block schema
-                         {:block/uuid block-uuid
-                          ;; NOTE: block without :block/order
-                          ;; must be `logseq.db.frontend.malli-schema.closed-value-block`
-                          :block/type #{"closed value"}})
-                       block-uuids)
+                         (cond-> {:block/uuid block-uuid}
+                           block-parent (assoc :block/parent [:block/uuid block-parent])))
+                       block-uuid+parent-coll)
                  {:persist-op? false
                   :gen-undo-ops? false}))
 
@@ -150,72 +182,39 @@
                       {})))))
 
 (defn- insert-or-move-block
-  [repo conn block-uuid remote-parents remote-left-uuid move? op-value]
+  [repo conn block-uuid remote-parents remote-block-order move? op-value]
   (when (seq remote-parents)
     (let [first-remote-parent (first remote-parents)
           local-parent (d/entity @conn [:block/uuid first-remote-parent])
           whiteboard-page-block? (whiteboard-page-block? local-parent)
-          ;; when insert blocks in whiteboard, local-left is ignored
-          ;; remote-left-uuid is nil when it's :no-order block
-          local-left (when-not whiteboard-page-block?
-                       (when remote-left-uuid
-                         (d/entity @conn [:block/uuid remote-left-uuid])))
           b (d/entity @conn [:block/uuid block-uuid])]
-      (case [whiteboard-page-block? (some? local-parent) (some? local-left) (some? remote-left-uuid)]
-        [false false true true]
-        (if move?
-          (transact-db! :move-blocks repo conn [b] local-left true)
-          (transact-db! :insert-blocks repo conn
-                        [{:block/uuid block-uuid
-                          :block/content ""
-                          :block/format :markdown}]
-                        local-left {:sibling? true :keep-uuid? true}))
+      (case [whiteboard-page-block? (some? local-parent) (some? remote-block-order)]
+        [false true true]
+        (do (if move?
+              (transact-db! :move-blocks repo conn [b] local-parent false)
+              (transact-db! :insert-blocks repo conn
+                            [{:block/uuid block-uuid
+                              :block/content ""
+                              :block/format :markdown}]
+                            local-parent {:sibling? false :keep-uuid? true}))
+            (transact-db! :update-block-order-directly repo conn block-uuid first-remote-parent remote-block-order))
 
-        [false true true true]
-        (let [sibling? (not= (:block/uuid local-parent) (:block/uuid local-left))]
-          (if move?
-            (transact-db! :move-blocks repo conn [b] local-left sibling?)
-            (transact-db! :insert-blocks repo conn
-                          [{:block/uuid block-uuid :block/content ""
-                            :block/format :markdown}]
-                          local-left {:sibling? sibling? :keep-uuid? true})))
-
-        [false true false true]
+        [false true false]
         (if move?
           (transact-db! :move-blocks repo conn [b] local-parent false)
-          (transact-db! :insert-blocks repo conn
-                        [{:block/uuid block-uuid :block/content ""
-                          :block/format :markdown}]
-                        local-parent {:sibling? false :keep-uuid? true}))
+          (transact-db! :insert-no-order-blocks conn [[block-uuid first-remote-parent]]))
 
-        [false true false false]
-        (if move?
-          (transact-db! :move-blocks repo conn [b] local-parent false)
-          (transact-db! :insert-no-order-blocks conn [block-uuid]))
+        ([true false false] [true false true] [true true false] [true true true])
+        (throw (ex-info "Not implemented yet for whiteboard" {:op-value op-value}))
 
-        ;; Don't need to insert-whiteboard-block here,
-        ;; will do :upsert-whiteboard-block in `update-block-attrs`
-        ([true true false true] [true true false false])
-        (when (nil? (:properties op-value))
-          ;; when :properties is nil, this block should be treat as normal block
-          (if move?
-            (transact-db! :move-blocks repo conn [b] local-parent false)
-            (transact-db! :insert-blocks repo conn [{:block/uuid block-uuid :block/content "" :block/format :markdown}]
-                          local-parent {:sibling? false :keep-uuid? true})))
-        ([true true true true] [true true true false])
-        (when (nil? (:properties op-value))
-          (let [sibling? (not= (:block/uuid local-parent) (:block/uuid local-left))]
-            (if move?
-              (transact-db! :move-blocks repo conn [b] local-left sibling?)
-              (transact-db! :insert-blocks repo conn [{:block/uuid block-uuid :block/content "" :block/format :markdown}]
-                            local-left {:sibling? sibling? :keep-uuid? true}))))
-
-        (throw (ex-info "Don't know where to insert" {:block-uuid block-uuid :remote-parents remote-parents
-                                                      :remote-left remote-left-uuid}))))))
+        (throw (ex-info "Don't know where to insert" {:block-uuid block-uuid
+                                                      :remote-parents remote-parents
+                                                      :remote-block-order remote-block-order
+                                                      :op-value op-value}))))))
 
 (defn- move-ops-map->sorted-move-ops
   [move-ops-map]
-  (let [uuid->dep-uuids (into {} (map (fn [[uuid env]] [uuid (set (conj (:parents env) (:left env)))]) move-ops-map))
+  (let [uuid->dep-uuids (into {} (map (fn [[uuid env]] [uuid (set (conj (:parents env)))]) move-ops-map))
         all-uuids (set (keys move-ops-map))
         sorted-uuids
         (loop [r []
@@ -233,91 +232,85 @@
 (defn- apply-remote-remove-page-ops
   [repo conn remove-page-ops]
   (doseq [op remove-page-ops]
-    (when-let [page-name (:block/name (d/entity @conn [:block/uuid (:block-uuid op)]))]
-      (worker-page/delete! repo conn page-name {:persist-op? false}))))
+    (worker-page/delete! repo conn (:block-uuid op) {:persist-op? false})))
 
-(defn- filter-remote-data-by-local-unpushed-ops
+(defn- patch-remote-attr-map-by-local-av-coll
+  [attr-map av-coll]
+  (let [a->add->v+t (reduce
+                     (fn [m [a v t add?]]
+                       (assoc-in m [a add?] [v t]))
+                     {} av-coll)]
+    (into attr-map
+          (keep
+           (fn [[remote-a _remote-v]]
+             (when-let [v (get-in a->add->v+t [remote-a true 0])]
+               [remote-a v])))
+          attr-map)))
+
+(defn- update-remote-data-by-local-unpushed-ops
   "when remote-data request client to move/update/remove/... blocks,
-  these updates maybe not needed, because this client just updated some of these blocks,
-  so we need to filter these just-updated blocks out, according to the unpushed-local-ops"
+  these updates maybe not needed or need to update, because this client just updated some of these blocks,
+  so we need to update these remote-data by local-ops"
   [affected-blocks-map local-unpushed-ops]
-  ;; (assert (op-mem-layer/ops-coercer local-unpushed-ops) local-unpushed-ops)
+  (assert (op-mem-layer/ops-coercer local-unpushed-ops) local-unpushed-ops)
   (reduce
    (fn [affected-blocks-map local-op]
-     (case (first local-op)
-       "move"
-       (let [block-uuid (:block-uuid (second local-op))
-             remote-op (get affected-blocks-map block-uuid)]
-         (case (:op remote-op)
-           :remove (dissoc affected-blocks-map (:block-uuid remote-op))
-           :move (dissoc affected-blocks-map (:self remote-op))
-           ;; default
-           affected-blocks-map))
+     (let [local-op-value (last local-op)]
+       (case (first local-op)
+         :move
+         (let [block-uuid (:block-uuid local-op-value)
+               remote-op (get affected-blocks-map block-uuid)]
+           (case (:op remote-op)
+             :remove (dissoc affected-blocks-map (:block-uuid remote-op))
+             :move (dissoc affected-blocks-map (:self remote-op))
+             ;; remove block/order, parents in update-attrs, if there're some unpushed local move-ops
+             (:update-attrs :move+update-attrs)
+             (update affected-blocks-map (:self remote-op) dissoc :block/order :parents)
+             ;; default
+             affected-blocks-map))
 
-       "update"
-       (let [block-uuid (:block-uuid (second local-op))
-             local-updated-attr-set (set (keys (:updated-attrs (second local-op))))]
-         (if-let [remote-op (get affected-blocks-map block-uuid)]
-           (assoc affected-blocks-map block-uuid
-                  (if (#{:update-attrs :move} (:op remote-op))
-                    (apply dissoc remote-op local-updated-attr-set)
-                    remote-op))
-           affected-blocks-map))
-       ;;else
-       affected-blocks-map))
+         :update
+         (let [block-uuid (:block-uuid local-op-value)]
+           (if-let [remote-op (get affected-blocks-map block-uuid)]
+             (let [remote-op* (if (#{:update-attrs :move :move+update-attrs} (:op remote-op))
+                                (patch-remote-attr-map-by-local-av-coll remote-op (:av-coll local-op-value))
+                                remote-op)]
+               (assoc affected-blocks-map block-uuid remote-op*))
+             affected-blocks-map))
+         ;;else
+         affected-blocks-map)))
    affected-blocks-map local-unpushed-ops))
 
 (defn- affected-blocks->diff-type-ops
   [repo affected-blocks]
   (let [unpushed-ops (op-mem-layer/get-all-ops repo)
         affected-blocks-map* (if unpushed-ops
-                               (filter-remote-data-by-local-unpushed-ops
+                               (update-remote-data-by-local-unpushed-ops
                                 affected-blocks unpushed-ops)
                                affected-blocks)
         {remove-ops-map :remove move-ops-map :move update-ops-map :update-attrs
+         move+update-ops-map :move+update-attrs
          update-page-ops-map :update-page remove-page-ops-map :remove-page}
         (update-vals
          (group-by (fn [[_ env]] (get env :op)) affected-blocks-map*)
          (partial into {}))]
     {:remove-ops-map remove-ops-map
-     :move-ops-map move-ops-map
-     :update-ops-map update-ops-map
+     :move-ops-map (merge move-ops-map move+update-ops-map)
+     :update-ops-map (merge update-ops-map move+update-ops-map)
      :update-page-ops-map update-page-ops-map
      :remove-page-ops-map remove-page-ops-map}))
 
-(defn- empty-page?
-  "1. page has no child-block
-  2. page has child-blocks and all these blocks only have empty :block/content"
-  [page-entity]
-  (not
-   (when-let [children-blocks (and page-entity
-                                   (seq (map #(into {} %) (:block/_parent page-entity))))]
-     (some
-      (fn [block]
-        (not= {:block/content ""}
-              (-> (apply dissoc block [:block/tx-id
-                                       :block/uuid
-                                       :block/updated-at
-                                       :block/created-at
-                                       :block/format
-                                       :db/id
-                                       :block/parent
-                                       :block/page
-                                       :block/path-refs])
-                  (update :block/content string/trim))))
-      children-blocks))))
-
 (defn- check-block-pos
   "NOTE: some blocks don't have :block/order (e.g. whiteboard blocks)"
-  [db block-uuid remote-parents remote-left-uuid]
+  [db block-uuid remote-parents remote-block-order]
   (let [local-b (d/entity db [:block/uuid block-uuid])
         remote-parent-uuid (first remote-parents)]
     (cond
       (nil? local-b)
       :not-exist
 
-      (not= [remote-left-uuid remote-parent-uuid]
-            [(:block/uuid (ldb/get-left-sibling local-b)) (:block/uuid (:block/parent local-b))])
+      (not= [remote-block-order remote-parent-uuid]
+            [(:block/order local-b) (:block/uuid (:block/parent local-b))])
       :wrong-pos
 
       :else nil)))
@@ -327,215 +320,235 @@
   (let [db @conn
         first-remote-parent (first parents)]
     (when-let [local-parent (d/entity db [:block/uuid first-remote-parent])]
-      (let [page-name (:block/name local-parent)
-            properties* (transit/read transit-r properties)
+      (let [page-id (:db/id local-parent)
+            properties* (ldb/read-transit-str properties)
             shape-property-id (db-property-util/get-pid repo :logseq.property.tldraw/shape)
             shape (and (map? properties*)
                        (get properties* shape-property-id))]
-        (assert (some? page-name) local-parent)
+        (assert (some? page-id) local-parent)
         (assert (some? shape) properties*)
-        (transact-db! :upsert-whiteboard-block conn [(gp-whiteboard/shape->block repo shape page-name)])))))
+        (transact-db! :upsert-whiteboard-block conn [(gp-whiteboard/shape->block repo shape page-id)])))))
 
-(defn- need-update-block?
-  [conn block-uuid op-value]
-  (let [ent (d/entity @conn [:block/uuid block-uuid])]
-    (worker-util/profile
-     :need-update-block?
-     (let [r (some (fn [[k v]]
-                     (case k
-                       :content     (not= v (:block/raw-content ent))
-                       :updated-at  (not= v (:block/updated-at ent))
-                       :created-at  (not= v (:block/created-at ent))
-                       :alias       (not= (set v) (set (map :block/uuid (:block/alias ent))))
-                       :type        (not= (set v) (set (:block/type ent)))
-                       :schema      (not= (transit/read transit-r v) (:block/schema ent))
-                       :tags        (not= (set v) (set (map :block/uuid (:block/tags ent))))
-                       :properties  (not= (transit/read transit-r v) (:block/properties ent))
-                       :link        (not= v (:block/uuid (:block/link ent)))
-                       :journal-day (not= v (:block/journal-day ent))
-                       false))
-                   op-value)]
-       (prn :need-update-block? r)
-       r))))
+(def ^:private update-op-watched-attrs
+  #{:block/content
+    :block/updated-at
+    :block/created-at
+    :block/alias
+    :block/type
+    :block/schema
+    :block/tags
+    :block/link
+    :block/journal-day
+    :class/parent
+    :class/schema.properties
+    :property/schema.classes
+    :property.value/content})
+
+(defn- update-op-watched-attr?
+  [attr]
+  (or (contains? update-op-watched-attrs attr)
+      (when-let [ns (namespace attr)]
+        (or (= "logseq.task" ns)
+            (string/ends-with? ns ".property")))))
+
+(defn- diff-block-kv->tx-data
+  [db db-schema e k local-v remote-v]
+  (let [k-schema (get db-schema k)
+        ref? (= :db.type/ref (:db/valueType k-schema))
+        card-many? (= :db.cardinality/many (:db/cardinality k-schema))]
+    (case [ref? card-many?]
+      [true true]
+      (let [[local-only remote-only] (data/diff (set local-v) (set remote-v))]
+        (cond-> []
+          (seq local-only) (concat (map (fn [block-uuid] [:db/retract e k [:block/uuid block-uuid]]) local-only))
+          (seq remote-only) (concat (keep (fn [block-uuid]
+                                            (when-let [db-id (:db/id (d/entity db [:block/uuid block-uuid]))]
+                                              [:db/add e k db-id])) remote-only))))
+
+      [true false]
+      (let [remote-block-uuid (if (coll? remote-v) (first remote-v) remote-v)]
+        (when (not= local-v remote-block-uuid)
+          (when-let [db-id (:db/id (d/entity db [:block/uuid remote-block-uuid]))]
+            [[:db/add e k db-id]])))
+      [false false]
+      (let [remote-v* (if (coll? remote-v)
+                        (first (map ldb/read-transit-str remote-v))
+                        (ldb/read-transit-str remote-v))]
+        (when (not= local-v remote-v*)
+          (if (nil? remote-v*)
+            [[:db/retract e k local-v]]
+            [[:db/add e k remote-v*]])))
+
+      [false true]
+      (let [_ (assert (or (nil? remote-v) (coll? remote-v)) {:remote-v remote-v :a k :e e})
+            remote-v* (set (map ldb/read-transit-str remote-v))
+            [local-only remote-only] (data/diff (set local-v) remote-v*)]
+        (cond-> []
+          (seq local-only) (concat (map (fn [v] [:db/retract e k v]) local-only))
+          (seq remote-only) (concat (map (fn [v] [:db/add e k v]) remote-only)))))))
+
+(defn- diff-block-map->tx-data
+  [db e local-block-map remote-block-map]
+  (let [db-schema (d/schema db)
+        tx-data1
+        (mapcat
+         (fn [[k local-v]]
+           (let [remote-v (get remote-block-map k)]
+             (seq (diff-block-kv->tx-data db db-schema e k local-v remote-v))))
+         local-block-map)
+        tx-data2
+        (mapcat
+         (fn [[k remote-v]]
+           (let [local-v (get local-block-map k)]
+             (seq (diff-block-kv->tx-data db db-schema e k local-v remote-v))))
+         (apply dissoc remote-block-map (keys local-block-map)))]
+    (concat tx-data1 tx-data2)))
+
+(defn- remote-op-value->tx-data
+  [db ent op-value]
+  (assert (some? (:db/id ent)) ent)
+  (let [db-schema (d/schema db)
+        local-block-map (->> ent
+                             (filter (comp update-op-watched-attr? first))
+                             (map (fn [[k v]]
+                                    (let [k-schema (get db-schema k)
+                                          ref? (= :db.type/ref (:db/valueType k-schema))
+                                          card-many? (= :db.cardinality/many (:db/cardinality k-schema))]
+                                      [k
+                                       (case [ref? card-many?]
+                                         [true true]
+                                         (keep (fn [x] (when-let [e (:db/id x)] (:block/uuid (d/entity db e)))) v)
+                                         [true false]
+                                         (let [v* (some->> (:db/id v) (d/entity db) :block/uuid)]
+                                           (assert (some? v*) v)
+                                           v*)
+                                         ;; else
+                                         v)])))
+                             (into {}))
+        remote-block-map (->> op-value
+                              (filter (comp update-op-watched-attr? first))
+                              (map (fn [[k v]]
+                                     ;; all non-built-in attrs is card-many in remote-op,
+                                     ;; convert them according to the client db-schema
+                                     (let [k-schema (get db-schema k)
+                                           card-many? (= :db.cardinality/many (:db/cardinality k-schema))]
+                                       [k
+                                        (if (and (coll? v) (not card-many?))
+                                          (first v)
+                                          v)])))
+                              (into {}))]
+    (diff-block-map->tx-data db (:db/id ent) local-block-map remote-block-map)))
+
+(defn- remote-op-value->schema-tx-data
+  [block-uuid op-value]
+  (when-let [schema-map (some-> op-value :client/schema ldb/read-transit-str)]
+    (when-let [db-ident (:db/ident op-value)]
+      [(merge {:block/uuid block-uuid :db/ident db-ident} schema-map)])))
+
+(defn- update-block-order
+  [e op-value]
+  (if-let [order (:block/order op-value)]
+    {:op-value (dissoc op-value :block/order)
+     :tx-data [[:db/add e :block/order order]]}
+    {:op-value op-value}))
 
 (defn- update-block-attrs
-  [repo conn date-formatter block-uuid {:keys [parents properties _content] :as op-value}]
-  (let [key-set (set/intersection
-                 (conj rtc-const/general-attr-set :content)
-                 (set (keys op-value)))]
-    (when (seq key-set)
-      (let [first-remote-parent (first parents)
+  [repo conn block-uuid {:keys [parents] :as op-value}]
+  (when-let [ent (d/entity @conn [:block/uuid block-uuid])]
+    (when (some (fn [k] (= "block" (namespace k))) (keys op-value)) ; there exists some :block/xxx attrs
+      (let [{update-block-order-tx-data :tx-data op-value :op-value} (update-block-order (:db/id ent) op-value)
+            first-remote-parent (first parents)
             local-parent (d/entity @conn [:block/uuid first-remote-parent])
             whiteboard-page-block? (whiteboard-page-block? local-parent)]
-        (cond
-          (and whiteboard-page-block? properties)
+        (if whiteboard-page-block?
           (upsert-whiteboard-block repo conn op-value)
-
-          (need-update-block? conn block-uuid op-value)
-          (let [b-ent (d/entity @conn [:block/uuid block-uuid])
-                db-id (:db/id b-ent)
-                new-block
-                (cond-> b-ent
-                  (and (contains? key-set :content)
-                       (not= (:content op-value)
-                             (:block/raw-content b-ent)))
-                  (assoc :block/content
-                         (db-content/db-special-id-ref->page @conn (:content op-value)))
-
-                  (contains? key-set :updated-at)     (assoc :block/updated-at (:updated-at op-value))
-                  (contains? key-set :created-at)     (assoc :block/created-at (:created-at op-value))
-                  (contains? key-set :alias)          (assoc :block/alias (some->> (seq (:alias op-value))
-                                                                                   (map (partial vector :block/uuid))
-                                                                                   (d/pull-many @conn [:db/id])
-                                                                                   (keep :db/id)))
-                  (contains? key-set :type)           (assoc :block/type (:type op-value))
-                  (and (contains? key-set :schema)
-                       (some? (:schema op-value)))
-                  (assoc :block/schema (transit/read transit-r (:schema op-value)))
-
-                  (contains? key-set :tags)           (assoc :block/tags (some->> (seq (:tags op-value))
-                                                                                  (map (partial vector :block/uuid))
-                                                                                  (d/pull-many @conn [:db/id])
-                                                                                  (keep :db/id)))
-                  (contains? key-set :properties)     (assoc :block/properties
-                                                             (transit/read transit-r (:properties op-value)))
-                  (and (contains? key-set :link)
-                       (some? (:link op-value)))
-                  (assoc :block/link (some->> (:link op-value)
-                                              (vector :block/uuid)
-                                              (d/pull @conn [:db/id])
-                                              :db/id))
-
-                  (and (contains? key-set :journal-day)
-                       (some? (:journal-day op-value)))
-                  (assoc :block/journal-day (:journal-day op-value)
-                         :block/journal? true))
-                *other-tx-data (atom [])]
-            ;; 'save-block' dont handle card-many attrs well?
-            (when (contains? key-set :alias)
-              (swap! *other-tx-data conj [:db/retract db-id :block/alias]))
-            (when (contains? key-set :tags)
-              (swap! *other-tx-data conj [:db/retract db-id :block/tags]))
-            (when (contains? key-set :type)
-              (swap! *other-tx-data conj [:db/retract db-id :block/type]))
-            (when (and (contains? key-set :link) (nil? (:link op-value)))
-              (swap! *other-tx-data conj [:db/retract db-id :block/link]))
-            (when (and (contains? key-set :schema) (nil? (:schema op-value)))
-              (swap! *other-tx-data conj [:db/retract db-id :block/schema]))
-            (when (and (contains? key-set :properties) (nil? (:properties op-value)))
-              (swap! *other-tx-data conj [:db/retract db-id :block/properties]))
-            (when (and (contains? key-set :journal-day) (nil? (:journal-day op-value)))
-              (swap! *other-tx-data conj
-                     [:db/retract db-id :block/journal-day]
-                     [:db/retract db-id :block/journal?]))
-            (when (seq @*other-tx-data)
-              (ldb/transact! conn @*other-tx-data {:persist-op? false
-                                                   :gen-undo-ops? false}))
-            (transact-db! :save-block repo conn date-formatter new-block)))))))
+          (do (when-let [schema-tx-data (remote-op-value->schema-tx-data block-uuid op-value)]
+                (ldb/transact! conn schema-tx-data {:persist-op? false :gen-undo-ops? false}))
+              (when-let [tx-data (seq (remote-op-value->tx-data @conn ent (dissoc op-value :client/schema)))]
+                (ldb/transact! conn (concat tx-data update-block-order-tx-data)
+                               {:persist-op? false :gen-undo-ops? false}))))))))
 
 (defn- apply-remote-update-ops
-  [repo conn date-formatter update-ops]
-  (doseq [{:keys [parents left self] :as op-value} update-ops]
-    (when (and parents left)
-      (let [r (check-block-pos @conn self parents left)]
+  [repo conn update-ops]
+  (doseq [{:keys [parents self] block-order :block/order :as op-value} update-ops]
+    (when (and parents block-order)
+      (let [r (check-block-pos @conn self parents block-order)]
         (case r
           :not-exist
-          (insert-or-move-block repo conn self parents left false op-value)
+          (insert-or-move-block repo conn self parents block-order false op-value)
           :wrong-pos
-          (insert-or-move-block repo conn self parents left true op-value)
+          (insert-or-move-block repo conn self parents block-order true op-value)
           nil)))
-    (update-block-attrs repo conn date-formatter self op-value)))
-
-(defn- move-all-blocks-to-another-page
-  [repo conn from-page-name to-page-name]
-  (let [blocks (ldb/get-page-blocks @conn from-page-name {})
-        target-page-block (d/entity @conn [:block/name to-page-name])]
-    (when (and (seq blocks) target-page-block)
-      (let [blocks* (ldb/sort-by-order blocks)]
-        (outliner-tx/transact!
-         {:persist-op? true
-          :gen-undo-ops? false
-          :transact-opts {:repo repo
-                          :conn conn}}
-         (outliner-core/move-blocks! repo conn blocks* target-page-block false))))))
+    (update-block-attrs repo conn self op-value)))
 
 (defn- apply-remote-move-ops
-  [repo conn date-formatter sorted-move-ops]
-  (doseq [{:keys [parents left self] :as op-value} sorted-move-ops]
-    (let [r (check-block-pos @conn self parents left)]
+  [repo conn sorted-move-ops]
+  (doseq [{:keys [parents self] block-order :block/order :as op-value} sorted-move-ops]
+    (let [r (check-block-pos @conn self parents block-order)]
       (case r
         :not-exist
-        (insert-or-move-block repo conn self parents left false op-value)
+        (insert-or-move-block repo conn self parents block-order false op-value)
         :wrong-pos
-        (insert-or-move-block repo conn self parents left true op-value)
-        nil                             ; do nothing
-        nil)
-      (update-block-attrs repo conn date-formatter self op-value))))
+        (insert-or-move-block repo conn self parents block-order true op-value)
+        ;; else
+        nil))))
 
 (defn- apply-remote-update-page-ops
-  [repo conn date-formatter update-page-ops]
+  [repo conn update-page-ops]
   (let [config (worker-state/get-config repo)]
-    (doseq [{:keys [self page-name original-name] :as op-value} update-page-ops]
-      (let [old-page-original-name (:block/original-name (d/entity @conn [:block/uuid self]))
-            exist-page (d/entity @conn [:block/name page-name])
-            create-opts {:create-first-block? false
-                         :uuid self :persist-op? false}]
-        (cond
-          ;; same name but different uuid, and local-existed-page is empty(`empty-page?`)
-          ;; just remove local-existed-page
-          (and exist-page
-               (not= (:block/uuid exist-page) self)
-               (empty-page? exist-page))
-          (do (worker-page/delete! repo conn page-name {:persist-op? false})
-              (worker-page/create! repo conn config original-name create-opts))
+    (doseq [{:keys [self _page-name]
+             original-name :block/original-name
+             :as op-value} update-page-ops]
+      (let [create-opts {:uuid self}
+            [_ page-name page-uuid] (worker-page/rtc-create-page! conn config (ldb/read-transit-str original-name) create-opts)]
+        ;; TODO: current page-create fn is buggy, even provide :uuid option, it will create-page with different uuid,
+        ;; if there's already existing same name page
+        (assert (= page-uuid self) {:page-name page-name :page-uuid page-uuid :should-be self})
+        (update-block-attrs repo conn self op-value)))))
 
-          ;; same name but different uuid
-          ;; remote page has same block/name as local's, but they don't have same block/uuid.
-          ;; 1. rename local page's name to '<origin-name>-<ms-epoch>-Conflict'
-          ;; 2. create page, name=<origin-name>, uuid=remote-uuid
-          (and exist-page
-               (not= (:block/uuid exist-page) self))
-          (let [conflict-page-name (common-util/format "%s-%s-CONFLICT" original-name (tc/to-long (t/now)))]
-            (worker-page-rename/rename! repo conn config original-name conflict-page-name {:persist-op? false})
-            (worker-page/create! repo conn config original-name create-opts)
-            (move-all-blocks-to-another-page repo conn conflict-page-name original-name))
-
-          ;; a client-page has same uuid as remote but different page-names,
-          ;; then we need to rename the client-page to remote-page-name
-          (and old-page-original-name (not= old-page-original-name original-name))
-          (worker-page-rename/rename! repo conn config old-page-original-name original-name {:persist-op? false})
-
-          ;; no such page, name=remote-page-name, OR, uuid=remote-block-uuid
-          ;; just create-page
-          :else
-          (worker-page/create! repo conn config original-name create-opts))
-
-        (update-block-attrs repo conn date-formatter self op-value)))))
+(defn- ensure-refed-blocks-exist
+  "Ensure refed-blocks from remote existing in client"
+  [repo conn refed-blocks]
+  (let [sorted-refed-blocks (common-util/sort-coll-by-dependency :block/uuid :block/parent refed-blocks)]
+    (doseq [refed-block sorted-refed-blocks]
+      (let [ent (d/entity @conn [:block/uuid (:block/uuid refed-block)])]
+        (when-not ent
+          (prn :ensure-refed-blocks-exist refed-block)
+          (if (:block/name refed-block)
+            (apply-remote-update-page-ops repo conn [(-> refed-block
+                                                         (assoc :self (:block/uuid refed-block))
+                                                         (dissoc :block/uuid))])
+            (apply-remote-move-ops repo conn [(-> refed-block
+                                                  (assoc :self (:block/uuid refed-block)
+                                                         :parents [(:block/parent refed-block)])
+                                                  (dissoc :block/uuid))])))))))
 
 (defn apply-remote-update
   "Apply remote-update(`remote-update-event`)"
-  [repo conn date-formatter remote-update-event add-log-fn]
+  [graph-uuid repo conn date-formatter remote-update-event add-log-fn]
   (let [remote-update-data (:value remote-update-event)]
     (assert (rtc-const/data-from-ws-validator remote-update-data) remote-update-data)
     (let [remote-t (:t remote-update-data)
           remote-t-before (:t-before remote-update-data)
           local-tx (op-mem-layer/get-local-tx repo)]
+      (rtc-log-and-state/update-remote-t graph-uuid remote-t)
       (cond
         (not (and (pos? remote-t)
                   (pos? remote-t-before)))
         (throw (ex-info "invalid remote-data" {:data remote-update-data}))
 
         (<= remote-t local-tx)
-        (add-log-fn {:type ::skip :remote-t remote-t :local-t local-tx})
+        (add-log-fn :rtc.log/apply-remote-update {:sub-type :skip :remote-t remote-t :local-t local-tx})
 
         (< local-tx remote-t-before)
-        (do (add-log-fn {:type ::need-pull-remote-data :remote-t remote-t :local-t local-tx})
+        (do (add-log-fn :rtc.log/apply-remote-update {:sub-type :need-pull-remote-data
+                                                      :remote-t remote-t :local-t local-tx})
             (throw (ex-info "need pull earlier remote-data"
                             {:type ::need-pull-remote-data
                              :local-tx local-tx})))
 
         (<= remote-t-before local-tx remote-t)
-        (let [affected-blocks-map (:affected-blocks remote-update-data)
+        (let [{affected-blocks-map :affected-blocks refed-blocks :refed-blocks} remote-update-data
               {:keys [remove-ops-map move-ops-map update-ops-map update-page-ops-map remove-page-ops-map]}
               (affected-blocks->diff-type-ops repo affected-blocks-map)
               remove-ops (vals remove-ops-map)
@@ -544,16 +557,20 @@
               update-page-ops (vals update-page-ops-map)
               remove-page-ops (vals remove-page-ops-map)]
 
-          (batch-tx/with-batch-tx-mode conn {:rtc-tx? true}
-            (js/console.groupCollapsed "rtc/apply-remote-ops-log")
-            (worker-util/profile :apply-remote-update-page-ops (apply-remote-update-page-ops repo conn date-formatter update-page-ops))
-            (worker-util/profile :apply-remote-remove-ops (apply-remote-remove-ops repo conn date-formatter remove-ops))
-            (worker-util/profile :apply-remote-move-ops (apply-remote-move-ops repo conn date-formatter sorted-move-ops))
-            (worker-util/profile :apply-remote-update-ops (apply-remote-update-ops repo conn date-formatter update-ops))
-            (worker-util/profile :apply-remote-remove-page-ops (apply-remote-remove-page-ops repo conn remove-page-ops))
-            (js/console.groupEnd))
+          (js/console.groupCollapsed "rtc/apply-remote-ops-log")
+          (batch-tx/with-batch-tx-mode conn {:rtc-tx? true :persist-op? false :gen-undo-ops? false}
+            (worker-util/profile :ensure-refed-blocks-exist (ensure-refed-blocks-exist repo conn refed-blocks))
+            (worker-util/profile :apply-remote-update-page-ops (apply-remote-update-page-ops repo conn update-page-ops))
+            (worker-util/profile :apply-remote-move-ops (apply-remote-move-ops repo conn sorted-move-ops))
+            (worker-util/profile :apply-remote-update-ops (apply-remote-update-ops repo conn update-ops))
+            (worker-util/profile :apply-remote-remove-page-ops (apply-remote-remove-page-ops repo conn remove-page-ops)))
+          ;; NOTE: we cannot set :persist-op? = true when batch-tx/with-batch-tx-mode (already set to false)
+          ;; and there're some transactions in `apply-remote-remove-ops` need to :persist-op?=true
+          (worker-util/profile :apply-remote-remove-ops (apply-remote-remove-ops repo conn date-formatter remove-ops))
+          (js/console.groupEnd)
 
-          (op-mem-layer/update-local-tx! repo remote-t))
+          (op-mem-layer/update-local-tx! repo remote-t)
+          (rtc-log-and-state/update-local-t graph-uuid remote-t))
         :else (throw (ex-info "unreachable" {:remote-t remote-t
                                              :remote-t-before remote-t-before
                                              :local-t local-tx}))))))

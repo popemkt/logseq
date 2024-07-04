@@ -152,7 +152,7 @@
 (def ^:large-vars/data-var db-query-dsl-rules
   "Rules used by frontend.query.dsl for db graphs"
   (merge
-   query-dsl-rules
+   (dissoc query-dsl-rules :namespace)
    {:page-tags
     '[(page-tags ?p ?tags)
       [?p :block/tags ?t]
@@ -163,85 +163,55 @@
     :has-page-property
     '[(has-page-property ?p ?prop)
       [?p :block/name]
-      [?p ?prop ?v]
+      [?p ?prop _]
       [?prop-e :db/ident ?prop]
-      [?prop-e :block/type "property"]
-      ;; Some deleted properties leave #{} which this rule shouldn't match on
-      [(not= #{} ?v)]]
-    ;; TODO: Delete when DB_GRAPH query-dsl tests are passing
-    #_'[(has-page-property ?p ?prop)
-        [?p :block/name]
-        [?p :block/properties ?bp]
-        [(name ?prop) ?prop-name-str]
-        [?prop-b :block/name ?prop-name-str]
-        [?prop-b :block/type "property"]
-        [?prop-b :block/uuid ?prop-uuid]
-        [(get ?bp ?prop-uuid) ?v]
-      ;; Some deleted properties leave #{} which this rule shouldn't match on
-        [(not= #{} ?v)]]
+      [?prop-e :block/type "property"]]
 
     :page-property
-    '[[(page-property ?p ?prop ?val)
-       [?p :block/name]
-       [?p ?prop ?val]
-       [?prop-e :db/ident ?prop]
-       [?prop-e :block/type "property"]]
-      ;; TODO: Delete when DB_GRAPH query-dsl tests are passing
-      ;; Clause 1: Match non-ref values
-      #_[(page-property ?p ?key ?val)
-         [?p :block/name]
-         [?p :block/properties ?prop]
-         [(name ?key) ?key-str]
-         [?prop-b :block/name ?key-str]
-         [?prop-b :block/type "property"]
-         [?prop-b :block/uuid ?prop-uuid]
-         [(get ?prop ?prop-uuid) ?v]
-         (or ([= ?v ?val])
-             [(contains? ?v ?val)])]
-
-      ;; Clause 2: Match values joined by refs
-      #_[(page-property ?p ?key ?val)
-         [?p :block/name]
-         [?p :block/properties ?prop]
-         [(name ?key) ?key-str]
-         [?prop-b :block/name ?key-str]
-         [?prop-b :block/type "property"]
-         [?prop-b :block/uuid ?prop-uuid]
-         [(get ?prop ?prop-uuid) ?v]
-         [(str ?val) ?str-val]
-      ;; str-val is for integer pages that aren't strings
-         [?prop-val-b :block/original-name ?str-val]
-         [?prop-val-b :block/uuid ?val-uuid]
-         (or ([= ?v ?val-uuid])
-             [(contains? ?v ?val-uuid)])]]
+    '[(page-property ?p ?prop ?val)
+      [?p :block/name]
+      [?p ?prop ?pv]
+      (or [?pv :block/content ?val]
+          [?pv :property.value/content ?val]
+          [?pv :block/original-name ?val])
+      [?prop-e :db/ident ?prop]
+      [?prop-e :block/type "property"]]
 
     :has-property
     '[(has-property ?b ?prop)
-      [?b ?prop ?v]
+      [?b ?prop _]
       [(missing? $ ?b :block/name)]
       [?prop-e :db/ident ?prop]
-      [?prop-e :block/type "property"]
-      ;; Some deleted properties leave #{} which this rule shouldn't match on
-      [(not= #{} ?v)]]
+      [?prop-e :block/type "property"]]
 
     :property
     '[(property ?b ?prop ?val)
-      [?b ?prop ?val]
+      [?b ?prop ?pv]
+      (or [?pv :block/content ?val]
+          [?pv :property.value/content ?val]
+          [?pv :block/original-name ?val])
       [(missing? $ ?b :block/name)]
       [?prop-e :db/ident ?prop]
       [?prop-e :block/type "property"]]
 
     :task
     '[(task ?b ?statuses)
-      (property ?b :logseq.task/status ?v)
-      [?v :block/content ?status]
-      [(contains? ?statuses ?status)]]}))
+      ;; and needed to avoid binding error
+      (and (property ?b :logseq.task/status ?val)
+           [(contains? ?statuses ?val)])]
+
+    :priority
+    '[(priority ?b ?priorities)
+      ;; and needed to avoid binding error
+      (and (property ?b :logseq.task/priority ?priority)
+           [(contains? ?priorities ?priority)])]}))
 
 (def rules-dependencies
   "For db graphs, a map of rule names and the rules they depend on. If this map
   becomes long or brittle, we could do scan rules for their deps with something
   like find-rules-in-where"
-  {:task #{:property}})
+  {:task #{:property}
+   :priority #{:property}})
 
 (defn extract-rules
   "Given a rules map and the rule names to extract, returns a vector of rules to

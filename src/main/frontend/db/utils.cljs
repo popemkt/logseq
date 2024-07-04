@@ -3,7 +3,6 @@
   (:require [datascript.core :as d]
             [frontend.state :as state]
             [frontend.db.conn :as conn]
-            [frontend.config :as config]
             [logseq.db.frontend.content :as db-content]))
 
 ;; transit serialization
@@ -27,11 +26,15 @@
    (entity (state/get-current-repo) eid))
   ([repo-or-db eid]
    (when eid
+     (assert (or (number? eid)
+                 (sequential? eid)
+                 (keyword? eid))
+             (str "Invalid entity eid: " (pr-str eid)))
      (when-let [db (if (string? repo-or-db)
-                   ;; repo
+                     ;; repo
                      (let [repo (or repo-or-db (state/get-current-repo))]
                        (conn/get-db repo))
-                   ;; db
+                     ;; db
                      repo-or-db)]
        (d/entity db eid)))))
 
@@ -62,31 +65,6 @@
      (let [selector (if (some #{:db/id} selector) selector (conj selector :db/id))]
        (->> (d/pull-many db selector eids)
             (map #(update-block-content % (:db/id %))))))))
-
-(if config/publishing?
-  (defn- transact!*
-    [repo-url tx-data tx-meta]
-    ;; :save-block is for query-table actions like sorting and choosing columns
-    (when (or (#{:collapse-expand-blocks :save-block} (:outliner-op tx-meta))
-              (:init-db? tx-meta))
-      (conn/transact! repo-url tx-data tx-meta)))
-  (def transact!* conn/transact!))
-
-(defn transact!
-  ([tx-data]
-   (transact! (state/get-current-repo) tx-data))
-  ([repo-url tx-data]
-   (transact! repo-url tx-data nil))
-  ([repo-url tx-data tx-meta]
-   (transact!* repo-url tx-data tx-meta)))
-
-(defn get-key-value
-  ([key]
-   (get-key-value (state/get-current-repo) key))
-  ([repo-url key]
-   (when-let [db (conn/get-db repo-url)]
-     (some-> (d/entity db key)
-             key))))
 
 (defn q
   [query & inputs]

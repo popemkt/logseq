@@ -10,6 +10,7 @@
    [logseq.outliner.core :as outliner-core]
    [frontend.modules.outliner.ui :as ui-outliner-tx]
    [frontend.modules.outliner.op :as outliner-op]
+   [logseq.outliner.op]
    [frontend.state :as state]
    [frontend.util :as util]
    [frontend.util.drawer :as drawer]
@@ -86,10 +87,8 @@
   [ref-blocks filters]
   (if (empty? filters)
     ref-blocks
-    (let [exclude-ids (->> (keep (fn [page] (:db/id (db/get-page page))) (get filters false))
-                           (set))
-          include-ids (->> (keep (fn [page] (:db/id (db/get-page page))) (get filters true))
-                           (set))]
+    (let [exclude-ids (set (map :db/id (:excluded filters)))
+          include-ids (set (map :db/id (:included filters)))]
       (cond->> ref-blocks
         (seq exclude-ids)
         (remove (fn [block]
@@ -174,9 +173,9 @@
 (defn- edit-block-aux
   [repo block content text-range {:keys [container-id]}]
   (when block
-    (state/clear-edit!)
     (let [container-id (or container-id
-                           @(:editor/container-id @state/state))]
+                           (state/get-current-editor-container-id)
+                           :unknown-container)]
       (state/set-editing! (str "edit-block-" (:block/uuid block)) content block text-range {:container-id container-id}))
     (mark-last-input-time! repo)))
 
@@ -194,6 +193,7 @@
   (when-not config/publishing?
     (p/do!
      (state/pub-event! [:editor/save-code-editor])
+     (state/clear-edit! {:clear-editing-block? false})
      (when-let [block-id (:block/uuid block)]
        (let [repo (state/get-current-repo)
              db-graph? (config/db-based-graph? repo)

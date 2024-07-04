@@ -29,6 +29,7 @@
             [frontend.util.persist-var :as persist-var]
             [logseq.graph-parser.property :as gp-property]
             [logseq.common.util.page-ref :as page-ref]
+            [logseq.shui.ui :as shui]
             [medley.core :as medley]
             [rum.core :as rum]))
 
@@ -451,11 +452,11 @@
            [:div {:style {:margin-top 20}}
             (component-block/breadcrumb {} repo root-block-id {})])
          (component-block/blocks-container
-          current-blocks
           (merge (show-cycle-config card @phase)
                  {:id (str root-block-id)
                   :editor-box editor/box
-                  :review-cards? true}))
+                  :review-cards? true})
+          current-blocks)
          (if (or preview? modal?)
            [:div.flex.my-4.justify-between
             (when-not (and (not preview?) (= next-phase 1))
@@ -530,7 +531,7 @@
 
 (defn preview
   [block-id]
-  (state/set-modal! #(preview-cp block-id) {:id :srs}))
+  (shui/dialog-open! #(preview-cp block-id) {:id :srs}))
 
 ;;; ================================================================
 ;;; register some external vars & related UI
@@ -694,8 +695,9 @@
          [:div.px-1
           (when (and (not modal?) (not @*preview-mode?))
             {:on-click (fn []
-                         (state/set-modal! #(cards (assoc config :modal? true) {:query-string query-string})
-                                           {:id :srs}))})
+                         (shui/dialog-open!
+                           #(cards (assoc config :modal? true) {:query-string query-string})
+                           {:id :srs}))})
           (let [view-fn (if modal? view-modal view)
                 blocks (if @*preview-mode? query-result review-cards)
                 blocks (if @*random-mode? (shuffle blocks) blocks)]
@@ -768,11 +770,13 @@
 ;;; register slash commands
 (commands/register-slash-command ["Cards"
                                   [[:editor/input "{{cards }}" {:backward-pos 2}]]
-                                  "Create a cards query"])
+                                  "Create a cards query"
+                                  {:db-graph? false}])
 
 (commands/register-slash-command ["Cloze"
                                   [[:editor/input "{{cloze }}" {:backward-pos 2}]]
-                                  "Create a cloze"])
+                                  "Create a cloze"
+                                  {:db-graph? false}])
 
 ;; handlers
 (defn add-card-tag-to-block

@@ -7,7 +7,8 @@
             [datascript.core :as d]
             [logseq.db.frontend.property :as db-property]
             [logseq.db.frontend.entity-plus :as entity-plus]
-            [logseq.db.sqlite.util :as sqlite-util]))
+            [logseq.db.sqlite.util :as sqlite-util]
+            [logseq.db.frontend.order :as db-order]))
 
 ;; :db/ident malli schemas
 ;; =======================
@@ -19,6 +20,11 @@
   [:and :keyword [:fn
                   {:error/message "should be a valid logseq property namespace"}
                   db-property/logseq-property?]])
+
+(def block-order
+  [:and :string [:fn
+                 {:error/message "should be a valid fractional index"}
+                 db-order/validate-order-key?]])
 
 (def internal-property-ident
   [:or logseq-property-ident db-attribute-ident])
@@ -60,15 +66,24 @@
                             class?]])
 ;; Helper fns
 ;; ==========
+(defn- empty-placeholder-value? [db property property-val]
+  (if (= :db.type/ref (:db/valueType property))
+    (and (integer? property-val)
+         (= :logseq.property/empty-placeholder (:db/ident (d/entity db property-val))))
+    (= :logseq.property/empty-placeholder property-val)))
+
 (defn validate-property-value
-  "Validates the property value in a property tuple. The property value can be
-  one or many of a value to validated. validate-fn is a fn that is called
-  directly on each value to return a truthy value. validate-fn varies by
-  property type"
+  "Validates the property value in a property tuple. The property value is
+  expected to be a coll if the property has a :many cardinality. validate-fn is
+  a fn that is called directly on each value to return a truthy value.
+  validate-fn varies by property type"
   [db validate-fn [{:block/keys [schema] :as property} property-val] & {:keys [new-closed-value?]}]
   ;; For debugging
   ;; (when (not= "logseq.property" (namespace (:db/ident property))) (prn :validate-val (dissoc property :property/closed-values) property-val))
-  (let [validate-fn' (if (db-property-type/property-types-with-db (:type schema)) (partial validate-fn db) validate-fn)
+  (let [validate-fn' (if (db-property-type/property-types-with-db (:type schema))
+                       (fn [value]
+                         (validate-fn db value {:new-closed-value? new-closed-value?}))
+                       validate-fn)
         validate-fn'' (if (and (db-property-type/closed-value-property-types (:type schema))
                                ;; new closed values aren't associated with the property yet
                                (not new-closed-value?)
@@ -78,14 +93,11 @@
                                (contains? (set (map :db/id (:property/closed-values property))) val)))
                         validate-fn')]
     (if (db-property/many? property)
-      (if (coll? property-val)
-        (every? validate-fn'' property-val)
-        (validate-fn'' property-val))
+      (or (every? validate-fn'' property-val)
+          (empty-placeholder-value? db property (first property-val)))
       (or (validate-fn'' property-val)
-          (if (= :db.type/ref (:db/valueType property))
-            (and (integer? property-val)
-                 (= :logseq.property/empty-placeholder (:db/ident (d/entity db property-val))))
-            (= :logseq.property/empty-placeholder property-val))))))
+          ;; also valid if value is empty-placeholder
+          (empty-placeholder-value? db property property-val)))))
 
 (defn update-properties-in-schema
   "Needs to be called on the DB schema to add the datascript db to it"
@@ -104,12 +116,13 @@
                (if-let [property (and (db-property/property? k)
                                       (d/entity db k))]
                  (update m :block/properties (fnil conj [])
-                         [(assoc (select-keys property [:db/ident :db/valueType])
-                                 :block/schema
-                                 (select-keys (:block/schema property) [:type])
-                                 :property/closed-values
-                                 ;; use explicit call to be nbb compatible
-                                 (entity-plus/lookup-kv-then-entity property :property/closed-values))
+                         ;; use explicit call to be nbb compatible
+                         [(let [closed-values (entity-plus/lookup-kv-then-entity property :property/closed-values)]
+                            (cond-> (assoc (select-keys property [:db/ident :db/valueType :db/cardinality])
+                                    :block/schema
+                                    (select-keys (:block/schema property) [:type]))
+                              (seq closed-values)
+                              (assoc :property/closed-values closed-values)))
                           v])
                  (assoc m k v)))
              {}
@@ -175,7 +188,8 @@
    (map (fn [[prop-type value-schema]]
           [prop-type
            (let [schema-fn (if (vector? value-schema) (last value-schema) value-schema)]
-             [:fn (with-meta (fn [db tuple] (validate-property-value db schema-fn tuple)) {:add-db true})])])
+             [:fn (with-meta (fn [db tuple]
+                               (validate-property-value db schema-fn tuple)) {:add-db true})])])
         db-property-type/built-in-validation-schemas)))
 
 (def block-properties
@@ -194,7 +208,6 @@
    [:block/properties {:optional true} block-properties]
    [:block/refs {:optional true} [:set :int]]
    [:block/tags {:optional true} [:set :int]]
-   [:block/collapsed-properties {:optional true} [:set :int]]
    [:block/tx-id {:optional true} :int]])
 
 (def page-attrs
@@ -214,7 +227,7 @@
   [[:db/index {:optional true} :boolean]
    [:db/valueType {:optional true} [:enum :db.type/ref]]
    [:db/cardinality {:optional true} [:enum :db.cardinality/many :db.cardinality/one]]
-   [:block/order {:optional true} :string]
+   [:block/order {:optional true} block-order]
    [:property/schema.classes {:optional true} [:set :int]]])
 
 (def normal-page
@@ -229,7 +242,7 @@
     page-or-block-attrs)))
 
 (def class-attrs
-  [[:db/ident {:optional true} class-ident]
+  [[:db/ident class-ident]
    [:class/parent {:optional true} :int]
    [:class/schema.properties {:optional true} [:set :int]]])
 
@@ -248,7 +261,7 @@
 (def property-type-schema-attrs
   "Property :schema attributes that vary by :type"
   [;; For closed values
-   [:position {:optional true} :string]])
+   [:position {:optional true} [:enum :properties :block-left :block-right :block-below]]])
 
 (def property-common-schema-attrs
   "Property :schema attributes common to all properties"
@@ -267,7 +280,8 @@
          [:type (apply vector :enum (into db-property-type/internal-built-in-property-types
                                           db-property-type/user-built-in-property-types))]
          [:public? {:optional true} :boolean]
-         [:view-context {:optional true} [:enum :page :block]]]
+         [:view-context {:optional true} [:enum :page :block]]
+         [:shortcut {:optional true} :string]]
         property-common-schema-attrs
         property-type-schema-attrs))]]
     property-attrs
@@ -295,7 +309,7 @@
    (concat
     [:map
      [:db/ident user-property-ident]
-     [:block/schema {:optional true} user-property-schema]]
+     [:block/schema user-property-schema]]
     property-attrs
     page-attrs
     page-or-block-attrs)))
@@ -312,7 +326,7 @@
    (concat
     [:map
      ;; pages from :default property uses this but closed-value pages don't
-     [:block/order {:optional true} :string]]
+     [:block/order {:optional true} block-order]]
     page-attrs
     page-or-block-attrs)))
 
@@ -320,11 +334,10 @@
   "Common attributes for normal blocks"
   [[:block/content :string]
    [:block/parent :int]
-   [:block/order :string]
+   [:block/order block-order]
    ;; refs
    [:block/page :int]
    [:block/path-refs {:optional true} [:set :int]]
-   [:block/macros {:optional true} [:set :int]]
    [:block/link {:optional true} :int]
     ;; other
    [:block/collapsed? {:optional true} :boolean]])
@@ -341,21 +354,38 @@
      [:block/path-refs {:optional true} [:set :int]]]
     page-or-block-attrs)))
 
-(def closed-value-block
-  "A closed value for a property with closed/allowed values"
+(def property-value-block
+  "A common property value for user properties"
+  (vec
+   (concat
+    [:map]
+    [[:property.value/content [:or :string :double :boolean]]]
+    (remove #(#{:block/content} (first %)) block-attrs)
+    page-or-block-attrs)))
+
+(def closed-value-block*
   (vec
    (concat
     [:map]
     [[:block/type [:= #{"closed value"}]]
      ;; for built-in properties
      [:db/ident {:optional true} logseq-property-ident]
-     [:block/content [:or :string :double]]
+     [:block/content {:optional true} :string]
+     [:property.value/content {:optional true} [:or :string :double]]
      [:block/closed-value-property {:optional true} [:set :int]]
      [:block/schema {:optional true}
       [:map
        [:description {:optional true} :string]]]]
     (remove #(#{:block/content} (first %)) block-attrs)
     page-or-block-attrs)))
+
+(def closed-value-block
+  "A closed value for a property with closed/allowed values"
+  [:and closed-value-block*
+   [:fn {:error/message ":block/content or :property.value/content required"
+         :error/path [:property.value/content]}
+    (fn [m]
+      (or (:block/content m) (:property.value/content m)))]])
 
 (def normal-block
   "A block with content and no special type or tag behavior"
@@ -370,7 +400,8 @@
   [:or
    normal-block
    closed-value-block
-   whiteboard-block])
+   whiteboard-block
+   property-value-block])
 
 (def file-block
   [:map
@@ -378,6 +409,8 @@
    [:block/tx-id {:optional true} :int]
    [:file/content :string]
    [:file/path :string]
+   [:file/size {:optional true} :int]
+   [:file/created-at inst?]
    [:file/last-modified-at inst?]])
 
 (def asset-block
@@ -385,22 +418,12 @@
    [:asset/uuid :uuid]
    [:asset/meta :map]])
 
-(def db-ident-keys
-  "Enumerates all possible keys db-ident key vals"
-  [[:db/type :string]
-   [:schema/version :int]
-   [:graph/uuid :string]
-   [:graph/local-tx :string]])
-
 (def db-ident-key-val
-  "A key-val map consists of a :db/ident and a specific key val"
-  (into [:or]
-        (map (fn [kv]
-               [:map
-                [:db/ident logseq-ident]
-                kv
-                [:block/tx-id {:optional true} :int]])
-             db-ident-keys)))
+  "A key value map with :db/ident and :kv/value"
+  [:map
+   [:db/ident logseq-ident]
+   [:kv/value :any]
+   [:block/tx-id {:optional true} :int]])
 
 (def property-value-placeholder
   [:map
@@ -457,7 +480,7 @@
 
 ;; Keep malli schema in sync with db schema
 ;; ========================================
-(let [malli-many-ref-attrs (->> (concat class-attrs property-attrs page-attrs block-attrs page-or-block-attrs (rest closed-value-block))
+(let [malli-many-ref-attrs (->> (concat class-attrs property-attrs page-attrs block-attrs page-or-block-attrs (rest closed-value-block*))
                                 (filter #(= (last %) [:set :int]))
                                 (map first)
                                 set)]
@@ -477,8 +500,8 @@
                     {}))))
 
 (let [malli-non-ref-attrs (->> (concat class-attrs property-attrs page-attrs block-attrs page-or-block-attrs (rest normal-page))
-                               (concat (rest file-block) (rest asset-block)
-                                       db-ident-keys (rest class-page))
+                               (concat (rest file-block) (rest asset-block) (rest property-value-block)
+                                       (rest db-ident-key-val) (rest class-page))
                                (remove #(= (last %) [:set :int]))
                                (map first)
                                set)]

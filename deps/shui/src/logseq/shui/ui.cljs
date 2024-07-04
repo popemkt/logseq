@@ -8,7 +8,8 @@
             [logseq.shui.dialog.core :as dialog-core]
             [logseq.shui.popup.core :as popup-core]
             [logseq.shui.base.core :as base-core]
-            [logseq.shui.form.core :as form-core]))
+            [logseq.shui.form.core :as form-core]
+            [logseq.shui.table.core :as table-core]))
 
 (def button base-core/button)
 (def link base-core/link)
@@ -36,9 +37,11 @@
 (def popover popup-core/popover)
 (def popover-trigger popup-core/popover-trigger)
 (def popover-content popup-core/popover-content)
+(def popover-arrow popup-core/popover-arrow)
 
 (def tooltip (util/lsui-wrap "Tooltip"))
 (def tooltip-trigger (util/lsui-wrap "TooltipTrigger"))
+(def tooltip-portal (util/lsui-wrap "TooltipPortal"))
 (def tooltip-content (util/lsui-wrap "TooltipContent"))
 (def tooltip-provider (util/lsui-wrap "TooltipProvider"))
 
@@ -124,3 +127,12 @@
 (def popup-hide-all! popup-core/hide-all!)
 
 (def multi-select-content select-multi/x-select-content)
+
+(def table-option table-core/table-option)
+(def table table-core/table)
+(def table-header table-core/table-header)
+(def table-head table-core/table-head)
+(def table-body table-core/table-body)
+(def table-row table-core/table-row)
+(def table-cell table-core/table-cell)
+(def table-get-selection-rows table-core/get-selection-rows)

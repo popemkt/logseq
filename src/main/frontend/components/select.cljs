@@ -52,6 +52,11 @@
   {:init (fn [state]
            (assoc state ::selected-choices
                   (atom (set (:selected-choices (first (:rum/args state)))))))
+   :will-remount (fn [_old-state new-state]
+                   (let [choices (set (:selected-choices (first (:rum/args new-state))))]
+                     (when (not= choices @(::selected-choices new-state))
+                       (reset! (::selected-choices new-state) choices))
+                     new-state))
    :will-unmount (fn [state]
                    (state/set-state! [:ui/open-select] nil)
                    state)}
@@ -74,9 +79,12 @@
         *toggle (::toggle state)
         *selected-choices (::selected-choices state)
         selected-choices (rum/react *selected-choices)
-        full-choices (->> (concat (map (fn [v] {:value v}) selected-choices) items)
-                          (util/distinct-by-last-wins :value)
-                          (remove nil?))
+        full-choices (cond->>
+                      (->> (concat (map (fn [v] {:value v}) selected-choices) items)
+                           (util/distinct-by-last-wins :value)
+                           (remove nil?))
+                       (seq @input)
+                       (remove :clear?))
         search-result' (->>
                         (cond-> (search/fuzzy-search full-choices @input :limit limit :extract-fn extract-fn)
                           (fn? transform-fn)

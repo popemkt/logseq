@@ -14,7 +14,6 @@
             [malli.core :as m]
             [frontend.worker.state :as worker-state]
             [goog.object :as gobj]
-            [logseq.db.sqlite.util :as sqlite-util]
             [logseq.common.util :as common-util]))
 
 (def *writes file/*writes)
@@ -109,8 +108,7 @@
 
 (defn sync-to-file
   [repo page-id tx-meta]
-  (when (and (sqlite-util/local-file-based-graph? repo)
-             page-id
+  (when (and page-id
              (not (:created-from-journal-template? tx-meta))
              (not (:delete-files? tx-meta)))
     (let [request-id (conj-page-write! page-id)]
@@ -126,5 +124,6 @@
                               (let [repo (ffirst col)
                                     conn (worker-state/get-datascript-conn repo)]
                                 (if conn
-                                  (write-files! conn col (worker-state/get-context))
+                                  (when-not (ldb/db-based-graph? @conn)
+                                    (write-files! conn col (worker-state/get-context)))
                                   (js/console.error (str "DB is not found for ") repo)))))))

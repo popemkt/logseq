@@ -21,14 +21,18 @@
             [logseq.db.frontend.order :as db-order]
             [logseq.outliner.core :as outliner-core]))
 
+(defn- re-init-commands!
+  "Update commands after task status and priority's closed values has been changed"
+  [property]
+  (when (contains? #{:logseq.task/status :logseq.task/priority} (:db/ident property))
+    (state/pub-event! [:init/commands])))
+
 (defn- <upsert-closed-value!
   "Create new closed value and returns its block UUID."
   [property item]
-  (p/let [{:keys [block-id tx-data]} (db-property-handler/<upsert-closed-value property item)]
-    (p/do!
-     (when (seq tx-data) (db/transact! (state/get-current-repo) tx-data {:outliner-op :upsert-closed-value}))
-     (when (seq tx-data) (db-property-handler/re-init-commands! property))
-     block-id)))
+  (p/do!
+   (db-property-handler/upsert-closed-value! (:db/ident property) item)
+   (re-init-commands! property)))
 
 (rum/defc item-value
   [type *value]
@@ -57,7 +61,7 @@
   shortcut/disable-all-shortcuts
   {:init (fn [state]
            (let [block (second (:rum/args state))
-                 value (or (str (db-property/closed-value-name block)) "")
+                 value (or (str (db-property/closed-value-content block)) "")
                  icon (:logseq.property/icon block)
                  description (or (get-in block [:block/schema :description]) "")]
              (assoc state
@@ -110,11 +114,10 @@
 
 (rum/defcs choice-with-close <
   (rum/local false ::hover?)
-  [state property item {:keys [toggle-fn delete-choice update-icon]} parent-opts]
+  [state item {:keys [toggle-fn delete-choice update-icon]} parent-opts]
   (let [*hover? (::hover? state)
-        value (db-property/closed-value-name item)
+        value (db-property/closed-value-content item)
         page? (:block/original-name item)
-        date? (= :date (:type (:block/schema property)))
         property-block? (db-property/property-created-block? item)]
     [:div.flex.flex-1.flex-row.items-center.gap-2.justify-between
      {:on-mouse-over #(reset! *hover? true)
@@ -127,14 +130,6 @@
         property-block?
         [:a {:on-click toggle-fn}
          value]
-
-        date?
-        [:div.flex.flex-row.items-center.gap-1
-         (property-value/date-picker item
-                                     {:on-change (fn [page]
-                                                   (db-property-handler/replace-closed-value property
-                                                                                             (:db/id page)
-                                                                                             (:db/id item)))})]
 
         (and page? (:page-cp parent-opts))
         ((:page-cp parent-opts) {:preview? false} item)
@@ -169,15 +164,17 @@
           opts {:toggle-fn #(shui/popup-show! % content-fn)}]
 
       (choice-with-close
-       property
        block
        (assoc opts
               :delete-choice
               (fn []
-                (db-property-handler/delete-closed-value! property block))
+                (p/do!
+                 (db-property-handler/delete-closed-value! (:db/id property) (:db/id block))
+                 (re-init-commands! property)))
               :update-icon
               (fn [icon]
-                (property-handler/set-block-property! (state/get-current-repo) (:block/uuid block) :logseq.property/icon icon)))
+                (property-handler/set-block-property! (state/get-current-repo) (:block/uuid block) :logseq.property/icon
+                                                      (select-keys icon [:id :type]))))
        parent-opts))))
 
 (rum/defc add-existing-values
@@ -189,20 +186,17 @@
     (for [value values]
       [:li (if (uuid? value)
              (let [result (db/entity [:block/uuid value])]
-               (or (:block/original-name result)
-                   (:block/content result)))
+               (db-property/closed-value-content result))
              (str value))])]
    (ui/button
     "Add choices"
     {:on-click (fn []
-                 (p/let [_ (db-property-handler/<add-existing-values-to-closed-values! property values)]
+                 (p/let [_ (db-property-handler/add-existing-values-to-closed-values! (:db/id property) values)]
                    (toggle-fn)))})])
 
 (rum/defc choices < rum/reactive
   [property opts]
-  (let [schema (:block/schema property)
-        values (:property/closed-values property)
-        property-type (:type schema)
+  (let [values (:property/closed-values property)
         dropdown-opts {:modal-class (util/hiccup->class
                                      "origin-top-right.absolute.left-0.rounded-md.shadow-lg")}]
     [:div.closed-values.flex.flex-col
@@ -243,34 +237,26 @@
                    existing-values (seq (:property/closed-values property))
                    values (if (seq existing-values)
                             (let [existing-ids (set (map :db/id existing-values))]
-                              (remove (fn [[_ id]] (existing-ids id)) values))
+                              (remove (fn [id] (existing-ids id)) values))
                             values)]
              (shui/popup-show! (.-target e)
                                (fn [{:keys [id]}]
                                  (let [opts {:toggle-fn (fn [] (shui/popup-hide! id))}
                                        values' (->> (if (contains? db-property-type/ref-property-types (get-in property [:block/schema :type]))
-                                                      (map #(:block/uuid (db/entity (second %))) values)
-                                                      (map second values))
+                                                      (map #(:block/uuid (db/entity %)) values)
+                                                      values)
                                                     (remove string/blank?)
                                                     distinct)]
                                    (if (seq values')
                                      (add-existing-values property values' opts)
-                                     (if (= :page property-type)
-                                       (property-value/select-page property
-                                                                   {:multiple-choices? false
-                                                                    :dropdown? false
-                                                                    :close-modal? false
-                                                                    :on-chosen (fn [chosen]
-                                                                                 (p/let [_closed-value (<upsert-closed-value! property {:value chosen})]
-                                                                                   (shui/popup-hide! id)))})
-                                       (item-config
-                                        property
-                                        nil
-                                        (assoc opts :on-save
-                                               (fn [value icon description]
-                                                 (<upsert-closed-value! property {:value value
-                                                                                  :description description
-                                                                                  :icon icon}))))))))
+                                     (item-config
+                                      property
+                                      nil
+                                      (assoc opts :on-save
+                                             (fn [value icon description]
+                                               (<upsert-closed-value! property {:value value
+                                                                                :description description
+                                                                                :icon icon})))))))
                                {:content-props {:class "w-auto"}})))}
         (ui/icon "plus" {:size 16})
         "Add choice"))]))

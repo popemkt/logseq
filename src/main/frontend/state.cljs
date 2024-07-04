@@ -20,7 +20,8 @@
             [promesa.core :as p]
             [rum.core :as rum]
             [frontend.rum :as r]
-            [logseq.db.sqlite.util :as sqlite-util]))
+            [logseq.db.sqlite.util :as sqlite-util]
+            [clojure.set :as set]))
 
 (defonce *profile-state
   (atom {}))
@@ -118,23 +119,20 @@
 
       :config                                {}
       :block/component-editing-mode?         false
-      :editor/start-pos                      (atom nil)
       :editor/op                             (atom nil)
+      :editor/start-pos                      (atom nil)
+      :editor/async-unsaved-chars            (atom nil)
       :editor/hidden-editors                 #{} ;; page names
       :editor/draw-mode?                     false
+
       :editor/action                         (atom nil)
       :editor/action-data                    nil
       ;; With label or other data
-      :editor/last-saved-cursor              nil
+      :editor/last-saved-cursor              (atom {})
       :editor/editing?                       (atom {})
       :editor/in-composition?                false
       :editor/content                        (atom {})
       :editor/block                          (atom nil)
-      :editor/new-property-input-id          (atom nil)
-      :editor/new-property-key               (atom nil)
-      ;; id -> bool
-      :editor/editing-property-value-id      (atom {})
-      :editor/properties-container           (atom nil)
       :editor/block-dom-id                   (atom nil)
       :editor/set-timestamp-block            (atom nil) ;; click rendered block timestamp-cp to set timestamp
       :editor/last-input-time                (atom {})
@@ -142,6 +140,7 @@
       :editor/args                           (atom nil)
       :editor/on-paste?                      (atom false)
       :editor/last-key-code                  (atom nil)
+      :ui/global-last-key-code               (atom nil)
       :editor/block-op-type                  nil             ;; :cut, :copy
 
       ;; Stores deleted refed blocks, indexed by repo
@@ -151,8 +150,9 @@
       :editor/record-status                  "NONE"
 
       :editor/code-block-context             {}
+      :editor/latest-shortcut                (atom nil)
 
-      :db/properties-changed-pages           {}
+      :history/paused?                       (atom false)
       :editor/cursor-range                   (atom nil)
       :editor/container-id                   (atom nil)
       :editor/next-edit-block                (atom nil)
@@ -285,6 +285,9 @@
       ;; graph-uuid -> ...
 
       :rtc/state                             (atom {})
+      ;; only latest rtc-log stored here, when a log stream is needed,
+      ;; use missionary to create a rtc-log-flow, use (missionary.core/watch <atom>)
+      :rtc/log                               (atom nil)
       :rtc/uploading?                        false
       :rtc/downloading-graph-uuid            nil
       :rtc/graphs                            []
@@ -295,6 +298,7 @@
 
       :ui/loading?                           {}
       :ui/container-id                       (atom 0)
+      :ui/cached-key->container-id           (atom {})
       :feature/enable-sync?                  (storage/get :logseq-sync-enabled)
       :feature/enable-sync-diff-merge?       ((fnil identity true) (storage/get :logseq-sync-diff-merge-enabled))
 
@@ -313,7 +317,8 @@
       ;; Whether block is selected
       :ui/select-query-cache                 (atom {})
       :favorites/updated?                    (atom 0)
-      :db/async-queries                      (atom #{})})))
+      :db/async-query-loading                (atom #{})
+      :db/async-queries                      (atom {})})))
 
 ;; Block ast state
 ;; ===============
@@ -667,7 +672,7 @@ Similar to re-frame subscriptions"
 
 (defn set-editing-block-id!
   [container-block]
-  (swap! (:editor/editing? @state) assoc container-block true))
+  (reset! (:editor/editing? @state) {container-block true}))
 
 (defn sub-editing?
   [container-block]
@@ -679,22 +684,12 @@ Similar to re-frame subscriptions"
       (fn [s]
         (get s container-block))))))
 
-(defn sub-property-value-editing?
-  [property-value-id]
-  (when property-value-id
-    (rum/react
-     (r/cached-derived-atom
-      (:editor/editing-property-value-id @state)
-      [(get-current-repo) ::editing-property-value property-value-id]
-      (fn [s]
-        (get s property-value-id))))))
-
 (defn sub-config
   "Sub equivalent to get-config which should handle all sub user-config access"
   ([] (sub-config (get-current-repo)))
   ([repo]
    (let [config (sub :config)]
-     (merge-configs (if (sqlite-util/db-based-graph? repo) db-default-config file-default-config)
+     (merge-configs (if (and (string? repo) (sqlite-util/db-based-graph? repo)) db-default-config file-default-config)
                     (get config ::global-config)
                     (get config repo)))))
 
@@ -774,20 +769,6 @@ Similar to re-frame subscriptions"
        (keep #(when-let [id (dom/attr % "blockid")]
                 (uuid id)))
        (distinct)))
-
-(defn sub-block-selected?
-  [block-uuid]
-  (let [*cache (:ui/select-query-cache @state)
-        keys [::select-block block-uuid]
-        atom (or (get @*cache keys)
-                 (let [result (r/cached-derived-atom
-                               (:selection/blocks @state)
-                               keys
-                               (fn [s]
-                                 (contains? (set (get-selected-block-ids s)) block-uuid)))]
-                   (swap! *cache assoc keys result)
-                   result))]
-    (rum/react atom)))
 
 (defn block-content-max-length
   [repo]
@@ -977,7 +958,7 @@ Similar to re-frame subscriptions"
 
 (defn set-repos!
   [repos]
-  (set-state! [:me :repos] repos))
+  (set-state! [:me :repos] (distinct repos)))
 
 (defn add-repo!
   [repo]
@@ -1050,7 +1031,9 @@ Similar to re-frame subscriptions"
   (when-not (exists? js/process)
     (when (editing?)
       (try
-        (when-let [elem js/document.activeElement]
+        (when-let [elem (or (when-let [id (:block/uuid (get-edit-block))]
+                              (gdom/getElement (str "edit-block-" id)))
+                            js/document.activeElement)]
           (when (util/input? elem)
             (let [id (gobj/get elem "id")]
               (when (string/starts-with? id "edit-block-")
@@ -1154,6 +1137,39 @@ Similar to re-frame subscriptions"
   [start-block]
   (set-state! :selection/start-block start-block))
 
+(defn get-selection-blocks
+  []
+  (util/sort-by-height @(:selection/blocks @state)))
+
+(defn get-selection-block-ids
+  []
+  (get-selected-block-ids (get-selection-blocks)))
+
+(defn dom-clear-selection!
+  []
+  (doseq [node (dom/by-class "ls-block selected")]
+    (dom/remove-class! node "selected")))
+
+(defn mark-dom-blocks-as-selected
+  ([]
+   (mark-dom-blocks-as-selected (get-selection-block-ids)))
+  ([ids]
+   (doseq [id ids]
+     (doseq [node (array-seq (gdom/getElementsByClass (str "id" id)))]
+       (dom/add-class! node "selected")))))
+
+(defn- set-selection-blocks-aux!
+  [blocks]
+  (let [selected-ids (set (get-selected-block-ids @(:selection/blocks @state)))
+        _ (set-state! :selection/blocks blocks)
+        new-ids (set (get-selection-block-ids))
+        added (set/difference new-ids selected-ids)
+        removed (set/difference selected-ids new-ids)]
+    (mark-dom-blocks-as-selected added)
+    (doseq [id removed]
+      (doseq [node (array-seq (gdom/getElementsByClass (str "id" id)))]
+        (dom/remove-class! node "selected")))))
+
 (defn set-selection-blocks!
   ([blocks]
    (set-selection-blocks! blocks :down))
@@ -1161,14 +1177,14 @@ Similar to re-frame subscriptions"
    (when (seq blocks)
      (let [blocks (vec (util/sort-by-height (remove nil? blocks)))]
        (set-state! :selection/mode true)
-       (set-state! :selection/blocks blocks)
+       (set-selection-blocks-aux! blocks)
        (set-state! :selection/direction direction)))))
 
 (defn into-selection-mode!
   []
   (set-state! :selection/mode true))
 
-(defn clear-selection!
+(defn state-clear-selection!
   []
   (set-state! :selection/mode false)
   (set-state! :selection/blocks nil)
@@ -1176,15 +1192,10 @@ Similar to re-frame subscriptions"
   (set-state! :selection/start-block nil)
   (set-state! :selection/selected-all? false))
 
-(defn get-selection-blocks
+(defn clear-selection!
   []
-  (let [blocks (util/sort-by-height (bean/->clj (dom/by-class "ls-block selected")))]
-    (set-state! :selecton/blocks blocks)
-    blocks))
-
-(defn get-selection-block-ids
-  []
-  (get-selected-block-ids (get-selection-blocks)))
+  (dom-clear-selection!)
+  (state-clear-selection!))
 
 (defn get-selection-start-block-or-first
   []
@@ -1207,19 +1218,15 @@ Similar to re-frame subscriptions"
         blocks (-> (if (sequential? block-or-blocks)
                      (apply conj selection-blocks block-or-blocks)
                      (conj selection-blocks block-or-blocks))
-                   distinct
-                   util/sort-by-height
-                   vec)]
-    (set-state! :selection/mode true)
-    (set-state! :selection/blocks blocks)
-    (set-state! :selection/direction direction)))
+                   distinct)]
+    (set-selection-blocks! blocks direction)))
 
 (defn drop-selection-block!
   [block]
   (set-state! :selection/mode true)
-  (set-state! :selection/blocks (-> (remove #(= block %) (get-selection-blocks))
-                                    util/sort-by-height
-                                    vec)))
+  (set-selection-blocks-aux! (-> (remove #(= block %) (get-selection-blocks))
+                                 util/sort-by-height
+                                 vec)))
 
 (defn drop-last-selection-block!
   []
@@ -1235,19 +1242,12 @@ Similar to re-frame subscriptions"
                     util/sort-by-height
                     vec)]
     (set-state! :selection/mode true)
-    (set-state! :selection/blocks blocks')
+    (set-selection-blocks-aux! blocks')
     last-block))
 
 (defn get-selection-direction
   []
   @(:selection/direction @state))
-
-(defn show-custom-context-menu!
-  [links position]
-  (swap! state assoc
-         :custom-context-menu/show? true
-         :custom-context-menu/links links
-         :custom-context-menu/position position))
 
 (defn hide-custom-context-menu!
   []
@@ -1342,28 +1342,25 @@ Similar to re-frame subscriptions"
     (doseq [item items]
       (set-state! [:ui/sidebar-collapsed-blocks item] collapsed?))))
 
-(defn get-current-edit-block-and-position
+(defn clear-editor-last-pos!
   []
-  (let [edit-input-id (get-edit-input-id)
-        edit-block (get-edit-block)
-        block-element (when edit-input-id (gdom/getElement (string/replace edit-input-id "edit-block" "ls-block")))
-        container (when block-element
-                    (util/get-block-container block-element))]
-    (when container
-      {:last-edit-block edit-block
-       :container       (gobj/get container "id")
-       :pos             @(:editor/start-pos @state)
-       :end-pos         (or (cursor/pos (gdom/getElement edit-input-id))
-                            (count (:block/content edit-block)))})))
+  (set-state! :editor/last-saved-cursor {}))
+
+(defn clear-cursor-range!
+  []
+  (set-state! :editor/cursor-range nil))
 
 (defn clear-edit!
-  []
-  (set-state! :editor/editing? {})
-  (set-state! :editor/cursor-range nil)
-  (swap! state merge {:editor/last-saved-cursor nil})
+  [& {:keys [clear-editing-block?]
+      :or {clear-editing-block? true}}]
+  (clear-editor-action!)
+  (when clear-editing-block?
+    (set-state! :editor/editing? {})
+    (set-state! :editor/block nil))
+  (set-state! :editor/start-pos nil)
+  (clear-editor-last-pos!)
+  (clear-cursor-range!)
   (set-state! :editor/content {})
-  (set-state! :editor/block nil)
-  (set-state! :editor/properties-container nil)
   (set-state! :ui/select-query-cache {}))
 
 (defn into-code-editor-mode!
@@ -1373,21 +1370,18 @@ Similar to re-frame subscriptions"
 
 (defn set-editor-last-pos!
   [new-pos]
-  (set-state! [:editor/last-saved-cursor (:block/uuid (get-edit-block))] new-pos))
-
-(defn clear-editor-last-pos!
-  []
-  (set-state! :editor/last-saved-cursor nil))
+  (update-state! :editor/last-saved-cursor
+                 (fn [m] (assoc m (:block/uuid (get-edit-block)) new-pos))))
 
 (defn get-editor-last-pos
   []
-  (get-in @state [:editor/last-saved-cursor (:block/uuid (get-edit-block))]))
+  (get @(:editor/last-saved-cursor @state) (:block/uuid (get-edit-block))))
 
 (defn set-block-content-and-last-pos!
   [edit-input-id content new-pos]
   (when edit-input-id
     (set-edit-content! edit-input-id content)
-    (set-state! [:editor/last-saved-cursor (:block/uuid (get-edit-block))] new-pos)))
+    (set-editor-last-pos! new-pos)))
 
 (defn set-theme-mode!
   [mode]
@@ -1620,7 +1614,7 @@ Similar to re-frame subscriptions"
 (defn close-modal!
   [& {:keys [force?]
       :or {force? false}}]
-  (when (or force? (not (or (editing?) (:error/multiple-tabs-access-opfs? @state))))
+  (when (or force? (not (:error/multiple-tabs-access-opfs? @state)))
     (close-dropdowns!)
     (if (seq (get-sub-modals))
       (close-sub-modal!)
@@ -1929,14 +1923,6 @@ Similar to re-frame subscriptions"
   ([] (open-settings! true))
   ([active-tab] (set-state! :ui/settings-open? active-tab)))
 
-(defn set-editor-op!
-  [value]
-  (set-state! :editor/op value))
-
-(defn get-editor-op
-  []
-  @(:editor/op @state))
-
 (defn get-events-chan
   []
   (:system/events @state))
@@ -2092,6 +2078,14 @@ Similar to re-frame subscriptions"
 (defn get-last-key-code
   []
   @(:editor/last-key-code @state))
+
+(defn set-ui-last-key-code!
+  [key-code]
+  (set-state! :ui/global-last-key-code key-code))
+
+(defn get-ui-last-key-code
+  []
+  @(:ui/global-last-key-code @state))
 
 (defn set-block-op-type!
   [op-type]
@@ -2365,7 +2359,7 @@ Similar to re-frame subscriptions"
   [k]
   (assert (some? k))
   (rum/react
-   (r/cached-derived-atom (:db/async-queries @state) [(get-current-repo) ::async-query (str k)]
+   (r/cached-derived-atom (:db/async-query-loading @state) [(get-current-repo) ::async-query (str k)]
                           (fn [s] (contains? s (str k))))))
 
 (defn set-color-accent! [color]
@@ -2393,16 +2387,6 @@ Similar to re-frame subscriptions"
   (js/setTimeout #(async/go
                     (>! (get-handbook-route-chan) k))))
 
-(defn set-page-properties-changed!
-  [page-name]
-  (when-not (string/blank? page-name)
-    (update-state! [:db/properties-changed-pages page-name] #(inc %))))
-
-(defn sub-page-properties-changed
-  [page-name]
-  (when-not (string/blank? page-name)
-    (sub [:db/properties-changed-pages page-name])))
-
 (defn update-favorites-updated!
   []
   (update-state! :favorites/updated? inc))
@@ -2414,10 +2398,29 @@ Similar to re-frame subscriptions"
   []
   (swap! (:ui/container-id @state) inc))
 
+(defn get-container-id
+  "Either cached container-id or a new id"
+  [key]
+  (if (seq key)
+    (or (get @(:ui/cached-key->container-id @state) key)
+        (let [id (get-next-container-id)]
+          (swap! (:ui/cached-key->container-id @state) assoc key id)
+          id))
+    (get-next-container-id)))
+
+(defn get-current-editor-container-id
+  []
+  @(:editor/container-id @state))
+
+(comment
+  (defn remove-container-key!
+    [key]
+    (swap! (:ui/cached-key->container-id @state) dissoc key)))
+
 (defn get-editor-info
   []
   (when-let [edit-block (get-edit-block)]
     {:block-uuid (:block/uuid edit-block)
-     :container-id @(:editor/container-id @state)
+     :container-id (or @(:editor/container-id @state) :unknown-container)
      :start-pos @(:editor/start-pos @state)
      :end-pos (get-edit-pos)}))

@@ -23,6 +23,7 @@
             [frontend.handler.user :as user-handler]
             [logseq.shui.ui :as shui]
             [frontend.handler.db-based.rtc :as rtc-handler]
+            [frontend.handler.graph :as graph]
             [frontend.worker.async-util :as async-util]))
 
 (rum/defc normalized-graph-label
@@ -43,25 +44,46 @@
         (db/get-repo-path (or url GraphName))
         (when remote? [:strong.pl-1.flex.items-center (ui/icon "cloud")])])]))
 
+(defn sort-repos-with-metadata-local
+  [repos]
+  (if-let [m (and (seq repos) (graph/get-metadata-local))]
+    (->> repos
+      (map (fn [r] (merge r (get m (:url r)))))
+      (sort (fn [r1 r2]
+              (compare (or (:last-seen-at r2) (:created-at r2))
+                (or (:last-seen-at r1) (:created-at r1))))))
+    repos))
+
+(defn- safe-locale-date
+  [dst]
+  (when (number? dst)
+    (try
+      (.toLocaleString (js/Date. dst))
+      (catch js/Error _e nil))))
+
 (rum/defc repos-inner
   "Graph list in `All graphs` page"
   [repos]
-  (for [{:keys [root url remote? GraphUUID GraphName] :as repo} repos
+  (for [{:keys [root url remote? GraphUUID GraphName created-at last-seen-at] :as repo}
+        (sort-repos-with-metadata-local repos)
         :let [only-cloud? (and remote? (nil? root))
               db-based? (config/db-based-graph? url)]]
     [:div.flex.justify-between.mb-4.items-center {:key (or url GraphUUID)}
-     (normalized-graph-label repo
-                             (fn []
-                               (when-not (state/sub :rtc/downloading-graph-uuid)
-                                 (cond
-                                   root ; exists locally
-                                   (state/pub-event! [:graph/switch url])
+     [:span
+      (normalized-graph-label repo
+                              (fn []
+                                (when-not (state/sub :rtc/downloading-graph-uuid)
+                                  (cond
+                                    root                                          ; exists locally
+                                    (state/pub-event! [:graph/switch url])
 
-                                   (and db-based? remote?)
-                                   (state/pub-event! [:rtc/download-remote-graph GraphName GraphUUID])
+                                    (and db-based? remote?)
+                                    (state/pub-event! [:rtc/download-remote-graph GraphName GraphUUID])
 
-                                   :else
-                                   (state/pub-event! [:graph/pull-down-remote-graph repo])))))
+                                    :else
+                                    (state/pub-event! [:graph/pull-down-remote-graph repo])))))
+      (when-let [time (some-> (or last-seen-at created-at) (safe-locale-date))]
+        [:small.text-gray-400.opacity-50 (str "Last opened at: " time)])]
 
      [:div.controls
       [:div.flex.flex-row.items-center
@@ -90,27 +112,27 @@
                                                           :else
                                                           "")
                                          unlink-or-remote-fn! (fn []
-                                                               (repo-handler/remove-repo! repo)
-                                                               (state/pub-event! [:graph/unlinked repo (state/get-current-repo)]))
+                                                                (repo-handler/remove-repo! repo)
+                                                                (state/pub-event! [:graph/unlinked repo (state/get-current-repo)]))
                                          action-confirm-fn! (if only-cloud?
-                                                             (fn []
-                                                               (when (or manager? (not db-graph?))
-                                                                 (let [delete-graph (if db-graph?
-                                                                                      rtc-handler/<rtc-delete-graph!
-                                                                                      file-sync/<delete-graph)]
-                                                                   (state/set-state! [:file-sync/remote-graphs :loading] true)
-                                                                   (go (<! (delete-graph GraphUUID))
-                                                                       (state/delete-repo! repo)
-                                                                       (state/delete-remote-graph! repo)
-                                                                       (state/set-state! [:file-sync/remote-graphs :loading] false)))))
-                                                             unlink-or-remote-fn!)
+                                                              (fn []
+                                                                (when (or manager? (not db-graph?))
+                                                                  (let [delete-graph (if db-graph?
+                                                                                       rtc-handler/<rtc-delete-graph!
+                                                                                       file-sync/<delete-graph)]
+                                                                    (state/set-state! [:file-sync/remote-graphs :loading] true)
+                                                                    (go (<! (delete-graph GraphUUID))
+                                                                        (state/delete-repo! repo)
+                                                                        (state/delete-remote-graph! repo)
+                                                                        (state/set-state! [:file-sync/remote-graphs :loading] false)))))
+                                                              unlink-or-remote-fn!)
                                          confirm-fn!
                                          (fn []
                                            (-> (shui/dialog-confirm!
-                                                 [:p.font-medium.-my-4 prompt-str
-                                                  [:span.mt-1.flex.font-normal.opacity-40
-                                                   [:small "Notice that we can't recover this graph after being deleted. Make sure you have backups before deleting it."]]])
-                                             (p/then #(action-confirm-fn!))))]
+                                                [:p.font-medium.-my-4 prompt-str
+                                                 [:span.mt-1.flex.font-normal.opacity-40
+                                                  [:small "Notice that we can't recover this graph after being deleted. Make sure you have backups before deleting it."]]])
+                                               (p/then #(action-confirm-fn!))))]
 
                                      (if has-prompt?
                                        (confirm-fn!)
@@ -253,8 +275,10 @@
             remotes (state/sub [:file-sync/remote-graphs :graphs])
             rtc-graphs (state/sub :rtc/graphs)
             downloading-graph-id (state/sub :rtc/downloading-graph-uuid)
-            repos (if (and (or (seq remotes) (seq rtc-graphs)) login?)
-                    (repo-handler/combine-local-&-remote-graphs repos (concat remotes rtc-graphs)) repos)
+            repos (sort-repos-with-metadata-local repos)
+            repos (distinct
+                   (if (and (or (seq remotes) (seq rtc-graphs)) login?)
+                     (repo-handler/combine-local-&-remote-graphs repos (concat remotes rtc-graphs)) repos))
             items-fn #(repos-dropdown-links repos current-repo downloading-graph-id multiple-windows? opts)
             header-fn #(when (> (count repos) 1)            ; show switch to if there are multiple repos
                          [:div.font-medium.text-sm.opacity-50.px-1.py-1.flex.flex-row.justify-between.items-center
@@ -264,14 +288,14 @@
                             (if remotes-loading?
                               (ui/loading "")
                               (shui/button
-                                {:variant :ghost
-                                 :size :sm
-                                 :title "Refresh remote graphs"
-                                 :class "!h-6 !px-1 relative right-[-4px]"
-                                 :on-click (fn []
-                                             (file-sync/load-session-graphs)
-                                             (rtc-handler/<get-remote-graphs))}
-                                (ui/icon "refresh" {:size 15}))))])]
+                               {:variant :ghost
+                                :size :sm
+                                :title "Refresh remote graphs"
+                                :class "!h-6 !px-1 relative right-[-4px]"
+                                :on-click (fn []
+                                            (file-sync/load-session-graphs)
+                                            (rtc-handler/<get-remote-graphs))}
+                               (ui/icon "refresh" {:size 15}))))])]
         (when (seq repos)
           (let [remote? (and current-repo (:remote? (first (filter #(= current-repo (:url %)) repos))))
                 repo-name (when current-repo (db/get-repo-name current-repo))
@@ -279,50 +303,50 @@
                                   (db/get-short-repo-name repo-name)
                                   "Select a Graph")]
             (shui/trigger-as :a
-              {:tab-index 0
-               :class "item cp__repos-select-trigger"
-               :on-pointer-down
-               (fn [^js e]
-                 (check-multiple-windows? state)
-                 (some-> (.-target e)
-                   (.closest "a.item")
-                   (shui/popup-show!
-                     (fn [{:keys [id]}]
-                       [:<>
-                        (header-fn)
-                        (for [{:keys [hr item hover-detail title options icon]} (items-fn)]
-                          (let [on-click' (:on-click options)
-                                href' (:href options)]
-                            (if hr
-                              (shui/dropdown-menu-separator)
-                              (shui/dropdown-menu-item
-                                (assoc options
-                                       :title hover-detail
-                                       :on-click (fn [^js e]
-                                                   (when on-click'
-                                                     (when-not (false? (on-click' e))
-                                                       (shui/popup-hide! id)))))
-                                (or item
-                                  (if href'
-                                    [:a.flex.items-center.w-full
-                                     {:href href' :on-click #(shui/popup-hide! id)
-                                      :style {:color "inherit"}} title]
-                                    [:span.flex.items-center.gap-1.w-full
-                                     icon [:div title]]))))))])
-                     {:as-dropdown? true
-                      :auto-focus? false
-                      :align "start"
-                      :content-props {:class "repos-list"}})))
-               :title repo-name}                            ;; show full path on hover
-              [:div.flex.flex-row.items-center
-               [:div.flex.relative.graph-icon.rounded
-                (shui/tabler-icon "database" {:size 15})]
+                             {:tab-index 0
+                              :class "item cp__repos-select-trigger"
+                              :on-pointer-down
+                              (fn [^js e]
+                                (check-multiple-windows? state)
+                                (some-> (.-target e)
+                                        (.closest "a.item")
+                                        (shui/popup-show!
+                                         (fn [{:keys [id]}]
+                                           [:<>
+                                            (header-fn)
+                                            (for [{:keys [hr item hover-detail title options icon]} (items-fn)]
+                                              (let [on-click' (:on-click options)
+                                                    href' (:href options)]
+                                                (if hr
+                                                  (shui/dropdown-menu-separator)
+                                                  (shui/dropdown-menu-item
+                                                   (assoc options
+                                                          :title hover-detail
+                                                          :on-click (fn [^js e]
+                                                                      (when on-click'
+                                                                        (when-not (false? (on-click' e))
+                                                                          (shui/popup-hide! id)))))
+                                                   (or item
+                                                       (if href'
+                                                         [:a.flex.items-center.w-full
+                                                          {:href href' :on-click #(shui/popup-hide! id)
+                                                           :style {:color "inherit"}} title]
+                                                         [:span.flex.items-center.gap-1.w-full
+                                                          icon [:div title]]))))))])
+                                         {:as-dropdown? true
+                                          :auto-focus? false
+                                          :align "start"
+                                          :content-props {:class "repos-list"}})))
+                              :title repo-name}                            ;; show full path on hover
+                             [:div.flex.relative.graph-icon.rounded
+                              (shui/tabler-icon "database" {:size 15})]
 
-               [:div.repo-switch.block.pr-2.whitespace-nowrap
-                [:span.repo-name.font-medium
-                 [:span.overflow-hidden.text-ellipsis (if (= config/demo-repo short-repo-name) "Demo" short-repo-name)]
-                 (when remote? [:span.pl-1 (ui/icon "cloud")])]
-                [:span.dropdown-caret.ml-2 {:style {:border-top-color "#6b7280"}}]]])))))))
+                             [:div.repo-switch.pr-2.whitespace-nowrap
+                              [:span.repo-name.font-medium
+                               [:span.repo-text.overflow-hidden.text-ellipsis
+                                (if (= config/demo-repo short-repo-name) "Demo" short-repo-name)]
+                               (when remote? [:span.pl-1 (ui/icon "cloud")])]
+                              [:span.dropdown-caret]])))))))
 
 (defn invalid-graph-name-warning
   []
@@ -389,7 +413,7 @@
                                          (js/console.error error)))))
                            (reset! *creating-db? false)
                            (shui/dialog-close!))))))]
-    [:div.new-graph.flex.flex-col.p-4.gap-4
+    [:div.new-graph.flex.flex-col.gap-4.p-1.pt-2
      (shui/input
        {:value @*graph-name
         :disabled @*creating-db?

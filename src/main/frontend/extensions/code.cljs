@@ -474,19 +474,17 @@
                                                    shifted?
                                                    (case key-code
                                                      "Enter"
-                                                    (when-let [blockid (some-> (.-target e) (.closest "[blockid]") (.getAttribute "blockid"))]
-                                                      (code-handler/save-code-editor!)
-                                                      (js/setTimeout
+                                                     (when-let [blockid (some-> (.-target e) (.closest "[blockid]") (.getAttribute "blockid"))]
+                                                       (code-handler/save-code-editor!)
+                                                       (js/setTimeout
                                                         #(editor-handler/api-insert-new-block! ""
-                                                           {:block-uuid (uuid blockid)
-                                                            :sibling? true}) 32))
+                                                                                               {:block-uuid (uuid blockid)
+                                                                                                :sibling? true}) 32))
                                                      nil)))))
         (.addEventListener element "pointerdown"
                            (fn [e]
                              (.stopPropagation e)
-                             (state/clear-selection!)
-                             (when-let [block (and (:block/uuid config) (into {} (db/get-block-by-uuid (:block/uuid config))))]
-                               (state/set-editing! id (.getValue editor) block nil {:move-cursor? false}))))
+                             (state/clear-selection!)))
         (.addEventListener element "touchstart"
                            (fn [e]
                              (.stopPropagation e)))
@@ -560,11 +558,13 @@
   ;; command is run. It's not elegant... open to suggestions for how to fix it!
   (let [block (state/get-edit-block)
         block-uuid (:block/uuid block)]
-    (state/clear-edit!)
-    (js/setTimeout
-     (fn []
-       (let [block-node (util/get-first-block-by-id block-uuid)
-             textarea-ref (.querySelector block-node "textarea")]
-         (when-let [codemirror-ref (gobj/get textarea-ref codemirror-ref-name)]
-           (.focus codemirror-ref))))
-     256)))
+    (p/do!
+     (state/pub-event! [:editor/save-current-block])
+     (state/clear-edit!)
+     (js/setTimeout
+      (fn []
+        (let [block-node (util/get-first-block-by-id block-uuid)
+              textarea-ref (.querySelector block-node "textarea")]
+          (when-let [codemirror-ref (gobj/get textarea-ref codemirror-ref-name)]
+            (.focus codemirror-ref))))
+      256))))

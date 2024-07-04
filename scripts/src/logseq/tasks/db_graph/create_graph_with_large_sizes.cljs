@@ -1,11 +1,12 @@
 (ns logseq.tasks.db-graph.create-graph-with-large-sizes
   "Script that generates graphs at large sizes"
-  (:require [logseq.tasks.db-graph.create-graph :as create-graph]
+  (:require [logseq.outliner.cli :as outliner-cli]
             [clojure.string :as string]
             [datascript.core :as d]
             [babashka.cli :as cli]
             ["path" :as node-path]
             ["os" :as os]
+            [nbb.classpath :as cp]
             [nbb.core :as nbb]))
 
 (def *ids (atom #{}))
@@ -65,13 +66,13 @@
         [dir db-name] (if (string/includes? graph-dir "/")
                         ((juxt node-path/dirname node-path/basename) graph-dir)
                         [(node-path/join (os/homedir) "logseq" "graphs") graph-dir])
-        conn (create-graph/init-conn dir db-name)
+        conn (outliner-cli/init-conn dir db-name {:classpath (cp/get-classpath)})
         _ (println "Building tx ...")
-        blocks-tx (create-graph/create-blocks-tx (create-init-data options))]
-    (println "Built" (count blocks-tx) "tx," (count (filter :block/original-name blocks-tx)) "pages and"
-             (count (filter :block/content blocks-tx)) "blocks ...")
+        {:keys [init-tx]} (outliner-cli/build-blocks-tx (create-init-data options))]
+    (println "Built" (count init-tx) "tx," (count (filter :block/original-name init-tx)) "pages and"
+             (count (filter :block/content init-tx)) "blocks ...")
     ;; Vary the chunking with page size up to a max to avoid OOM
-    (let [tx-chunks (partition-all (min (:pages options) 30000) blocks-tx)]
+    (let [tx-chunks (partition-all (min (:pages options) 30000) init-tx)]
       (loop [chunks tx-chunks
              chunk-num 1]
         (when-let [chunk (first chunks)]

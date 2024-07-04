@@ -1,17 +1,18 @@
 (ns logseq.db
   "Main namespace for public db fns. For DB and file graphs.
    For shared file graph only fns, use logseq.graph-parser.db"
-  (:require [datascript.core :as d]
-            [clojure.string :as string]
-            [logseq.common.util :as common-util]
+  (:require [clojure.string :as string]
+            [datascript.core :as d]
+            [datascript.impl.entity :as de]
             [logseq.common.config :as common-config]
-            [logseq.db.frontend.content :as db-content]
-            [logseq.db.frontend.rules :as rules]
-            [logseq.db.frontend.entity-plus :as entity-plus]
-            [logseq.db.sqlite.util :as sqlite-util]
-            [logseq.db.sqlite.common-db :as sqlite-common-db]
+            [logseq.common.util :as common-util]
+            [logseq.common.uuid :as common-uuid]
             [logseq.db.frontend.delete-blocks :as delete-blocks]
-            [datascript.impl.entity :as de]))
+            [logseq.db.frontend.entity-plus :as entity-plus]
+            [logseq.db.frontend.rules :as rules]
+            [logseq.db.sqlite.common-db :as sqlite-common-db]
+            [logseq.db.sqlite.util :as sqlite-util]
+            [logseq.db.frontend.property :as db-property]))
 
 ;; Use it as an input argument for datalog queries
 (def block-attrs
@@ -20,7 +21,6 @@
     :block/parent
     :block/order
     :block/collapsed?
-    :block/collapsed-properties
     :block/format
     :block/refs
     :block/_refs
@@ -65,44 +65,39 @@
          tx-data (->> (common-util/fast-remove-nils tx-data)
                       (remove empty?))
          delete-blocks-tx (when-not (string? repo-or-conn)
-                            (delete-blocks/update-refs-and-macros @repo-or-conn tx-data))
+                            (delete-blocks/update-refs-and-macros @repo-or-conn tx-data tx-meta))
          tx-data (concat tx-data delete-blocks-tx)]
 
      ;; Ensure worker can handle the request sequentially (one by one)
      ;; Because UI assumes that the in-memory db has all the data except the last one transaction
      (when (seq tx-data)
 
-       ;; (prn :debug :transact :sync? (= d/transact! (or @*transact-fn d/transact!)))
+       ;; (prn :debug :transact :sync? (= d/transact! (or @*transact-fn d/transact!)) :tx-meta tx-meta)
        ;; (cljs.pprint/pprint tx-data)
+       ;; (js/console.trace)
 
        (let [f (or @*transact-fn d/transact!)]
-         (f repo-or-conn tx-data tx-meta))))))
+         (try
+           (f repo-or-conn tx-data tx-meta)
+           (catch :default e
+             (js/console.trace)
+             (prn :debug-tx-data tx-data)
+             (throw e))))))))
 
 (defn sort-by-order
   [blocks]
   (sort-by :block/order blocks))
 
-;; TODO: use the tree directly
-(defn flatten-tree
-  [blocks-tree]
-  (if-let [children (:block/_parent blocks-tree)]
-    (cons (dissoc blocks-tree :block/_parent) (mapcat flatten-tree children))
-    [blocks-tree]))
+(defn- get-block-and-children-aux
+  [entity]
+  (if-let [children (sort-by-order (:block/_parent entity))]
+    (cons entity (mapcat get-block-and-children-aux children))
+    [entity]))
 
-;; TODO: performance enhance
 (defn get-block-and-children
-  [repo db block-uuid]
-  (some-> (d/q
-           '[:find [(pull ?block ?block-attrs) ...]
-             :in $ ?id ?block-attrs
-             :where
-             [?block :block/uuid ?id]]
-           db
-           block-uuid
-           block-attrs)
-          first
-          flatten-tree
-          (->> (map #(db-content/update-block-content repo db % (:db/id %))))))
+  [db block-uuid]
+  (when-let [e (d/entity db [:block/uuid block-uuid])]
+    (get-block-and-children-aux e)))
 
 (defn whiteboard-page?
   "Given a page entity or map, check if it is a whiteboard page"
@@ -372,7 +367,7 @@
 
 (defn new-block-id
   []
-  (d/squuid))
+  (common-uuid/gen-uuid))
 
 (defn get-tag-blocks
   [db tag-name]
@@ -389,18 +384,6 @@
   [db property-id]
   (:class/_schema.properties (d/entity db property-id)))
 
-(defn get-block-property-values
-  "Get blocks which have this property."
-  [db property-uuid]
-  (d/q
-   '[:find ?b ?v
-     :in $ ?property-uuid
-     :where
-     [?b :block/properties ?p]
-     [(get ?p ?property-uuid) ?v]
-     [(some? ?v)]]
-   db
-   property-uuid))
 
 (defn get-alias-source-page
   "return the source page (page-name) of an alias"
@@ -464,10 +447,20 @@
     (when (seq eids)
       (d/pull-many db '[*] eids))))
 
+(defn get-all-pages
+  [db]
+  (->>
+   (d/datoms db :avet :block/name)
+   (distinct)
+   (map #(d/entity db (:e %)))
+   (remove hidden-page?)
+   (remove (fn [page]
+             (common-util/uuid-string? (:block/name page))))))
+
 (defn built-in?
   "Built-in page or block"
   [entity]
-  (:logseq.property/built-in? entity))
+  (db-property/property-value-content (:logseq.property/built-in? entity)))
 
 (defn built-in-class-property?
   "Whether property a built-in property for the specific class"
@@ -487,7 +480,7 @@
   (transact!
    repo
    [(sqlite-util/block-with-timestamps
-     {:block/uuid (d/squuid)
+     {:block/uuid (common-uuid/gen-uuid)
       :block/name common-config/favorites-page-name
       :block/original-name common-config/favorites-page-name
       :block/type #{"hidden"}
@@ -500,11 +493,23 @@
    :block/content ""
    :block/format :markdown})
 
+;; TODO: why not generate a UUID for all local graphs?
+;; And prefer this local graph UUID when picking an ID for new rtc graph?
 (defn get-graph-rtc-uuid
   [db]
-  (when db (:graph/uuid (d/entity db :logseq.kv/graph-uuid))))
+  (when db (:kv/value (d/entity db :logseq.kv/graph-uuid))))
 
 (def page? sqlite-util/page?)
+(defn class?
+  [entity]
+  (contains? (:block/type entity) "class"))
+(defn property?
+  [entity]
+  (contains? (:block/type entity) "property"))
+(defn closed-value?
+  [entity]
+  (contains? (:block/type entity) "closed value"))
+
 (def db-based-graph? entity-plus/db-based-graph?)
 
 ;; File based fns
@@ -539,3 +544,9 @@
         (d/pull-many db
                      '[:db/id :block/name :block/original-name]
                      ids)))))
+
+(defn get-all-properties
+  [db]
+  (->> (d/datoms db :avet :block/type "property")
+       (map (fn [d]
+              (d/entity db (:e d))))))

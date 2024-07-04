@@ -1,32 +1,54 @@
 (ns frontend.worker.pipeline
   "Pipeline work after transaction"
   (:require [datascript.core :as d]
+            [frontend.schema-register :as sr]
             [frontend.worker.file :as file]
             [frontend.worker.react :as worker-react]
+            [frontend.worker.state :as worker-state]
             [frontend.worker.util :as worker-util]
             [logseq.db :as ldb]
             [logseq.db.frontend.validate :as db-validate]
             [logseq.db.sqlite.util :as sqlite-util]
+            [logseq.outliner.core :as outliner-core]
             [logseq.outliner.datascript-report :as ds-report]
             [logseq.outliner.pipeline :as outliner-pipeline]))
 
-(defn- path-refs-need-recalculated?
+(defn- refs-need-recalculated?
   [tx-meta]
   (let [outliner-op (:outliner-op tx-meta)]
     (not (or
           (contains? #{:collapse-expand-blocks :delete-blocks} outliner-op)
           (:undo? tx-meta) (:redo? tx-meta)))))
 
-(defn compute-block-path-refs-tx
+(defn- compute-block-path-refs-tx
   [{:keys [tx-meta] :as tx-report} blocks]
-  (when (or (and (:outliner-op tx-meta) (path-refs-need-recalculated? tx-meta))
+  (when (or (and (:outliner-op tx-meta) (refs-need-recalculated? tx-meta))
             (:from-disk? tx-meta)
             (:new-graph? tx-meta))
     (outliner-pipeline/compute-block-path-refs-tx tx-report blocks)))
 
+(defn- rebuild-block-refs
+  [repo {:keys [tx-meta db-after]} blocks]
+  (when (and (:outliner-op tx-meta) (refs-need-recalculated? tx-meta))
+    (mapcat (fn [block]
+              (when (d/entity db-after (:db/id block))
+                (let [date-formatter (worker-state/get-date-formatter repo)
+                      refs (outliner-core/rebuild-block-refs repo db-after date-formatter block)]
+                  (when (seq refs)
+                    [[:db/retract (:db/id block) :block/refs]
+                     {:db/id (:db/id block)
+                      :block/refs refs}]))))
+            blocks)))
+
+(sr/defkeyword :skip-validate-db?
+  "tx-meta option, default = false")
+
 (defn validate-db!
-  [repo conn tx-report context]
-  (when (and (:dev? context) (not (:importing? context)) (sqlite-util/db-based-graph? repo))
+  "Validate db is slow, we probably don't want to enable it for production."
+  [repo conn tx-report tx-meta context]
+  (when (and (not (:skip-validate-db? tx-meta false))
+             (:dev? context)
+             (not (:importing? context)) (sqlite-util/db-based-graph? repo))
     (let [valid? (db-validate/validate-tx-report! tx-report (:validate-db-options context))]
       (when (and (get-in context [:validate-db-options :fail-invalid?]) (not valid?))
         (worker-util/post-message :notification
@@ -72,28 +94,34 @@
                       (when (d/entity @conn page-id)
                         (file/sync-to-file repo page-id tx-meta)))))
               deleted-block-uuids (set (outliner-pipeline/filter-deleted-blocks (:tx-data tx-report)))
+              blocks' (remove (fn [b] (deleted-block-uuids (:block/uuid b))) blocks)
+              block-refs (when (seq blocks')
+                           (rebuild-block-refs repo tx-report blocks'))
+              refs-tx-report (when (seq block-refs)
+                               (ldb/transact! conn block-refs {:pipeline-replace? true}))
               replace-tx (concat
-                        ;; block path refs
-                          (set (compute-block-path-refs-tx tx-report blocks))
+                          ;; block path refs
+                          (when (seq blocks')
+                            (let [db-after (or (:db-after refs-tx-report) (:db-after tx-report))
+                                  blocks' (keep (fn [b] (d/entity db-after (:db/id b))) blocks')]
+                              (compute-block-path-refs-tx tx-report blocks')))
 
                           ;; update block/tx-id
                           (let [updated-blocks (remove (fn [b] (contains? (set deleted-block-uuids) (:block/uuid b)))
                                                        (concat pages blocks))
-                                tx-id (get-in tx-report [:tempids :db/current-tx])]
+                                tx-id (get-in (or refs-tx-report tx-report) [:tempids :db/current-tx])]
                             (keep (fn [b]
                                     (when-let [db-id (:db/id b)]
                                       {:db/id db-id
                                        :block/tx-id tx-id})) updated-blocks)))
-              tx-report' (or
-                          (when (seq replace-tx)
-                          ;; TODO: remove this since transact! is really slow
-                            (ldb/transact! conn replace-tx {:pipeline-replace? true}))
-                          (do
-                            (when-not (exists? js/process) (d/store @conn))
-                            tx-report))
-              fix-tx-data (validate-db! repo conn tx-report context)
+              tx-report' (if (seq replace-tx)
+                           (ldb/transact! conn replace-tx {:pipeline-replace? true})
+                           (do
+                             (when-not (exists? js/process) (d/store @conn))
+                             tx-report))
+              _ (validate-db! repo conn tx-report tx-meta context)
               full-tx-data (concat (:tx-data tx-report)
-                                   fix-tx-data
+                                   (:tx-data refs-tx-report)
                                    (:tx-data tx-report'))
               final-tx-report (assoc tx-report' :tx-data full-tx-data)
               affected-query-keys (when-not (:importing? context)

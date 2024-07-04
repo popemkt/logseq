@@ -32,17 +32,19 @@
                                                                       (assert (some? (:db/id entity)))
                                                                       (assoc (.-kv entity)
                                                                              :db/id (:db/id entity)))))
-                            (merge (cljs-bean.transit/writer-handlers)))]
+                            (merge (cljs-bean.transit/writer-handlers)))
+        writer (transit/writer :json {:handlers write-handlers})]
     (fn write-transit-str* [o]
-      (try (transit/write (transit/writer :json {:handlers write-handlers}) o)
+      (try (transit/write writer o)
            (catch :default e
              (prn ::write-transit-str o)
              (throw e))))))
 
 (def read-transit-str
   (let [read-handlers (assoc dt/read-handlers
-                             "datascript/Entity" identity)]
-    (fn read-transit-str* [s] (transit/read (transit/reader :json {:handlers read-handlers}) s))))
+                             "datascript/Entity" identity)
+        reader (transit/reader :json {:handlers read-handlers})]
+    (fn read-transit-str* [s] (transit/read reader s))))
 
 (defn db-based-graph?
   [graph-name]
@@ -74,17 +76,16 @@
   "Build a standard new property so that it is is consistent across contexts. Takes
    an optional map with following keys:
    * :original-name - Case sensitive property name. Defaults to deriving this from db-ident
-   * :block-uuid - :block/uuid for property
-   * :from-ui-thread? - whether calls from the UI thread"
+   * :block-uuid - :block/uuid for property"
   ([db-ident prop-schema] (build-new-property db-ident prop-schema {}))
-  ([db-ident prop-schema {:keys [original-name block-uuid ref-type? from-ui-thread?]}]
+  ([db-ident prop-schema {:keys [original-name block-uuid ref-type?]}]
    (assert (keyword? db-ident))
    (let [db-ident' (if (qualified-keyword? db-ident)
                      db-ident
                      (db-property/create-user-property-ident-from-name (name db-ident)))
          prop-name (or original-name (name db-ident'))
-         block-order (when-not from-ui-thread? (db-order/gen-key nil))
-         classes (:classes prop-schema)]
+         classes (:classes prop-schema)
+         prop-schema (assoc prop-schema :type (get prop-schema :type :default))]
      (block-with-timestamps
       (cond->
        {:db/ident db-ident'
@@ -97,24 +98,23 @@
         :db/index true
         :db/cardinality (if (= :many (:cardinality prop-schema))
                           :db.cardinality/many
-                          :db.cardinality/one)}
-        block-order
-        (assoc :block/order block-order)
+                          :db.cardinality/one)
+        :block/order (db-order/gen-key)}
         (seq classes)
         (assoc :property/schema.classes classes)
         (or ref-type? (contains? (conj db-property-type/ref-property-types :entity) (:type prop-schema)))
         (assoc :db/valueType :db.type/ref))))))
 
-
 (defn build-new-class
   "Build a standard new class so that it is is consistent across contexts"
   [block]
+  {:pre [(qualified-keyword? (:db/ident block))]}
   (block-with-timestamps
    (merge (cond->
            {:block/type "class"
             :block/format :markdown}
-            (not= (:db/ident block) :logseq.class/base)
-            (assoc :class/parent :logseq.class/base))
+            (not= (:db/ident block) :logseq.class/Root)
+            (assoc :class/parent :logseq.class/Root))
           block)))
 
 (defn build-new-page
@@ -130,8 +130,3 @@
   [block]
   (and (:block/name block)
        (nil? (:block/page block))))
-
-(defn mark-block-as-built-in
-  "Marks built-in blocks as built-in? including pages, classes, properties and closed values"
-  [block]
-  (assoc block :logseq.property/built-in? true))

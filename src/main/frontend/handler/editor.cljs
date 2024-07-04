@@ -7,66 +7,68 @@
             [frontend.config :as config]
             [frontend.date :as date]
             [frontend.db :as db]
-            [frontend.db.model :as db-model]
-            [frontend.db.utils :as db-utils]
             [frontend.db.async :as db-async]
+            [frontend.db.model :as db-model]
+            [frontend.db.query-dsl :as query-dsl]
+            [frontend.db.utils :as db-utils]
             [frontend.diff :as diff]
+            [frontend.extensions.pdf.utils :as pdf-utils]
             [frontend.format.block :as block]
             [frontend.format.mldoc :as mldoc]
             [frontend.fs :as fs]
-            [logseq.common.path :as path]
-            [frontend.extensions.pdf.utils :as pdf-utils]
+            [frontend.fs.capacitor-fs :as capacitor-fs]
             [frontend.handler.assets :as assets-handler]
             [frontend.handler.block :as block-handler]
             [frontend.handler.common :as common-handler]
-            [frontend.handler.property :as property-handler]
-            [frontend.handler.property.util :as pu]
+            [frontend.handler.db-based.editor :as db-editor-handler]
             [frontend.handler.db-based.property.util :as db-pu]
             [frontend.handler.export.html :as export-html]
             [frontend.handler.export.text :as export-text]
+            [frontend.handler.file-based.editor :as file-editor-handler]
+            [frontend.handler.file-based.status :as status]
             [frontend.handler.notification :as notification]
+            [frontend.handler.property :as property-handler]
+            [frontend.handler.property.file :as property-file]
+            [frontend.handler.property.util :as pu]
             [frontend.handler.repeated :as repeated]
             [frontend.handler.route :as route-handler]
-            [frontend.handler.db-based.editor :as db-editor-handler]
-            [frontend.handler.file-based.editor :as file-editor-handler]
             [frontend.mobile.util :as mobile-util]
-            [logseq.outliner.core :as outliner-core]
             [frontend.modules.outliner.op :as outliner-op]
-            [frontend.modules.outliner.ui :as ui-outliner-tx]
             [frontend.modules.outliner.tree :as tree]
+            [frontend.modules.outliner.ui :as ui-outliner-tx]
             [frontend.search :as search]
             [frontend.state :as state]
             [frontend.template :as template]
-            [frontend.util :as util :refer [profile]]
+            [frontend.util :as util]
             [frontend.util.clock :as clock]
             [frontend.util.cursor :as cursor]
             [frontend.util.drawer :as drawer]
             [frontend.util.keycode :as keycode]
             [frontend.util.list :as list]
-            [frontend.handler.file-based.status :as status]
-            [frontend.handler.property.file :as property-file]
             [frontend.util.text :as text-util]
             [frontend.util.thingatpt :as thingatpt]
+            [goog.crypt.base64 :as base64]
             [goog.dom :as gdom]
             [goog.dom.classes :as gdom-classes]
             [goog.object :as gobj]
-            [goog.crypt.base64 :as base64]
             [goog.string :as gstring]
             [lambdaisland.glogi :as log]
+            [logseq.common.path :as path]
+            [logseq.common.util :as common-util]
+            [logseq.common.util.block-ref :as block-ref]
+            [logseq.common.util.page-ref :as page-ref]
+            [logseq.db :as ldb]
             [logseq.db.frontend.schema :as db-schema]
+            [logseq.db.frontend.property :as db-property]
             [logseq.graph-parser.block :as gp-block]
             [logseq.graph-parser.mldoc :as gp-mldoc]
             [logseq.graph-parser.property :as gp-property]
             [logseq.graph-parser.text :as text]
             [logseq.graph-parser.utf8 :as utf8]
-            [logseq.common.util :as common-util]
-            [logseq.common.util.block-ref :as block-ref]
-            [logseq.common.util.page-ref :as page-ref]
+            [logseq.outliner.core :as outliner-core]
             [promesa.core :as p]
             [rum.core :as rum]
-            [frontend.fs.capacitor-fs :as capacitor-fs]
-            [logseq.db :as ldb]
-            [frontend.db.query-dsl :as query-dsl]))
+            [logseq.outliner.property :as outliner-property]))
 
 ;; FIXME: should support multiple images concurrently uploading
 
@@ -233,8 +235,7 @@
           pos (or (state/get-editor-last-pos)
                   (and cursor-range
                        (diff/find-position markup cursor-range)))]
-      (cursor/move-cursor-to node pos)
-      (state/clear-editor-last-pos!))))
+      (cursor/move-cursor-to node pos))))
 
 (defn highlight-block!
   [block-uuid]
@@ -260,24 +261,15 @@
   [block value opts]
   (let [block {:db/id (:db/id block)
                :block/uuid (:block/uuid block)
-               :block/content value}]
-    (profile
-     "Save block: "
-     (let [block' (-> (wrap-parse-block block)
-                      ;; :block/uuid might be changed when backspace/delete
-                      ;; a block that has been refed
-                      (assoc :block/uuid (:block/uuid block)))
-           opts' (assoc opts :outliner-op :save-block)
-           original-block (db/entity (:db/id block))
-           original-props (:block/properties original-block)]
-       (ui-outliner-tx/transact!
-                   opts'
-                   (outliner-save-block! block')
-                   ;; page properties changed
-                   (when-let [page-name (and (:block/pre-block? block')
-                                             (not= original-props (:block/properties block'))
-                                             (some-> (:block/page block') :db/id (db-utils/pull) :block/name))]
-                     (state/set-page-properties-changed! page-name)))))))
+               :block/content value}
+        block' (-> (wrap-parse-block block)
+                   ;; :block/uuid might be changed when backspace/delete
+                   ;; a block that has been refed
+                   (assoc :block/uuid (:block/uuid block)))
+        opts' (assoc opts :outliner-op :save-block)]
+    (ui-outliner-tx/transact!
+     opts'
+     (outliner-save-block! block'))))
 
 ;; id: block dom id, "ls-block-counter-uuid"
 (defn- another-block-with-same-id-exists?
@@ -378,10 +370,10 @@
             selection-end (util/get-selection-end input)
             [_ new-content] (compute-fst-snd-block-text value selection-start selection-end)]
         (state/set-edit-content! edit-input-id new-content)))
-    (p/let [_ (let [sibling? (not= (:db/id left-or-parent) (:db/id (:block/parent block)))]
-                (outliner-insert-block! config left-or-parent prev-block {:sibling? sibling?
-                                                                          :keep-uuid? true}))])
-    prev-block))
+    (let [sibling? (not= (:db/id left-or-parent) (:db/id (:block/parent block)))
+          result (outliner-insert-block! config left-or-parent prev-block {:sibling? sibling?
+                                                                           :keep-uuid? true})]
+      [result sibling? prev-block])))
 
 (defn insert-new-block-aux!
   [config
@@ -400,11 +392,10 @@
         next-block (-> (merge (select-keys block [:block/parent :block/format :block/page])
                               new-m)
                        (wrap-parse-block))
-        sibling? (when block-self? false)]
-    (util/set-change-value input fst-block-text)
-    (outliner-insert-block! config current-block next-block {:sibling? sibling?
-                                                             :keep-uuid? true})
-    (assoc next-block :block/content snd-block-text)))
+        sibling? (or (:block/collapsed? (:block/link block)) (when block-self? false))
+        result (outliner-insert-block! config current-block next-block {:sibling? sibling?
+                                                                          :keep-uuid? true})]
+    [result sibling? next-block]))
 
 (defn clear-when-saved!
   []
@@ -427,50 +418,109 @@
          :block-parent-id block-parent-id
          :node node
          :value value
-         :pos pos}))))
+         :pos pos
+         :block-container (util/rec-get-node node "ls-block")}))))
+
+(defn- get-node-container-id
+  [node]
+  (some-> (dom/attr node "containerid")
+          util/safe-parse-int))
+
+(defn- get-node-parent
+  [node]
+  (some-> (gobj/get node "parentNode")
+          (util/rec-get-node "ls-block")))
+
+(defn- get-new-container-id
+  [op data]
+  (let [{:keys [block block-container]} (get-state)]
+    (when block
+      (let [node block-container
+            linked? (some? (dom/attr node "originalblockid"))]
+        (case op
+          :insert
+          (when (and linked? (not (false? (:sibling? data))))
+            (some-> (util/rec-get-node node "blocks-container")
+                    get-node-container-id))
+
+          :indent
+          ;; Get prev sibling's container id
+          (when-let [prev (.-previousSibling node)]
+            (when (dom/attr prev "originalblockid")
+              (get-node-container-id prev)))
+
+          :move-up
+          (let [parent (get-node-parent node)
+                prev (when parent (.-previousSibling parent))]
+            (when (and prev (dom/attr prev "originalblockid"))
+              (get-node-container-id prev)))
+
+          :move-down
+          (let [parent (get-node-parent node)
+                next (when parent (.-nextSibling parent))]
+            (when (and next (dom/attr next "originalblockid"))
+              (get-node-container-id next)))
+
+          :outdent
+          ;; Get embed block's root container id
+          (when-let [parent (some-> (gobj/get node "parentNode")
+                                    (util/rec-get-node "ls-block"))]
+            (when (dom/attr parent "originalblockid")
+              (some-> (util/rec-get-node parent "blocks-container")
+                      get-node-container-id))))))))
 
 (defn insert-new-block!
   "Won't save previous block content - remember to save!"
   ([state]
    (insert-new-block! state nil))
   ([_state block-value]
-   (when (not config/publishing?)
-     (when-let [state (get-state)]
-       (state/set-editor-op! :insert-block)
-       (let [{:keys [block value config]} state
-             value (if (string? block-value) block-value value)
-             block-id (:block/uuid block)
-             block-self? (block-self-alone-when-insert? config block-id)
-             input-id (state/get-edit-input-id)
-             input (gdom/getElement input-id)
-             selection-start (util/get-selection-start input)
-             selection-end (util/get-selection-end input)
-             [fst-block-text snd-block-text] (compute-fst-snd-block-text value selection-start selection-end)
-             insert-above? (and (string/blank? fst-block-text) (not (string/blank? snd-block-text)))
-             block' (or (db/entity [:block/uuid block-id]) block)
-             original-block (:original-block config)
-             block'' (or
-                      (when original-block
-                        (let [e (db/entity (:db/id block'))]
-                          (if (and (some? (first (:block/_parent e)))
-                                   (not (:block/collapsed? e)))
+   (->
+    (when (not config/publishing?)
+      (when-let [state (get-state)]
+        (state/set-state! :editor/async-unsaved-chars "")
+        (let [{:keys [block value config]} state
+              value (if (string? block-value) block-value value)
+              block-id (:block/uuid block)
+              block-self? (block-self-alone-when-insert? config block-id)
+              input-id (state/get-edit-input-id)
+              input (gdom/getElement input-id)
+              selection-start (util/get-selection-start input)
+              selection-end (util/get-selection-end input)
+              [fst-block-text snd-block-text] (compute-fst-snd-block-text value selection-start selection-end)
+              insert-above? (and (string/blank? fst-block-text) (not (string/blank? snd-block-text)))
+              block' (or (db/entity [:block/uuid block-id]) block)
+              original-block (:original-block config)
+              block'' (or
+                       (when original-block
+                         (let [e (db/entity (:db/id block'))]
+                           (if (and (some? (first (:block/_parent e)))
+                                    (not (:block/collapsed? e)))
                           ;; object has children and not collapsed
-                            block'
-                            original-block)))
-                      block')
-             insert-fn (cond
-                         block-self?
-                         insert-new-block-aux!
+                             block'
+                             original-block)))
+                       block')
+              insert-fn (cond
+                          block-self?
+                          insert-new-block-aux!
 
-                         insert-above?
-                         insert-new-block-before-block-aux!
+                          insert-above?
+                          insert-new-block-before-block-aux!
 
-                         :else
-                         insert-new-block-aux!)
-             next-block (insert-fn config block'' value)]
-         (clear-when-saved!)
-         (state/set-state! :editor/next-edit-block {:block next-block
-                                                    :pos 0}))))))
+                          :else
+                          insert-new-block-aux!)
+              [result-promise sibling? next-block] (insert-fn config block'' value)]
+          (p/do!
+           result-promise
+           (clear-when-saved!)
+           (let [next-block' (db/entity [:block/uuid (:block/uuid next-block)])
+                 pos 0
+                 unsaved-chars @(:editor/async-unsaved-chars @state/state)
+                 container-id (get-new-container-id :insert {:sibling? sibling?})]
+             (edit-block! next-block' (+ pos (count unsaved-chars))
+                          {:container-id container-id
+                           :custom-content (str unsaved-chars (:block/content next-block'))}))))))
+    (p/finally (fn []
+                 (state/set-state! :editor/async-unsaved-chars nil))))))
 
 (defn api-insert-new-block!
   [content {:keys [page block-uuid sibling? before? properties
@@ -480,13 +530,13 @@
                  edit-block? true}}]
   (when (or page block-uuid)
     (let [repo (state/get-current-repo)
+          db-base? (config/db-based-graph? repo)
           before? (if page false before?)
           sibling? (boolean sibling?)
           sibling? (if before? true (if page false sibling?))
           block (if page
                   (db/get-page page)
-                  (db/entity [:block/uuid block-uuid]))
-          db-based? (config/db-based-graph? repo)]
+                  (db/entity [:block/uuid block-uuid]))]
       (when block
         (let [last-block (when (not sibling?)
                            (let [children (:block/_parent block)
@@ -496,9 +546,9 @@
                                (db/entity last-block-id))))
               format (or
                       (:block/format block)
-                      (db/get-page-format (:db/id block))
+                      (db/get-page-format (:block/name block))
                       (state/get-preferred-format))
-              content (if (seq properties)
+              content (if (and (not db-base?) (seq properties))
                         (property-file/insert-properties-when-file-based repo format content properties)
                         content)
               new-block (-> (select-keys block [:block/page])
@@ -531,30 +581,36 @@
 
                                    ;; FIXME: assert
                                    :else
-                                   nil)
-              new-block' (if db-based?
-                           (merge new-block properties)
-                           new-block)]
+                                   nil)]
           (when block-m
             (p/do!
-             (outliner-insert-block! {} block-m new-block' {:sibling? sibling?
-                                                            :keep-uuid? true
-                                                            :ordered-list? ordered-list?
-                                                            :replace-empty-target? replace-empty-target?})
-             (when edit-block?
-               (if (and replace-empty-target?
-                        (string/blank? (:block/content last-block)))
-                 (edit-block! last-block :max)
-                 (edit-block! new-block :max)))
-             new-block)))))))
+              (ui-outliner-tx/transact!
+                {:outliner-op :insert-blocks}
+                (outliner-insert-block! {} block-m new-block {:sibling? sibling?
+                                                              :keep-uuid? true
+                                                              :ordered-list? ordered-list?
+                                                              :replace-empty-target? replace-empty-target?})
+                (when (and db-base? (seq properties))
+                  (property-handler/set-block-properties! repo (:block/uuid new-block) properties)))
+              (when edit-block?
+                (if (and replace-empty-target?
+                      (string/blank? (:block/content last-block)))
+                  (edit-block! last-block :max)
+                  (edit-block! new-block :max)))
+              new-block)))))))
 
 (defn insert-first-page-block-if-not-exists!
-  ([page-title]
-   (insert-first-page-block-if-not-exists! page-title {}))
-  ([page-title opts]
-   (when (and (string? page-title)
-              (not (string/blank? page-title)))
-     (state/pub-event! [:page/create page-title opts]))))
+  [page-uuid-or-title]
+  (let [page-title (str page-uuid-or-title)]
+    (when-not (string/blank? page-title)
+      (when-let [page (db/get-page page-title)]
+        (when (db/page-empty? (state/get-current-repo) (:db/id page))
+          (let [format (or (:block/format page) (state/get-preferred-format))
+                new-block {:block/content ""
+                           :block/format format}]
+            (ui-outliner-tx/transact!
+             {:outliner-op :insert-blocks}
+             (outliner-op/insert-blocks! [new-block] page {:sibling? false}))))))))
 
 (defn update-timestamps-content!
   [{:block/keys [repeated? marker format] :as block} content]
@@ -632,7 +688,7 @@
 
 (defn db-based-cycle-todo!
   [block]
-  (let [status-value (pu/get-block-property-value block :logseq.task/status)
+  (let [status-value (:logseq.task/status block)
         next-status (case (:db/ident status-value)
                       :logseq.task/status.todo
                       :logseq.task/status.doing
@@ -701,26 +757,24 @@
   [{:block/keys [uuid] :as _block}]
   (let [block (db/entity [:block/uuid uuid])]
     (when block
-      (state/set-state! :editor/deleting-block uuid)
       (let [blocks (block-handler/get-top-level-blocks [block])]
         (ui-outliner-tx/transact!
          {:outliner-op :delete-blocks}
          (outliner-op/delete-blocks! blocks {}))))))
 
 (defn- move-to-prev-block
-  [repo sibling-block format _id value]
+  [repo sibling-block format value]
   (when (and repo sibling-block)
     (when-let [sibling-block-id (dom/attr sibling-block "blockid")]
-      (when-let [block (db/entity [:block/uuid (uuid sibling-block-id)])]
-        (if (:block/name block)
-          (do
-            (edit-block! block :max)
-            {:prev-block block
-             :new-value (:block/original-name block)})
-          (let [edit-block (some-> (:db/id (state/get-edit-block)) db/entity)
-                edit-block-has-refs? (some? (:block/_refs edit-block))
-                db? (config/db-based-graph? repo)
-                original-content (util/trim-safe (:block/content block))
+      (when-let [sibling-entity (db/entity [:block/uuid (uuid sibling-block-id)])]
+        (if (:block/name sibling-entity)
+          {:prev-block sibling-entity
+           :new-value (:block/original-name sibling-entity)
+           :edit-block-f #(edit-block! sibling-entity :max)}
+          (let [db? (config/db-based-graph? repo)
+                original-content (if (= (:db/id sibling-entity) (:db/id (state/get-edit-block)))
+                                   (state/get-edit-content)
+                                   (:block/content sibling-entity))
                 value' (if db?
                          original-content
                          (-> (property-file/remove-built-in-properties-when-file-based repo format original-content)
@@ -737,37 +791,30 @@
                        (gobj/get (utf8/encode original-content) "length")
                        0)
                      0)
-                [edit-target container-id] (if edit-block-has-refs?
-                                             [(db/entity (:db/id edit-block)) (:editor/container-id @state/state)]
-                                             [(db/entity (:db/id block)) (some-> (dom/attr sibling-block "containerid")
-                                                                               util/safe-parse-int)])]
-            (edit-block! edit-target
-                         pos
-                         {:custom-content new-value
-                          :tail-len tail-len
-                          :container-id container-id})
-
-            {:prev-block block
+                [edit-target container-id] [(db/entity (:db/id sibling-entity)) (some-> (dom/attr sibling-block "containerid")
+                                                                                        util/safe-parse-int)]]
+            {:prev-block sibling-entity
              :new-content new-value
-             :pos pos}))))))
+             :pos pos
+             :edit-block-f #(edit-block! edit-target
+                                         pos
+                                         {:custom-content new-value
+                                          :tail-len tail-len
+                                          :container-id container-id})}))))))
 
 (declare save-block!)
 
-(defn- block-has-no-ref?
-  [eid]
-  (empty? (:block/_refs (db/entity eid))))
-
 (declare expand-block!)
 
-
 (defn delete-block-inner!
-  [repo {:keys [id block-id value format config]}]
+  [repo {:keys [block-id value format config]}]
   (when block-id
     (when-let [block-e (db/entity [:block/uuid block-id])]
       (let [prev-block (db-model/get-prev (db/get-db) (:db/id block-e))
             block-parent-id (str "ls-block-" block-id)]
         (cond
-          (nil? prev-block)
+          (and (nil? prev-block)
+               (nil? (:block/parent block-e)))
           nil
 
           :else
@@ -786,57 +833,42 @@
                                        block-parent
                                        {:container (util/rec-get-blocks-container block-parent)})
                                       (util/get-prev-block-non-collapsed-non-embed block-parent))
-                      {:keys [prev-block new-content]} (move-to-prev-block repo sibling-block format id value)
+                      {:keys [prev-block new-content edit-block-f]} (move-to-prev-block repo sibling-block format value)
                       concat-prev-block? (boolean (and prev-block new-content))
-                      transact-opts {:outliner-op :delete-blocks}
-                      db-based? (config/db-based-graph? repo)]
-                  (ui-outliner-tx/transact!
-                   transact-opts
-                   (cond
-                     (and prev-block (:block/name prev-block)
-                          (not= (:db/id prev-block) (:db/id (:block/parent block)))
-                          (db-model/hidden-page? (:block/page block))) ; embed page
-                     nil
+                      transact-opts (cond-> {:outliner-op :delete-blocks}
+                                      (and concat-prev-block? (seq (:block/_refs block-e)))
+                                      ;; Replace existing block refs with prev-block
+                                      (assoc :ref-replace-prev-block-id (:db/id prev-block)))]
+                  (cond
+                    (and prev-block (:block/name prev-block)
+                         (not= (:db/id prev-block) (:db/id (:block/parent block)))
+                         (db-model/hidden-page? (:block/page block))) ; embed page
+                    nil
 
-                     concat-prev-block?
-                     (let [prev-e (db/entity (:db/id prev-block))
-                           current-e (db/entity (:db/id block))
-                           new-properties (merge (:block/properties prev-e)
-                                                 (:block/properties current-e))
-                           new-tags (->> (concat (:block/tags prev-e) (:block/tags current-e)))]
-                       (if (seq (:block/_refs (db/entity (:db/id block))))
-                         (do
-                           (delete-block-aux! prev-block)
-                           (save-block! repo block new-content {})
-                           (outliner-save-block! {:db/id (:db/id block)
-                                                  :block/parent (:db/id (:block/parent prev-block))})
-
-                           ;; update prev-block's children to point to the refed block
-                           (when (or (:block/collapsed? prev-block)
-                                     (= (:db/id prev-block) (:db/id (:block/parent block))))
-                             (let [children (:block/_parent prev-block)]
-                               (doseq [child children]
-                                 (when-not (= (:db/id child) (:db/id block))
-                                   (outliner-save-block! {:db/id (:db/id child)
-                                                          :block/parent (:db/id block)})))))
-
-                           (when db-based?
-                             (outliner-save-block! {:db/id (:db/id block)
-                                                    :block/properties new-properties
-                                                    :block/tags new-tags})))
-
-                         (let [children (:block/_parent (db/entity (:db/id block)))]
+                    concat-prev-block?
+                    (let [children (:block/_parent (db/entity (:db/id block)))
+                          db-based? (config/db-based-graph? repo)
+                          delete-prev-block? (and db-based? (seq (:block/properties block)) (empty? (:block/properties prev-block)))]
+                      (if delete-prev-block?
+                        (p/do!
+                         (ui-outliner-tx/transact!
+                          transact-opts
+                          (delete-block-aux! prev-block)
+                          (save-block! repo block new-content {}))
+                         (edit-block! (assoc block :block/content new-content) (count (:block/content prev-block))))
+                        (p/do!
+                          (ui-outliner-tx/transact!
+                           transact-opts
                            (when (seq children)
                              (outliner-op/move-blocks! children prev-block false))
                            (delete-block-aux! block)
-                           (save-block! repo prev-block new-content {})
-                           (when db-based?
-                             (outliner-save-block! {:db/id (:db/id prev-block)
-                                                    :block/properties new-properties
-                                                    :block/tags new-tags})))))
+                           (save-block! repo prev-block new-content {}))
+                          (when edit-block-f (edit-block-f)))))
 
-                     :else
-                     (delete-block-aux! block))))))))))))
+                    :else
+                    (p/do!
+                      (delete-block-aux! block)
+                      (when edit-block-f (edit-block-f)))))))))))))
 
 (defn delete-block!
   [repo]
@@ -853,12 +885,12 @@
       (p/do!
        (ui-outliner-tx/transact!
         {:outliner-op :delete-blocks}
-         (outliner-op/delete-blocks! blocks' nil))
+        (outliner-op/delete-blocks! blocks' nil))
        (when sibling-block
-         (move-to-prev-block repo sibling-block
-                             (:block/format block)
-                             (dom/attr sibling-block "id")
-                             ""))))))
+         (let [{:keys [edit-block-f]} (move-to-prev-block repo sibling-block
+                                                          (:block/format block)
+                                                          "")]
+           (when edit-block-f (edit-block-f))))))))
 
 (defn set-block-query-properties!
   [block-id all-properties key add?]
@@ -1147,7 +1179,7 @@
 
 (declare save-current-block!)
 
-;; FIXME: doesn't work on Web (Chrome)
+;; FIXME: shortcut `mod+.` doesn't work on Web (Chrome)
 (defn zoom-in! []
   (if (state/editing?)
     (when-let [id (some-> (state/get-edit-block)
@@ -1156,6 +1188,7 @@
                           db/entity
                           :block/uuid)]
       (state/clear-editor-action!)
+      (state/set-editing-block-id! [:unknown-container id])
       (p/do!
        (save-current-block!)
        (route-handler/redirect-to-page! id)))
@@ -1170,6 +1203,7 @@
        (state/clear-editor-action!)
        (save-current-block!)
        (when block-id
+         (state/set-editing-block-id! [:unknown-container (:block/uuid (state/get-edit-block))])
          (let [block-parent (db/get-block-parent block-id)]
            (if-let [id (and
                         (nil? (:block/name block-parent))
@@ -1195,19 +1229,27 @@
       (delete-block-aux! block))))
 
 (defn highlight-selection-area!
-  ([end-block]
-   (highlight-selection-area! end-block false))
-  ([end-block append?]
-   (when-let [start-block (state/get-selection-start-block-or-first)]
-     (let [blocks (util/get-nodes-between-two-nodes start-block end-block "ls-block")
-           direction (util/get-direction-between-two-nodes start-block end-block "ls-block")
-           blocks (if (= :up direction)
-                    (reverse blocks)
-                    blocks)]
-       (if append?
-         (do (state/clear-edit!)
-             (state/conj-selection-block! blocks direction))
-         (state/exit-editing-and-set-selected-blocks! blocks direction))))))
+  [end-block & {:keys [append?]}]
+  (when-let [start-block (state/get-selection-start-block-or-first)]
+    (let [node (gdom/getElement start-block)
+          visible? (and node (util/el-visible-in-viewport? node))
+          selected-blocks (state/get-selection-blocks)
+          latest-visible-block (if visible?
+                                 node
+                                 (or (when-let [node (last selected-blocks)]
+                                       (gdom/getElement (.-id ^js node)))
+                                     (when-let [node (first selected-blocks)]
+                                       (gdom/getElement (.-id ^js node)))))]
+      (when latest-visible-block
+        (let [blocks (util/get-nodes-between-two-nodes latest-visible-block end-block "ls-block")
+              direction (util/get-direction-between-two-nodes latest-visible-block end-block "ls-block")
+              blocks (if (= :up direction)
+                       (reverse blocks)
+                       blocks)]
+          (if append?
+            (do (state/clear-edit!)
+                (state/conj-selection-block! blocks direction))
+            (state/exit-editing-and-set-selected-blocks! blocks direction)))))))
 
 
 (defn- select-block-up-down
@@ -1217,8 +1259,10 @@
     (state/editing?)
     (let [element (gdom/getElement (state/get-editing-block-dom-id))]
       (when element
-        (util/scroll-to-block element)
-        (state/exit-editing-and-set-selected-blocks! [element])))
+        (p/do!
+         (save-current-block!)
+         (util/scroll-to-block element)
+         (state/exit-editing-and-set-selected-blocks! [element]))))
 
     ;; when selection and one block selected, select next block
     (and (state/selection?) (== 1 (count (state/get-selection-blocks))))
@@ -1596,17 +1640,19 @@
         (text-util/wrapped-by? value pos before end)))))
 
 (defn <get-matched-pages
-  "Return matched page names"
+  "Return matched page names that are not built-in pages"
   [q]
   (p/let [block (state/get-edit-block)
           editing-page (and block
                             (when-let [page-id (:db/id (:block/page block))]
                               (:block/name (db/entity page-id))))
-          pages (search/page-search q)]
-    (if editing-page
-      ;; To prevent self references
-      (remove (fn [p] (= (util/page-name-sanity-lc p) editing-page)) pages)
-      pages)))
+          pages (search/page-search q {:built-in? false})]
+    (->> (if editing-page
+           ;; To prevent self references
+           (remove (fn [p] (= (util/safe-page-name-sanity-lc (:title p))
+                              (util/safe-page-name-sanity-lc editing-page))) pages)
+           pages)
+         (map :title))))
 
 (comment
   (defn get-matched-classes
@@ -1686,10 +1732,12 @@
 
 (defn in-shui-popup?
   []
-  (some-> js/document.activeElement
-    (.closest "[data-radix-menu-content]")
-    (nil?)
-    (not)))
+  (or (some-> js/document.activeElement
+        (.closest "[data-radix-menu-content]")
+        (nil?)
+        (not))
+    (.querySelector js/document.body
+      "div[data-radix-popper-content-wrapper]")))
 
 (defn get-current-input-char
   [input]
@@ -1708,25 +1756,22 @@
                        (let [blocks' (block-handler/get-top-level-blocks blocks)
                              result (ui-outliner-tx/transact!
                                      {:outliner-op :move-blocks}
-                                      (outliner-op/move-blocks-up-down! blocks' up?))]
+                                     (outliner-op/move-blocks-up-down! blocks' up?))]
                          (when-let [block-node (util/get-first-block-by-id (:block/uuid (first blocks)))]
                            (.scrollIntoView block-node #js {:behavior "smooth" :block "nearest"}))
                          result))]
       (if edit-block-id
         (when-let [block (db/entity [:block/uuid edit-block-id])]
           (let [blocks [(assoc block :block/content (state/get-edit-content))]
-                pos (state/get-edit-pos)]
+                container-id (get-new-container-id (if up? :move-up :move-down) {})]
             (p/do!
              (save-current-block!)
              (move-nodes blocks)
-             (when-let [input-id (state/get-edit-input-id)]
-               (when-let [input (gdom/getElement input-id)]
+             (if container-id
+               (state/set-editing-block-id! [container-id edit-block-id])
+               (when-let [input (some-> (state/get-edit-input-id) gdom/getElement)]
                  (.focus input)
-                 (util/scroll-editor-cursor input))
-               (util/schedule (fn []
-                                (when-not (gdom/getElement input-id)
-                                 ;; could be crossing containers
-                                  (edit-block! block pos))))))))
+                 (util/scroll-editor-cursor input))))))
         (let [ids (state/get-selection-block-ids)]
           (when (seq ids)
             (let [lookup-refs (map (fn [id] [:block/uuid id]) ids)
@@ -1819,24 +1864,25 @@
 
 (defonce *auto-save-timeout (atom nil))
 (defn edit-box-on-change!
-  [e _block id]
-  (let [value (util/evalue e)
-        repo (state/get-current-repo)]
-    (state/set-edit-content! id value false)
-    (when @*auto-save-timeout
-      (js/clearTimeout @*auto-save-timeout))
-    (block-handler/mark-last-input-time! repo)
-    (reset! *auto-save-timeout
-            (js/setTimeout
-             (fn []
-               (when (and (state/input-idle? repo :diff 450)
+  [e block id]
+  (when (= (:db/id block) (:db/id (state/get-edit-block)))
+    (let [value (util/evalue e)
+          repo (state/get-current-repo)]
+      (state/set-edit-content! id value false)
+      (when @*auto-save-timeout
+        (js/clearTimeout @*auto-save-timeout))
+      (block-handler/mark-last-input-time! repo)
+      (reset! *auto-save-timeout
+              (js/setTimeout
+               (fn []
+                 (when (and (state/input-idle? repo :diff 450)
                           ;; don't auto-save block if it has tags
-                          (not (and
-                                (config/db-based-graph? repo)
-                                (re-find #"#\S+" value))))
+                            (not (and
+                                  (config/db-based-graph? repo)
+                                  (re-find #"#\S+" value))))
                  ; don't auto-save for page's properties block
-                 (save-current-block! {:skip-properties? true})))
-             450))))
+                   (save-current-block! {:skip-properties? true})))
+               450)))))
 
 (defn- start-of-new-word?
   [input pos]
@@ -1911,9 +1957,6 @@
         (state/set-editor-action-data! {:pos (cursor/get-caret-pos input)})
         (state/set-editor-last-pos! pos)
         (state/set-editor-action! :page-search-hashtag))
-
-      (= last-input-char commands/command-ask)
-      (state/set-editor-action! :editor.action/ask-ai)
 
       :else
       nil)))
@@ -2007,7 +2050,6 @@
                   revert-cut-txs
                   skip-empty-target?]
            :or {exclude-properties []}}]
-  (state/set-editor-op! :paste-blocks)
   (let [editing-block (when-let [editing-block (state/get-edit-block)]
                         (some-> (db/entity [:block/uuid (:block/uuid editing-block)])
                                 (assoc :block/content (state/get-edit-content))))
@@ -2024,8 +2066,7 @@
         target-block-has-children? (db/has-children? (:block/uuid target-block))
         replace-empty-target? (and empty-target?
                                    (or (not target-block-has-children?)
-                                       (and target-block-has-children? (= (count blocks) 1)))
-                                   (block-has-no-ref? (:db/id target-block)))
+                                       (and target-block-has-children? (= (count blocks) 1))))
         target-block' (if (and empty-target? target-block-has-children? paste-nested-blocks?)
                         (or (ldb/get-left-sibling target-block)
                             (:block/parent (db/entity (:db/id target-block))))
@@ -2094,9 +2135,11 @@
         block-refs (->> (mapcat :block/refs blocks)
                         (set)
                         (filter (fn [ref] (and (vector? ref) (= :block/uuid (first ref))))))]
-    (when (seq block-refs)
-      (db/transact! (map (fn [[_ id]] {:block/uuid id}) block-refs)))
-    (paste-blocks blocks opts)))
+    (ui-outliner-tx/transact!
+     {:outliner-op :paste-blocks}
+     (when (seq block-refs)
+       (db/transact! (map (fn [[_ id]] {:block/uuid id}) block-refs)))
+     (paste-blocks blocks opts))))
 
 (defn insert-block-tree-after-target
   "`tree-vec`: a vector of blocks.
@@ -2122,22 +2165,19 @@
                        (db-async/<get-block repo (:block/uuid block)
                                             {:children? true
                                              :nested-children? true}))]
-         (when-let [db-id (:db/id block)]
+         (when (:db/id block)
            (let [journal? (ldb/journal-page? target)
                  target (or target (state/get-edit-block))
                  format (:block/format block)
                  block-uuid (:block/uuid block)
                  template-including-parent? (not (false? (:template-including-parent (:block/properties block))))
                  blocks (db/get-block-and-children repo block-uuid)
-                 root-block (db/entity db-id)
-                 blocks-exclude-root (remove (fn [b] (= (:db/id b) db-id)) blocks)
-                 sorted-blocks (tree/sort-blocks blocks-exclude-root root-block)
                  sorted-blocks (cons
-                                (-> (first sorted-blocks)
+                                (-> (first blocks)
                                     (update :block/properties-text-values dissoc :template)
                                     (update :block/properties-order (fn [keys]
                                                                       (vec (remove #{:template} keys)))))
-                                (rest sorted-blocks))
+                                (rest blocks))
                  blocks (if template-including-parent?
                           sorted-blocks
                           (drop 1 sorted-blocks))]
@@ -2226,23 +2266,7 @@
                       {:last-pattern (str gp-property/colons " " q)})
     (state/clear-editor-action!)))
 
-(defn outdent-on-enter
-  [node]
-  (let [original-block (block-handler/get-current-editing-original-block)
-        parent-node (:block/parent node)
-        target (or original-block parent-node)
-        pos (state/get-edit-pos)
-        block node]
-    (p/do!
-     (ui-outliner-tx/transact!
-      {:outliner-op :move-blocks
-       :real-outliner-op :indent-outdent}
-      (save-current-block!)
-      (when target
-        (outliner-op/move-blocks! (block-handler/get-top-level-blocks [block])
-                                  target true)))
-     (when original-block
-       (util/schedule #(edit-block! block pos))))))
+(declare indent-outdent)
 
 (defn- last-top-level-child?
   [{:keys [id]} block]
@@ -2502,31 +2526,10 @@
              (string/blank? content)
              (not has-right?)
              (not (last-top-level-child? config block)))
-            (outdent-on-enter block)
+            (indent-outdent false)
 
             :else
-            (profile
-             "Insert block"
-             (ui-outliner-tx/transact!
-              {:outliner-op :insert-blocks}
-              (insert-new-block! state)))
-            ;; (let [main-container (gdom/getElement "main-content-container")
-            ;;       ;; Lazy blocks will not be rendered by default if it's below the screen
-            ;;       input-top (some-> (state/get-input)
-            ;;                         (.getBoundingClientRect)
-            ;;                         (gobj/get "top"))
-            ;;       bottom-reached? (when input-top
-            ;;                         (< (- js/window.innerHeight input-top) 200))]
-            ;;   (when (and bottom-reached? main-container)
-            ;;     (util/scroll-to main-container (+ (.-scrollTop main-container)
-            ;;                                       200)
-            ;;                     false))
-            ;;   (profile
-            ;;    "Insert block"
-            ;;    (ui-outliner-tx/transact!
-            ;;     {:outliner-op :insert-blocks}
-            ;;     (insert-new-block! state))))
-            ))))))
+            (insert-new-block! state)))))))
 
 (defn- inside-of-single-block
   "When we are in a single block wrapper, we should always insert a new line instead of new block"
@@ -2583,22 +2586,25 @@
           f (case direction
               :up util/get-prev-block-non-collapsed
               :down util/get-next-block-non-collapsed)
-          sibling-block (f (gdom/getElement (state/get-editing-block-dom-id)))
+          current-block (util/rec-get-node input "ls-block")
+          sibling-block (f current-block)
           {:block/keys [uuid content format]} (state/get-edit-block)]
       (if sibling-block
         (when-let [sibling-block-id (dom/attr sibling-block "blockid")]
           (let [container-id (some-> (dom/attr sibling-block "containerid") js/parseInt)
                 value (state/get-edit-content)]
-            (when (not= (clean-content! repo format content)
-                        (string/trim value))
-              (save-block! repo uuid value))
-            (let [new-uuid (cljs.core/uuid sibling-block-id)
-                  block (db/entity [:block/uuid new-uuid])]
-              (edit-block! block
-                           (or (:pos move-opts)
-                               [direction line-pos])
-                           {:container-id container-id
-                            :direction direction}))))
+            (p/do!
+             (when (not= (clean-content! repo format content)
+                         (string/trim value))
+               (save-block! repo uuid value))
+
+             (let [new-uuid (cljs.core/uuid sibling-block-id)
+                   block (db/entity [:block/uuid new-uuid])]
+               (edit-block! block
+                            (or (:pos move-opts)
+                                [direction line-pos])
+                            {:container-id container-id
+                             :direction direction})))))
         (case direction
           :up (cursor/move-cursor-to input 0)
           :down (cursor/move-cursor-to-end input))))))
@@ -2681,7 +2687,7 @@
                                        ;; first child or next sibling
                                        (ldb/get-first-child db (:db/id current-block))
                                        (db-model/get-next db (:db/id current-block)))]
-                         (db/entity (:db/id e)))))]
+                           (db/entity (:db/id e)))))]
     (cond
       collapsed?
       nil
@@ -2806,13 +2812,15 @@
 
 (defn indent-outdent
   [indent?]
-  (let [editor (state/get-input)
-        pos (some-> editor cursor/pos)
-        {:keys [block]} (get-state)]
+  (let [{:keys [block block-container]} (get-state)]
     (when block
-      (state/set-editor-last-pos! pos)
-      (block-handler/indent-outdent-blocks! [block] indent? save-current-block!))))
-
+      (let [node block-container
+            prev-container-id (get-node-container-id node)
+            container-id (get-new-container-id (if indent? :indent :outdent) {})]
+        (p/do!
+         (block-handler/indent-outdent-blocks! [block] indent? save-current-block!)
+         (when (and (not= prev-container-id container-id) container-id)
+           (state/set-editing-block-id! [container-id (:block/uuid block)])))))))
 
 (defn keydown-tab-handler
   [direction]
@@ -2829,6 +2837,16 @@
         (on-tab direction)))
     nil))
 
+(defn- double-chars-typed?
+  [value pos key sym]
+  (and (= key sym)
+       (>= (count value) 1)
+       (> pos 0)
+       (= (nth value (dec pos)) sym)
+       (if (> (count value) pos)
+         (not= (nth value pos) sym)
+         true)))
+
 (defn ^:large-vars/cleanup-todo keydown-not-matched-handler
   "NOTE: Keydown cannot be used on Android platform"
   [format]
@@ -2843,11 +2861,19 @@
           hashtag? (or (surround-by? input "#" " ")
                        (surround-by? input "#" :end)
                        (= key "#"))]
-      (when (and (not @(:editor/start-pos @state/state))
-                 (not (and key (string/starts-with? key "Arrow"))))
+      (when (or (not @(:editor/start-pos @state/state))
+                (and key (string/starts-with? key "Arrow")))
         (state/set-state! :editor/start-pos pos))
 
       (cond
+        ;; stop accepting edits if the new block is not created yet
+        (some? @(:editor/async-unsaved-chars @state/state))
+        (do
+          (when (not= key "Enter")
+            (state/update-state! :editor/async-unsaved-chars
+                                 (fn [s] (str s key))))
+          (util/stop e))
+
         (and (contains? #{"ArrowLeft" "ArrowRight"} key)
              (contains? #{:property-search :property-value-search} (state/get-editor-action)))
         (state/clear-editor-action!)
@@ -2899,8 +2925,8 @@
         (do (util/stop e)
             (autopair input-id "(" format nil))
 
-        ;; If you type `xyz`, the last backtick should close the first and not add another autopair
-        ;; If you type several backticks in a row, each one should autopair to accommodate multiline code (```)
+          ;; If you type `xyz`, the last backtick should close the first and not add another autopair
+          ;; If you type several backticks in a row, each one should autopair to accommodate multiline code (```)
         (-> (keys autopair-map)
             set
             (disj "(")
@@ -2913,24 +2939,17 @@
             (cursor/move-cursor-forward input)
             (autopair input-id key format nil)))
 
+        ; `;;` to add or change property for db graphs
+        (let [sym ";"]
+          (and (config/db-based-graph? (state/get-current-repo)) (double-chars-typed? value pos key sym)))
+        (state/pub-event! [:editor/new-property])
+
         (let [sym "$"]
-          (and (= key sym)
-               (>= (count value) 1)
-               (> pos 0)
-               (= (nth value (dec pos)) sym)
-               (if (> (count value) pos)
-                 (not= (nth value pos) sym)
-                 true)))
+          (double-chars-typed? value pos key sym))
         (commands/simple-insert! input-id "$$" {:backward-pos 2})
 
         (let [sym "^"]
-          (and (= key sym)
-               (>= (count value) 1)
-               (> pos 0)
-               (= (nth value (dec pos)) sym)
-               (if (> (count value) pos)
-                 (not= (nth value pos) sym)
-                 true)))
+          (double-chars-typed? value pos key sym))
         (commands/simple-insert! input-id "^^" {:backward-pos 2})
 
         :else
@@ -3082,7 +3101,9 @@
           (state/set-last-key-code! {:key-code key-code
                                      :code code
                                      :key k
-                                     :shift? (.-shiftKey e)}))))))
+                                     :shift? (.-shiftKey e)}))
+        (when-not (state/get-editor-action)
+          (state/set-editor-last-pos! current-pos))))))
 
 (defn editor-on-click!
   [id]
@@ -3383,13 +3404,16 @@
      (let [repo (state/get-current-repo)]
        (if-let [block (db/entity [:block/uuid block-id])]
          (let [db-based? (config/db-based-graph? repo)
-               tags (:block/tags (db/entity (:db/id block)))]
+               tags (:block/tags (db/entity (:db/id block)))
+               property-keys (->> (keys (:block/properties block))
+                                  (remove db-property/db-attribute-properties)
+                                  (remove #(outliner-property/property-with-other-position? (db/entity %))))]
            (or (db-model/has-children? block-id)
                (valid-dsl-query-block? block)
                (valid-custom-query-block? block)
                (and db-based?
-                    (seq (:block/properties block))
-                    (not (db-pu/all-hidden-properties? (keys (:block/properties block)))))
+                    (seq property-keys)
+                    (not (db-pu/all-hidden-properties? property-keys)))
                (and db-based? (seq tags)
                     (some (fn [t]
                             (let [properties (map :db/ident (:class/schema.properties (:block/schema t)))]

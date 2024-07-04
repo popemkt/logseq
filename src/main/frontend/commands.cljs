@@ -4,7 +4,6 @@
             [frontend.config :as config]
             [frontend.date :as date]
             [frontend.db :as db]
-            [frontend.db.utils :as db-utils]
             [frontend.extensions.video.youtube :as youtube]
             [frontend.handler.draw :as draw]
             [frontend.handler.notification :as notification]
@@ -15,7 +14,7 @@
             [frontend.util.cursor :as cursor]
             [frontend.util.priority :as priority]
             [frontend.handler.file-based.property :as file-property-handler]
-            [frontend.handler.property.util :as pu]
+            [frontend.handler.db-based.property.util :as db-pu]
             [frontend.handler.property.file :as property-file]
             [goog.dom :as gdom]
             [goog.object :as gobj]
@@ -126,7 +125,7 @@
 (defn db-based-statuses
   []
   (map (fn [e] (:block/content e))
-       (pu/get-closed-property-values :logseq.task/status)))
+       (db-pu/get-closed-property-values :logseq.task/status)))
 
 (defn db-based-embed-page
   []
@@ -162,7 +161,7 @@
 (defn db-based-priorities
   []
   (map (fn [e] (:block/content e))
-    (pu/get-closed-property-values :logseq.task/priority)))
+    (db-pu/get-closed-property-values :logseq.task/priority)))
 
 (defn get-priorities
   []
@@ -267,107 +266,115 @@
         embed-page (if db? db-based-embed-page file-based-embed-page)
         embed-block (if db? db-based-embed-block file-based-embed-block)]
     (->>
-      (concat
+     (concat
         ;; basic
-        [["Page reference"
-          [[:editor/input page-ref/left-and-right-brackets {:backward-pos 2}]
-           [:editor/search-page]]
-          "Create a backlink to a page"
-          "BASIC"]
-         ["Page embed" (embed-page) "Embed a page here"]
-         ["Block reference" [[:editor/input block-ref/left-and-right-parens {:backward-pos 2}]
-                             [:editor/search-block :reference]] "Create a backlink to a block"]
-         ["Block embed" (embed-block) "Embed a block here"]]
+      [["Page reference"
+        [[:editor/input page-ref/left-and-right-brackets {:backward-pos 2}]
+         [:editor/search-page]]
+        "Create a backlink to a page"
+        "BASIC"]
+       ["Page embed" (embed-page) "Embed a page here"]
+       ["Block reference" [[:editor/input block-ref/left-and-right-parens {:backward-pos 2}]
+                           [:editor/search-block :reference]] "Create a backlink to a block"]
+       ["Block embed" (embed-block) "Embed a block here"]]
 
         ;; format
-        [["Link" (link-steps) "Create a HTTP link" "FORMAT"]
-         ["Image link" (image-link-steps) "Create a HTTP link to a image"]
-         (when (state/markdown?)
-           ["Underline" [[:editor/input "<ins></ins>"
-                          {:last-pattern command-trigger
-                           :backward-pos 6}]] "Create a underline text decoration"])
-         ["Code block" [[:editor/input "```\n```\n" {:type "block"
-                                                     :backward-pos 5
-                                                     :only-breakline? true}]
-                        [:editor/select-code-block-mode]] "Insert code block"]]
+      [["Link" (link-steps) "Create a HTTP link" "FORMAT"]
+       ["Image link" (image-link-steps) "Create a HTTP link to a image"]
+       (when (state/markdown?)
+         ["Underline" [[:editor/input "<ins></ins>"
+                        {:last-pattern command-trigger
+                         :backward-pos 6}]] "Create a underline text decoration"])
+       ["Code block" [[:editor/input "```\n```\n" {:type "block"
+                                                   :backward-pos 5
+                                                   :only-breakline? true}]
+                      [:editor/select-code-block-mode]] "Insert code block"]]
 
-        (headings)
+      (headings)
 
-        ;; time & date
-        [["Tomorrow"
-          #(get-page-ref-text (date/tomorrow))
-          "Insert the date of tomorrow"
-          "TIME & DATE"]
-         ["Yesterday" #(get-page-ref-text (date/yesterday)) "Insert the date of yesterday"]
-         ["Today" #(get-page-ref-text (date/today)) "Insert the date of today"]
-         ["Current time" #(date/get-current-time) "Insert current time"]
-         ["Date picker" [[:editor/show-date-picker]] "Pick a date and insert here"]]
-
-        ;; order list
-        [["Number list"
-          [[:editor/clear-current-slash]
-           [:editor/toggle-own-number-list]]
-          "Number list"
-          "LIST TYPE"]
-         ["Number children" [[:editor/clear-current-slash]
-                             [:editor/toggle-children-number-list]] "Number children"]]
-
-        ;; task management
-        (get-statuses)
-        [["Deadline" [[:editor/clear-current-slash]
-                      [:editor/set-deadline]]]
+      ;; task management
+      (get-statuses)
+      [["Deadline" [[:editor/clear-current-slash]
+                    [:editor/set-deadline]]]
+       (when-not db?
          ["Scheduled" [[:editor/clear-current-slash]
-                       [:editor/set-scheduled]]]]
+                       [:editor/set-scheduled]]])]
 
-        ;; priority
-        (get-priorities)
+      ;; priority
+      (get-priorities)
 
-        ;; advanced
+      ;; time & date
+      [["Tomorrow"
+        #(get-page-ref-text (date/tomorrow))
+        "Insert the date of tomorrow"
+        "TIME & DATE"]
+       ["Yesterday" #(get-page-ref-text (date/yesterday)) "Insert the date of yesterday"]
+       ["Today" #(get-page-ref-text (date/today)) "Insert the date of today"]
+       ["Current time" #(date/get-current-time) "Insert current time"]
+       ["Date picker" [[:editor/show-date-picker]] "Pick a date and insert here"]]
 
-        [["Query"
-          [[:editor/input "{{query }}" {:backward-pos 2}]
-           [:editor/exit]]
-          query-doc
-          "ADVANCED"]
-         ["Zotero" (zotero-steps) "Import Zotero journal article"]
-         ["Query function" [[:editor/input "{{function }}" {:backward-pos 2}]] "Create a query function"]
-         ["Calculator" [[:editor/input "```calc\n\n```" {:type "block"
-                                                         :backward-pos 4}]
-                        [:codemirror/focus]] "Insert a calculator"]
+      ;; order list
+      [["Number list"
+        [[:editor/clear-current-slash]
+         [:editor/toggle-own-number-list]]
+        "Number list"
+        "LIST TYPE"]
+       ["Number children" [[:editor/clear-current-slash]
+                           [:editor/toggle-children-number-list]] "Number children"]]
+
+      ;; advanced
+      [["Query"
+        [[:editor/input "{{query }}" {:backward-pos 2}]
+         [:editor/exit]]
+        query-doc
+        "ADVANCED"]
+       (when-not db?
+         ["Zotero" (zotero-steps) "Import Zotero journal article"])
+       ["Query function" [[:editor/input "{{function }}" {:backward-pos 2}]] "Create a query function"]
+       ["Calculator" [[:editor/input "```calc\n\n```" {:type "block"
+                                                       :backward-pos 4}]
+                      [:codemirror/focus]] "Insert a calculator"]
+       (when-not db?
          ["Draw" (fn []
                    (let [file (draw/file-name)
                          path (str common-config/default-draw-directory "/" file)
                          text (page-ref/->page-ref path)]
                      (p/let [_ (draw/create-draw-with-default-content path)]
                        (println "draw file created, " path))
-                     text)) "Draw a graph with Excalidraw"]
+                     text)) "Draw a graph with Excalidraw"])
 
-         (cond
-           (and (util/electron?) (config/local-file-based-graph? (state/get-current-repo)))
+       (cond
+         (and (util/electron?) (config/local-file-based-graph? (state/get-current-repo)))
 
-           ["Upload an asset" [[:editor/click-hidden-file-input :id]] "Upload file types like image, pdf, docx, etc.)"])
+         ["Upload an asset" [[:editor/click-hidden-file-input :id]] "Upload file types like image, pdf, docx, etc.)"])
 
-         (when-not db?
-           ["Template" [[:editor/input command-trigger nil]
-                        [:editor/search-template]] "Insert a created template here"])
+       (when-not db?
+         ["Template" [[:editor/input command-trigger nil]
+                      [:editor/search-template]] "Insert a created template here"])
 
-         ["Embed HTML " (->inline "html")]
+       ["Embed HTML " (->inline "html")]
 
-         ["Embed Video URL" [[:editor/input "{{video }}" {:last-pattern command-trigger
-                                                          :backward-pos 2}]]]
+       ["Embed Video URL" [[:editor/input "{{video }}" {:last-pattern command-trigger
+                                                        :backward-pos 2}]]]
 
-         ["Embed Youtube timestamp" [[:youtube/insert-timestamp]]]
+       ["Embed Youtube timestamp" [[:youtube/insert-timestamp]]]
 
-         ["Embed Twitter tweet" [[:editor/input "{{tweet }}" {:last-pattern command-trigger
-                                                              :backward-pos 2}]]]
+       ["Embed Twitter tweet" [[:editor/input "{{tweet }}" {:last-pattern command-trigger
+                                                            :backward-pos 2}]]]
+       (when db?
          ["Add new property" [[:editor/clear-current-slash]
-                              [:editor/new-property]]]]
+                              [:editor/new-property]]])]
 
-        @*extend-slash-commands
-        ;; Allow user to modify or extend, should specify how to extend.
+      (let [commands (cond->> @*extend-slash-commands
+                       db?
+                       (remove (fn [command] (when (map? (last command))
+                                               (false? (:db-graph? (last command)))))))]
+        commands)
 
-        (state/get-commands)
-        (state/get-plugins-slash-commands))
+;; Allow user to modify or extend, should specify how to extend.
+
+      (state/get-commands)
+      (state/get-plugins-slash-commands))
      (remove nil?)
      (util/distinct-by-last-wins first))))
 
@@ -690,12 +697,12 @@
 
 (defmethod handle-step :editor/set-scheduled [[_]]
   (if (config/db-based-graph? (state/get-current-repo))
-    (state/pub-event! [:editor/new-property "Scheduled"])
+    (state/pub-event! [:editor/new-property {:property-key "Scheduled"}])
     (handle-step [:editor/show-date-picker :scheduled])))
 
 (defmethod handle-step :editor/set-deadline [[_]]
   (if (config/db-based-graph? (state/get-current-repo))
-    (state/pub-event! [:editor/new-property "Deadline"])
+    (state/pub-event! [:editor/new-property {:property-key "Deadline"}])
     (handle-step [:editor/show-date-picker :deadline])))
 
 (defmethod handle-step :editor/insert-properties [[_ _] _format]
@@ -809,7 +816,9 @@
     (.click input-file)))
 
 (defmethod handle-step :editor/exit [[_]]
-  (state/clear-edit!))
+  (p/do!
+    (state/pub-event! [:editor/save-current-block])
+    (state/clear-edit!)))
 
 (defmethod handle-step :editor/new-property [[_]]
   (state/pub-event! [:editor/new-property]))
@@ -824,6 +833,6 @@
 
 (defn exec-plugin-simple-command!
   [pid {:keys [block-id] :as cmd} action]
-  (let [format (and block-id (:block/format (db-utils/pull [:block/uuid block-id])))
+  (let [format (and block-id (:block/format (db/entity [:block/uuid block-id])))
         inputs (vector (conj action (assoc cmd :pid pid)))]
     (handle-steps inputs format)))

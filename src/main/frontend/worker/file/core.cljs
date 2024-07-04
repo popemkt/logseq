@@ -1,5 +1,5 @@
 (ns frontend.worker.file.core
-  "Save file to disk"
+  "Save file to disk. Used by both file and DB graphs"
   (:require [clojure.string :as string]
             [frontend.worker.file.util :as wfu]
             [logseq.graph-parser.property :as gp-property]
@@ -47,7 +47,7 @@
     :else
     content))
 
-(defn transform-content
+(defn- transform-content
   [repo db {:block/keys [collapsed? format pre-block? content page properties] :as b} level {:keys [heading-to-list?]} context]
   (let [block-ref-not-saved? (and (seq (:block/_refs (d/entity db (:db/id b))))
                                   (not (string/includes? content (str (:block/uuid b))))
@@ -122,6 +122,7 @@
           (recur r level))))))
 
 (defn tree->file-content
+  "Used by both file and DB graphs for export and for file-graph specific features"
   [repo db tree opts context]
   (->> (tree->file-content-aux repo db tree opts context) (string/join "\n")))
 
@@ -157,7 +158,7 @@
 
 (defn- remove-transit-ids [block] (dissoc block :db/id :block/file))
 
-(defn save-tree-aux!
+(defn- save-tree-aux!
   [repo db page-block tree blocks-just-deleted? context request-id]
   (let [page-block (d/pull db '[*] (:db/id page-block))
         file-db-id (-> page-block :block/file :db/id)

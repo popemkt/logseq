@@ -7,7 +7,7 @@
             [frontend.worker.state :as worker-state]
             [frontend.worker.util :as worker-util]
             [promesa.core :as p]
-            [frontend.worker.batch-tx :as batch-tx]
+            [logseq.outliner.batch-tx :as batch-tx]
             [frontend.schema-register :as sr]))
 
 
@@ -31,6 +31,14 @@
          (assoc m a datom))))
    {} entity-datoms))
 
+(defn- entity-datoms=>a->add?->v->t
+  [entity-datoms]
+  (reduce
+   (fn [m datom]
+     (let [[_e a v t add?] datom]
+       (assoc-in m [a add? v] t)))
+   {} entity-datoms))
+
 
 (defmulti listen-db-changes
   (fn [listen-key & _] listen-key))
@@ -52,7 +60,7 @@ generate undo ops.")
   (let [{:keys [from-disk?]} tx-meta
         result (worker-pipeline/invoke-hooks repo conn tx-report (worker-state/get-context))
         tx-report' (:tx-report result)]
-    (when result
+    (when (and result (not (:rtc-download-graph? tx-meta)))
       (let [data (merge
                   {:request-id (:request-id tx-meta)
                    :repo repo
@@ -63,13 +71,13 @@ generate undo ops.")
 
       (when-not from-disk?
         (p/do!
-          (let [{:keys [blocks-to-remove-set blocks-to-add]} (search/sync-search-indice repo tx-report')
-                ^js wo (worker-state/get-worker-object)]
-            (when wo
-              (when (seq blocks-to-remove-set)
-                (.search-delete-blocks wo repo (bean/->js blocks-to-remove-set)))
-              (when (seq blocks-to-add)
-                (.search-upsert-blocks wo repo (bean/->js blocks-to-add))))))))))
+         (let [{:keys [blocks-to-remove-set blocks-to-add]} (search/sync-search-indice repo tx-report')
+               ^js wo (worker-state/get-worker-object)]
+           (when wo
+             (when (seq blocks-to-remove-set)
+               (.search-delete-blocks wo repo (bean/->js blocks-to-remove-set)))
+             (when (seq blocks-to-add)
+               (.search-upsert-blocks wo repo (bean/->js blocks-to-add))))))))))
 
 
 (defn listen-db-changes!
@@ -77,13 +85,14 @@ generate undo ops.")
   (let [handlers (if (seq handler-keys)
                    (select-keys (methods listen-db-changes) handler-keys)
                    (methods listen-db-changes))]
-    (prn :listen-db-changes! (keys handlers))
     (d/unlisten! conn ::listen-db-changes!)
+    (prn :listen-db-changes! (keys handlers))
     (d/listen! conn ::listen-db-changes!
                (fn [{:keys [tx-data _db-before _db-after tx-meta] :as tx-report}]
                  (let [tx-meta (merge (batch-tx/get-batch-opts) tx-meta)
                        pipeline-replace? (:pipeline-replace? tx-meta)
                        in-batch-tx-mode? (:batch-tx/batch-tx-mode? tx-meta)]
+                   (batch-tx/set-batch-opts (dissoc tx-meta :pipeline-replace?))
                    (when-not pipeline-replace?
                      (if (and in-batch-tx-mode?
                               (not (:batch-tx/exit? tx-meta)))
@@ -94,19 +103,25 @@ generate undo ops.")
                              tx-data (if in-batch-tx-mode?
                                        (batch-tx/get-batch-txs)
                                        tx-data)
+                             tx-meta (dissoc tx-meta :batch-tx/batch-tx-mode? :batch-tx/exit?)
                              tx-report (assoc tx-report
                                               :tx-meta tx-meta
                                               :tx-data tx-data
                                               :db-before db-before)
+                             ;; TODO: move to RTC because other modules do not need these
                              datom-vec-coll (map vec tx-data)
                              id->same-entity-datoms (group-by first datom-vec-coll)
                              id-order (distinct (map first datom-vec-coll))
                              same-entity-datoms-coll (map id->same-entity-datoms id-order)
                              id->attr->datom (update-vals id->same-entity-datoms entity-datoms=>attr->datom)
+                             e->a->add?->v->t (update-vals
+                                               id->same-entity-datoms
+                                               entity-datoms=>a->add?->v->t)
                              args* (assoc tx-report
                                           :repo repo
                                           :conn conn
                                           :id->attr->datom id->attr->datom
+                                          :e->a->add?->v->t e->a->add?->v->t
                                           :same-entity-datoms-coll same-entity-datoms-coll)]
                          (doseq [[k handler-fn] handlers]
                            (handler-fn k args*))))))))))

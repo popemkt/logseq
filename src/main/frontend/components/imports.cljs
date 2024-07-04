@@ -85,7 +85,7 @@
                   (fn []
                     (let [buffer (.-result ^js reader)]
                       (import-handler/import-from-sqlite-db! buffer graph-name finished-cb)
-                      (state/close-modal!))))
+                      (shui/dialog-close!))))
             (set! (.-onerror reader) (fn [e] (js/console.error e)))
             (set! (.-onabort reader) (fn [e]
                                        (prn :debug :aborted)
@@ -144,7 +144,7 @@
     [:div.container
      [:div.sm:flex.sm:items-start
       [:div.mt-3.text-center.sm:mt-0.sm:text-left
-       [:h3#modal-headline.leading-6.font-medium
+       [:h3#modal-headline.leading-6.font-medium.pb-2
         "New graph name:"]]]
 
      [:input.form-input.block.w-full.sm:text-sm.sm:leading-5.my-2.mb-4
@@ -170,7 +170,7 @@
                          :tag-classes tag-classes-input
                          :property-classes property-classes-input
                          :property-parent-classes property-parent-classes-input})
-                       (state/close-modal!))]
+                       (shui/dialog-close!))]
     [:div.container
      [:div.sm:flex.sm:items-start
       [:div.mt-3.text-center.sm:mt-0.sm:text-left
@@ -231,7 +231,7 @@
                       (when (= "Enter" (util/ekey e))
                         (on-submit)))})
 
-     (shui/button {:on-click on-submit} "Submit")]))
+     (shui/button {:size :sm :on-click on-submit} "Submit")]))
 
 (defn- counts-from-entities
   [entities]
@@ -354,7 +354,7 @@
                               (import-file-graph files user-inputs config-file)
                               (notification/show! "Import failed as the file 'logseq/config.edn' was not found for a Logseq graph."
                                                   :error))))]
-    (state/set-modal!
+    (shui/dialog-open!
      #(import-file-graph-dialog original-graph-name
                                 (fn [{:keys [graph-name] :as user-inputs}]
                                   (cond
@@ -403,7 +403,7 @@
            {:id        "import-sqlite-db"
             :type      "file"
             :on-change (fn [e]
-                         (state/set-modal!
+                         (shui/dialog-open!
                           #(set-graph-name-dialog e {:sqlite? true})))}]]
 
          (when (or util/electron? util/web-platform?)

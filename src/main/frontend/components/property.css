@@ -1,6 +1,4 @@
 .property-configure {
-    min-width: 40rem;
-
     .form-input, .form-select {
         line-height: 1rem;
         padding: 0.25rem 0.5rem;
@@ -19,13 +17,8 @@
     max-height: var(--radix-dropdown-menu-content-available-height);
 }
 
-.ls-block .ls-properties-area {
-    border-left: 1px solid;
-    border-left-color: or(--lx-gray-04-alpha, --ls-guideline-color, #ddd) !important;
-}
-
 .property-block-container {
-    @apply -ml-11 flex flex-1;
+    @apply -ml-5 flex flex-1;
 }
 
 .ls-page-properties > .ls-properties-area > .property-block {
@@ -38,9 +31,6 @@
 
 .ls-block .property-pair,
 .property-block .property-value,
-.property-template .property-pair {
-    padding-left: 22px;
-}
 
 .block-property-value {
     margin-left: 7px;
@@ -50,8 +40,12 @@
     grid-template-columns: repeat(auto-fit, 120px);
 }
 
+.ls-block .ls-properties-area {
+    margin-top: 2px;
+}
+
 .ls-properties-area {
-    @apply grid gap-1 py-2;
+    @apply grid;
 
     .property-pair {
         @apply grid grid-cols-5 gap-1;
@@ -136,6 +130,7 @@
     }
 
     .ls-block {
+        @apply w-full;
         margin: 0;
     }
 
@@ -152,11 +147,16 @@
     }
 }
 
-.ui__button.empty-btn {
-    @apply !h-6 !px-0 font-normal opacity-50;
+.ui__button.empty-btn, .empty-text-btn {
+    @apply !h-6 !px-0 font-normal opacity-50 text-sm;
 }
 
-.closed-values-properties {
+.ui__button.empty-btn:hover, .empty-text-btn:hover {
+    @apply opacity-100;
+}
+
+
+.positioned-properties {
     .select-item {
         @apply flex items-center;
     }
@@ -183,7 +183,8 @@ input.simple-input:focus {
     }
 }
 
-.property-key .bullet-container, .property-key .bullet-container .bullet {
+.property-key .bullet-container, .property-key .bullet-container .bullet
+{
     border-radius: 0px;
 }
 
@@ -220,26 +221,6 @@ input.simple-input:focus {
         outline: none;
         box-shadow: none;
     }
-
-    .cp__select-input {
-        @apply px-4 py-2;
-    }
-}
-
-.ls-property-add {
-    .cp__select-input {
-        padding: 0;
-    }
-}
-
-.property-configure {
-    .cp__select-input {
-        @apply px-4 py-2;
-    }
-}
-
-.ls-property-input {
-    min-height: 1.5em;
 }
 
 .page-title .page-tags {
@@ -256,7 +237,19 @@ a.control-link {
     }
 }
 
+.property-value-container {
+    min-height: 29px;
+}
+
+.ls-page-properties .property-key, .ls-properties-area .property-key
+{
+    @apply flex flex-col justify-center;
+}
+
 .property-key {
+    /* Same height with one-line block container */
+    min-height: 29px;
+
     h1.title, h2.title {
         border-bottom: 0;
         padding-bottom: 0;
@@ -296,6 +289,8 @@ a.control-link {
     }
 }
 
-.property-k:focus {
-    @apply pr-1;
+.ls-property-add {
+    .cp__select-input {
+        padding: 0.25em 0.75em;
+    }
 }

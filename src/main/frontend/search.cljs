@@ -11,13 +11,12 @@
             [frontend.search.fuzzy :as fuzzy]
             [logseq.common.config :as common-config]
             [frontend.db.async :as db-async]
-            [frontend.config :as config]
-            [frontend.handler.file-based.property.util :as property-util]
             [cljs-bean.core :as bean]
             [frontend.db :as db]
             [frontend.db.model :as db-model]
             [frontend.db.utils :as db-utils]
-            [logseq.db :as ldb]))
+            [logseq.db :as ldb]
+            [datascript.core :as d]))
 
 (def fuzzy-search fuzzy/fuzzy-search)
 
@@ -34,10 +33,10 @@
 
 (defn page-search
   ([q]
-   (page-search q 100))
-  ([q limit]
+   (page-search q {}))
+  ([q options]
    (when-let [^js sqlite @search-browser/*sqlite]
-     (p/let [result (.page-search sqlite (state/get-current-repo) q limit)]
+     (p/let [result (.page-search sqlite (state/get-current-repo) q (clj->js (merge {:limit 100} options)))]
        (bean/->clj result)))))
 
 (defn file-search
@@ -68,23 +67,14 @@
            (let [result (fuzzy/fuzzy-search (keys templates) q {:limit limit})]
              (vec (select-keys templates result)))))))))
 
-(defn get-all-properties
-  []
-  (when-let [repo (state/get-current-repo)]
-    (let [hidden-props (if (config/db-based-graph? repo)
-                         ;; no-op since already removed
-                         (constantly false)
-                         (set (map name (property-util/hidden-properties))))]
-      (p/let [properties (db-async/<get-all-property-names)]
-        (remove hidden-props properties)))))
-
 (defn property-search
   ([q]
    (property-search q 100))
   ([q limit]
    (when q
      (p/let [q (fuzzy/clean-str q)
-             properties (get-all-properties)]
+             properties* (db-async/<get-all-properties)
+             properties (map :block/original-name properties*)]
        (when (seq properties)
          (if (string/blank? q)
            properties
@@ -99,7 +89,7 @@
    (when-let [repo (state/get-current-repo)]
      (when q
       (p/let [q (fuzzy/clean-str q)
-              result (db-async/<get-property-values repo (keyword property))]
+              result (db-async/<file-get-property-values repo (keyword property))]
         (when (seq result)
           (if (string/blank? q)
             result
@@ -137,7 +127,7 @@
   (when-let [repo (state/get-current-repo)]
     (p/let [page (db/entity page-id)
             alias-names (conj (set (map util/safe-page-name-sanity-lc
-                                     (db/get-page-alias-names repo page-id)))
+                                        (db/get-page-alias-names repo page-id)))
                               (:block/original-name page))
             q (string/join " " alias-names)
             result (block-search repo q {:limit 100})
@@ -145,7 +135,7 @@
             result (when (seq eids)
                      (.get-page-unlinked-refs ^Object @state/*db-worker repo (:db/id page) (ldb/write-transit-str eids)))
             result' (when result (ldb/read-transit-str result))]
-      (when result' (db/transact! repo result'))
+      (when result' (d/transact! (db/get-db repo false) result'))
       (some->> result'
                db-model/sort-by-order-recursive
                db-utils/group-by-page))))

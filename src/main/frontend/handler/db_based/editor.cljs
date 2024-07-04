@@ -18,7 +18,8 @@
             [frontend.modules.outliner.op :as outliner-op]
             [frontend.schema.handler.repo-config :as repo-config-schema]
             [promesa.core :as p]
-            [logseq.db.frontend.content :as db-content]))
+            [logseq.db.frontend.content :as db-content]
+            [logseq.outliner.op]))
 
 (defn- remove-non-existed-refs!
   [refs]
@@ -101,7 +102,7 @@
                   (fn [tag]
                     (when (:block/uuid tag)
                       (str db-content/page-ref-special-chars (:block/uuid tag))))
-                  (concat (:block/tags result) (:block/tags block)))
+                  (:block/tags (db/entity (:db/id block))))
                  (remove nil?)))))))
 
 (defn save-file!
@@ -116,6 +117,7 @@
       (p/do!
        (db/transact! [{:file/path path
                        :file/content content
+                       :file/created-at (js/Date.)
                        :file/last-modified-at (js/Date.)}])
       ;; Post save
        (cond (= path "logseq/config.edn")

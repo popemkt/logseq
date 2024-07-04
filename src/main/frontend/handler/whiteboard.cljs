@@ -18,7 +18,9 @@
             [clojure.set :as set]
             [clojure.string :as string]
             [cljs-bean.core :as bean]
-            [logseq.db.sqlite.util :as sqlite-util]))
+            [logseq.db.sqlite.util :as sqlite-util]
+            [logseq.db.frontend.order :as db-order]
+            [logseq.outliner.core :as outliner-core]))
 
 (defn js->clj-keywordize
   [obj]
@@ -29,20 +31,22 @@
     (gp-whiteboard/shape->block repo shape page-id)))
 
 (defn- build-shapes
-  [page-block blocks]
-  (let [page-metadata (pu/get-block-property-value page-block :logseq.property.tldraw/page)
-        shapes-index (:shapes-index page-metadata)
-        shape-id->index (zipmap shapes-index (range 0 (count shapes-index)))]
+  [blocks]
+  (let [blocks (db/sort-by-order blocks)]
     (->> blocks
-         (map (fn [block]
-                (assoc block :index (get shape-id->index (str (:block/uuid block)) 0))))
+         (db/sort-by-order blocks)
          (filter pu/shape-block?)
          (map pu/block->shape)
-         (sort-by :index))))
+         (map (fn [shape]
+                (if-let [page-id (:pageId shape)]
+                  (let [page (db/get-page page-id)]
+                    ;; Used in page preview
+                    (assoc shape :pageName (:block/original-name page)))
+                  shape))))))
 
 (defn- whiteboard-clj->tldr [page-block blocks]
   (let [id (str (:block/uuid page-block))
-        shapes (build-shapes page-block blocks)
+        shapes (remove #(nil? (:type %)) (build-shapes blocks))
         tldr-page (pu/page-block->tldr-page page-block)
         assets (:assets tldr-page)
         tldr-page (dissoc tldr-page :assets)]
@@ -55,14 +59,13 @@
                               :shapes shapes})]})))
 
 (defn db-build-page-block
-  [page-entity page-name tldraw-page assets shapes-index]
+  [page-entity page-name tldraw-page assets]
   (let [get-k #(gobj/get tldraw-page %)
         tldraw-page {:id (get-k "id")
                      :name (get-k "name")
                      :bindings (js->clj-keywordize (get-k "bindings"))
                      :nonce (get-k "nonce")
-                     :assets (js->clj-keywordize assets)
-                     :shapes-index shapes-index}]
+                     :assets (js->clj-keywordize assets)}]
     {:db/id (:db/id page-entity)
      :block/original-name page-name
      :block/name (util/page-name-sanity-lc page-name)
@@ -75,7 +78,7 @@
                            (util/time-ms))}))
 
 (defn file-build-page-block
-  [page-entity page-name tldraw-page assets shapes-index]
+  [page-entity page-name tldraw-page assets]
   (let [get-k #(gobj/get tldraw-page %)]
     {:block/original-name page-name
      :block/name (util/page-name-sanity-lc page-name)
@@ -88,37 +91,36 @@
                          :name (get-k "name")
                          :bindings (js->clj-keywordize (get-k "bindings"))
                          :nonce (get-k "nonce")
-                         :assets (js->clj-keywordize assets)
-                         :shapes-index shapes-index}}
+                         :assets (js->clj-keywordize assets)}}
      :block/updated-at (util/time-ms)
      :block/created-at (or (:block/created-at page-entity)
                            (util/time-ms))}))
 
 (defn build-page-block
-  [page-entity page-name tldraw-page assets shapes-index]
+  [page-entity page-name tldraw-page assets]
   (let [f (if (config/db-based-graph? (state/get-current-repo))
             db-build-page-block
             file-build-page-block)]
-    (f page-entity page-name tldraw-page assets shapes-index)))
+    (f page-entity page-name tldraw-page assets)))
 
 (defn- compute-tx
   [^js app ^js tl-page new-id-nonces db-id-nonces page-uuid replace?]
   (let [page-entity (db/get-page page-uuid)
         assets (js->clj-keywordize (.getCleanUpAssets app))
-        new-shapes (.-shapes tl-page)
-        shapes-index (map #(gobj/get % "id") new-shapes)
-        shape-id->index (zipmap shapes-index (range (.-length new-shapes)))
         upsert-shapes (->> (set/difference new-id-nonces db-id-nonces)
                            (map (fn [{:keys [id]}]
                                   (-> (.-serialized ^js (.getShapeById tl-page id))
-                                      js->clj-keywordize
-                                      (assoc :index (get shape-id->index id)))))
+                                      js->clj-keywordize)))
                            (set))
         old-ids (set (map :id db-id-nonces))
         new-ids (set (map :id new-id-nonces))
         created-ids (->> (set/difference new-ids old-ids)
                          (remove string/blank?)
                          (set))
+        new-orders (when (seq created-ids)
+                     (let [max-key (last (sort (map :block/order (:block/_page page-entity))))]
+                       (db-order/gen-n-keys (count created-ids) max-key nil)))
+        new-id->order (when (seq created-ids) (zipmap created-ids new-orders))
         created-shapes (set (filter #(created-ids (:id %)) upsert-shapes))
         deleted-ids (->> (set/difference old-ids new-ids)
                          (remove string/blank?))
@@ -130,9 +132,13 @@
         deleted-shapes-tx (mapv (fn [id] [:db/retractEntity [:block/uuid (uuid id)]]) deleted-ids)
         upserted-blocks (->> upsert-shapes
                              (map #(shape->block % (:db/id page-entity)))
-                             (map sqlite-util/block-with-timestamps))
+                             (map sqlite-util/block-with-timestamps)
+                             (map (fn [block]
+                                    (if-let [new-order (when new-id->order (get new-id->order (str (:block/uuid block))))]
+                                      (assoc block :block/order new-order)
+                                      block))))
         page-name (or (:block/original-name page-entity) (str page-uuid))
-        page-block (build-page-block page-entity page-name tl-page assets shapes-index)]
+        page-block (build-page-block page-entity page-name tl-page assets)]
     (when (or (seq upserted-blocks)
               (seq deleted-shapes-tx)
               (not= (:block/properties page-block)
@@ -147,12 +153,51 @@
 
 (defonce *last-shapes-nonce (atom {}))
 
+(defn- get-shape-block-id
+  [^js shape]
+  (uuid (.-id shape)))
+
+(defn- handle-order-update!
+  [page info]
+  (let [op (:op info)
+        moved-shapes (:shapes info)
+        shape-ids (mapv get-shape-block-id moved-shapes)]
+    (case op
+      "sendToBack"
+      (let [next-order (when-let [id (get-shape-block-id (:next info))]
+                         (:block/order (db/entity [:block/uuid id])))
+            new-orders (db-order/gen-n-keys (count shape-ids) nil next-order)
+            tx-data (conj
+                     (map-indexed (fn [idx id]
+                                    {:block/uuid id
+                                     :block/order (nth new-orders idx)}) shape-ids)
+                     (outliner-core/block-with-updated-at {:db/id (:db/id page)}))]
+        tx-data)
+
+      "bringToFront"
+      (let [before-order (when-let [id (get-shape-block-id (:before info))]
+                           (:block/order (db/entity [:block/uuid id])))
+            new-orders (db-order/gen-n-keys (count shape-ids) before-order nil)
+            tx-data (conj
+                     (->>
+                      (map-indexed (fn [idx id]
+                                     (when (db/entity [:block/uuid id])
+                                       {:block/uuid id
+                                        :block/order (nth new-orders idx)})) shape-ids)
+                      (remove nil?))
+                     (outliner-core/block-with-updated-at {:db/id (:db/id page)}))]
+        tx-data))))
+
 ;; FIXME: it seems that nonce for the page block will not be updated with new updates for the whiteboard
 (defn <transact-tldr-delta!
-  [page-uuid ^js app replace?]
-  (let [tl-page ^js (second (first (.-pages app)))
-        shapes (.-shapes ^js tl-page)
+  [page-uuid ^js app ^js info*]
+  (let [info (bean/->clj info*)
+        replace? (:replace info)
+        tl-page ^js (second (first (.-pages app)))
         page-block (model/get-page page-uuid)
+        order-tx-data (when (contains? #{"bringToFront" "sendToBack"} (:op info))
+                        (handle-order-update! page-block info))
+        shapes (.-shapes ^js tl-page)
         new-id-nonces (set (map-indexed (fn [_idx shape]
                                           (let [id (.-id shape)]
                                             {:id id
@@ -164,26 +209,27 @@
                                 (map #(update % :id str)))))
         {:keys [page-block new-shapes deleted-shapes upserted-blocks delete-blocks metadata] :as result}
         (compute-tx app tl-page new-id-nonces db-id-nonces page-uuid replace?)]
-    (when (seq result)
-      (let [tx-data (concat delete-blocks [page-block] upserted-blocks)
+    (when (or (seq result) (seq order-tx-data))
+      (let [tx-data (concat delete-blocks [page-block] upserted-blocks order-tx-data)
             metadata' (cond
                         ;; group
                         (some #(= "group" (:type %)) new-shapes)
-                        (assoc metadata :whiteboard/op :group)
+                        (assoc metadata :outliner-op :group)
 
                         ;; ungroup
                         (and (not-empty deleted-shapes) (every? #(= "group" (:type %)) deleted-shapes))
-                        (assoc metadata :whiteboard/op :un-group)
+                        (assoc metadata :outliner-op :un-group)
 
                         ;; arrow
                         (some #(and (= "line" (:type %))
                                     (= "arrow " (:end (:decorations %)))) new-shapes)
 
-                        (assoc metadata :whiteboard/op :new-arrow)
+                        (assoc metadata :outliner-op :new-arrow)
+
                         :else
-                        metadata)]
+                        (assoc metadata :outliner-op :save-whiteboard))]
         (swap! *last-shapes-nonce assoc-in [repo page-uuid] new-id-nonces)
-        (if (contains? #{:new-arrow} (:whiteboard/op metadata'))
+        (if (contains? #{:new-arrow} (:outliner-op metadata'))
           (state/set-state! :whiteboard/pending-tx-data
                             {:tx-data tx-data
                              :metadata metadata'})
@@ -222,7 +268,7 @@
   ([name]
    (p/let [uuid (or (and name (parse-uuid name)) (d/squuid))
            name (or name (str uuid))
-           _ (db/transact! (get-default-new-whiteboard-tx name uuid))]
+           _ (db/transact! (state/get-current-repo) (get-default-new-whiteboard-tx name uuid) {:outliner-op :create-page})]
      uuid)))
 
 (defn <create-new-whiteboard-and-redirect!
@@ -238,6 +284,7 @@
   {:blockType (if (parse-uuid (str block-id)) "B" "P")
    :id (str (d/squuid))
    :compact false
+   ;; Why calling it pageId when it's actually a block id?
    :pageId (str block-id)
    :point point
    :size [400, 0]
@@ -278,7 +325,8 @@
                :block/format :markdown
                :block/page (:db/id page-entity)
                :block/parent (:db/id page-entity)})
-          _ (db/transact! repo [tx] {:whiteboard/transact? true})]
+          _ (db/transact! repo [tx] {:outliner-op :insert-blocks
+                                     :whiteboard/transact? true})]
     new-block-id))
 
 (defn inside-portal?
@@ -305,7 +353,7 @@
   ([{:keys [pages blocks]} api]
    (let [page-block (first pages)
          ;; FIXME: should also clone normal blocks
-         shapes (build-shapes page-block blocks)
+         shapes (build-shapes blocks)
          tldr-page (pu/page-block->tldr-page page-block)
          assets (:assets tldr-page)
          bindings (:bindings tldr-page)]
@@ -334,8 +382,8 @@
     (let [tl-page ^js (second (first (.-pages app)))]
       (when tl-page
         (when-let [page (db/get-page page-uuid)]
-          (let [page-metadata (pu/get-block-property-value page :logseq.property.tldraw/page)
-                shapes-index (:shapes-index page-metadata)]
+          (let [shapes-index (->> (db/sort-by-order (:block/_page page))
+                                  (map (comp str :block/uuid)))]
             (when (seq shapes-index)
               (.updateShapesIndex tl-page (bean/->js shapes-index)))))))))
 

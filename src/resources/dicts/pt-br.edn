@@ -113,7 +113,6 @@
  :help/reference-autocomplete "Preenchimento automático de referência de página"
  :help/block-reference "Referência de bloco"
  :help/open-link-in-sidebar "Abrir link na barra lateral"
- :search/page-names "Pesquisar nomes de páginas"
  :search-item/page "Página"
  :search-item/no-result "Nenhum resultado correspondente"
  :help/context-menu "Bloquear menu de contexto"
@@ -170,9 +169,7 @@
  :page/delete "Excluir página"
  :page/add-to-favorites "Adicionar aos Favoritos"
  :page/unfavorite "Remover dos favoritos"
- :page/show-journals "Mostrar diários"
  :block/name "Nome da página"
- :page/earlier "Anterior"
  :page/copy-page-url "Copiar URL da página"
  :page/illegal-page-name "Nome de página inválido!"
  :page/page-already-exists "Página “{1}” já existe!"
@@ -409,7 +406,6 @@
  :whiteboard/new-whiteboard "Novo whiteboard"
  :whiteboard/search-only-blocks "Pesquisar apenas blocos"
  :whiteboard/search-only-pages "Pesquisar apenas páginas"
- :whiteboard/cache-outdated "O cache está desatualizado. Clique no botão 'Re-indexar' no menu suspenso do grafo."
  :whiteboard/shape-quick-links "Links Rápidos de Forma"
  :whiteboard/edit-pdf "Editar PDF"
  :whiteboard/dashboard-card-new-whiteboard "Novo whiteboard"
@@ -553,10 +549,6 @@
  :updater/new-version-install "Uma nova versão foi baixada."
  :updater/quit-and-install "Reiniciar para instalar"
 
- :paginates/pages "Total de {1} páginas"
- :paginates/prev "Anterior"
- :paginates/next "Próxima"
-
  :tips/all-done "Tudo pronto!"
 
  :select/default-prompt "Selecionar um"
@@ -609,7 +601,6 @@
 
  :command.auto-complete/complete "Auto-completar: Escolher item selecionado"
  :command.auto-complete/next "Auto-completar: Selecionar próximo item"
- :command.auto-complete/open-link "Auto-completar: Abrir item selecionado no navegador"
  :command.auto-complete/prev "Auto-completar: Selecionar item anterior"
  :command.auto-complete/shift-complete "Auto-completar: Abrir item selecionado na barra lateral"
  :command.cards/forgotten "Cartões: esquecidos"
@@ -763,7 +754,6 @@
  :linked-references/reference-count (fn [filtered-count total] (str (when filtered-count (str filtered-count " de ")) total (if (= total 1) " Referência Vinculada" " Referências Vinculadas")))
  :settings-page/git-commit-on-close "Commitar mudanças no Git ao fechar a janela"
  :unlinked-references/reference-count (fn [total] (str total (if (= total 1) " Referência Não-Vinculada" " Referências Não-Vinculadas")))
- :whiteboard/reference-count (fn [refs-count] (if (= refs-count 1) "Referência" "Referências"))
 
  ;; Allowed duplicates - start
  :settings-of-plugins "Plugins"

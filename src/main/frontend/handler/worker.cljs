@@ -5,8 +5,7 @@
             [frontend.handler.notification :as notification]
             [frontend.state :as state]
             [promesa.core :as p]
-            [logseq.db :as ldb]
-            [frontend.db.react :as react]))
+            [logseq.db :as ldb]))
 
 (defmulti handle identity)
 
@@ -37,8 +36,8 @@
 (defmethod handle :sync-db-changes [_ _worker data]
   (state/pub-event! [:db/sync-changes data]))
 
-(defmethod handle :refresh-ui [_ _worker {:keys [affected-keys]}]
-  (react/refresh! (state/get-current-repo) affected-keys))
+(defmethod handle :rtc-log [_ _worker log]
+  (state/pub-event! [:rtc/log log]))
 
 (defmethod handle :default [_ _worker data]
   (prn :debug "Worker data not handled: " data))
@@ -49,15 +48,17 @@
   (set! (.-onmessage worker)
         (fn [event]
           (let [data (.-data event)]
-            (when-not (or (= (.-type data) "RAW")
-                          (= data "keepAlive"))
-              ;; Log thrown exceptions from comlink
-              ;; https://github.com/GoogleChromeLabs/comlink/blob/dffe9050f63b1b39f30213adeb1dd4b9ed7d2594/src/comlink.ts#L223-L236
-              (if (and (= "HANDLER" (.-type data)) (= "throw" (.-name data)))
-                (if (.-isError (.-value data))
-                  (js/console.error "Unexpected webworker error:" (-> data bean/->clj (get-in [:value :value])))
-                  (js/console.error "Unexpected webworker error:" data))
-                (if (string? data)
-                  (let [[e payload] (ldb/read-transit-str data)]
-                    (handle (keyword e) wrapped-worker payload))
-                  (js/console.error "Worker received invalid data from worker: " data))))))))
+            (if (= data "keepAliveResponse")
+              (.postMessage worker "keepAliveRequest")
+              (when-not (= (.-type data) "RAW")
+                ;; Log thrown exceptions from comlink
+                ;; https://github.com/GoogleChromeLabs/comlink/blob/dffe9050f63b1b39f30213adeb1dd4b9ed7d2594/src/comlink.ts#L223-L236
+                (if (and (= "HANDLER" (.-type data)) (= "throw" (.-name data)))
+                  (if (.-isError (.-value data))
+                    (do (js/console.error "Unexpected webworker error:" (-> data bean/->clj (get-in [:value :value])))
+                        (js/console.log (get-in (bean/->clj data) [:value :value :stack])))
+                    (js/console.error "Unexpected webworker error :" data))
+                  (if (string? data)
+                    (let [[e payload] (ldb/read-transit-str data)]
+                      (handle (keyword e) wrapped-worker payload))
+                    (js/console.error "Worker received invalid data from worker: " data)))))))))

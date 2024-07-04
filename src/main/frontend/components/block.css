@@ -88,10 +88,14 @@
     padding: 10px 15px;
     border-color: var(--ls-secondary-border-color);
   }
+
+  [data-tooltipped]:has(a.tag) {
+    @apply px-0.5;
+  }
 }
 
 .block-content-or-editor-wrap {
-  @apply flex flex-1 flex-row flex-wrap gap-1 items-center;
+  @apply flex flex-1 flex-row flex-wrap gap-1;
 }
 
 .block-head-wrap {
@@ -206,7 +210,7 @@
 }
 
 .block-control-wrap {
-  @apply h-[24px] mt-[1px] pr-[6px];
+  @apply h-[24px] mt-[1px];
 
   &.is-order-list {
     @apply mr-0 pr-0;
@@ -228,8 +232,12 @@
     @apply flex flex-1;
   }
 
-  &:has(.dsl-query) {
+  &:has(.dsl-query), &:has(.embed-page) {
     @apply flex flex-row w-full;
+
+    > .embed-page {
+      @apply w-full;
+    }
   }
 
   .dsl-query {
@@ -409,33 +417,51 @@
 .block-main-container {
   @apply min-h-[24px];
 
-  &:has(h1.as-heading) {
-    .block-control-wrap {
+  &[data-has-heading="1"], &:has(textarea.h1) {
+    > .block-control-wrap {
       @apply relative top-4;
     }
+
+    .block-content-or-editor-wrap {
+      .positioned-properties {
+        @apply relative top-4;
+      }
+    }
   }
 
-  &:has(h2.as-heading) {
-    .block-control-wrap {
+  &[data-has-heading="2"], &:has(textarea.h2) {
+    > .block-control-wrap {
       @apply relative top-3;
     }
-  }
 
-  &:has(h3.as-heading) {
-    .block-control-wrap {
-      @apply relative top-[3px];
+    .block-content-or-editor-wrap {
+      .positioned-properties {
+        @apply relative top-3;
+      }
     }
   }
 
-  &:has(h5.as-heading) {
-    .block-control-wrap {
+  &[data-has-heading="3"], &:has(textarea.h3) {
+    > .block-control-wrap {
+      @apply relative top-[2px];
+    }
+
+    .block-content-or-editor-wrap {
+      .positioned-properties {
+        @apply relative top-[3px];
+      }
+    }
+  }
+
+  &[data-has-heading="5"] {
+    > .block-control-wrap {
       @apply relative -top-[1px];
     }
   }
 
-  &:has(h6.as-heading) {
-    .block-control-wrap {
-      @apply relative -top-0.5;
+  &[data-has-heading="6"], &:has(textarea.h6) {
+    h6.as-heading, textarea.h6 {
+      @apply pt-1;
     }
   }
 }

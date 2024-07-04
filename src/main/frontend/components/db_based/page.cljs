@@ -4,10 +4,9 @@
             [frontend.components.editor :as editor]
             [frontend.components.class :as class-component]
             [frontend.components.property :as property-component]
-            [frontend.components.property.value :as pv]
             [frontend.config :as config]
             [frontend.db :as db]
-            [frontend.handler.db-based.property :as db-property-handler]
+            [logseq.outliner.property :as outliner-property]
             [frontend.ui :as ui]
             [frontend.state :as state]
             [rum.core :as rum]
@@ -22,22 +21,14 @@
    be displaying properties from both components at the same time"
   < rum/reactive
   [page {:keys [mode configure?]}]
-  (let [class? (= mode :class)
-        edit-input-id-prefix (str "edit-block-" (:block/uuid page))
+  (let [edit-input-id-prefix (str "edit-block-" (:block/uuid page))
         configure-opts {:selected? false
                         :page-configure? configure?}
-        has-viewable-properties? (db-property-handler/block-has-viewable-properties? page)
-        has-class-properties? (seq (:class/schema.properties page))
-        hide-properties? (:logseq.property/hide-properties? page)]
-    (when (or configure?
-              (and
-               (not hide-properties?)
-               (or has-viewable-properties?
-                   has-class-properties?)))
+        has-viewable-properties? (outliner-property/block-has-viewable-properties? page)
+        hide-properties? (db-property/property-value-content (:logseq.property/hide-properties? page))]
+    (when (or configure? (and (not hide-properties?) has-viewable-properties?))
       [:div.ls-page-properties
-       {:class (util/classnames [{:no-properties (if class?
-                                                   (not has-class-properties?)
-                                                   (not has-viewable-properties?))}])}
+       {:class (util/classnames [{:no-properties (not has-viewable-properties?)}])}
        (if configure?
          (cond
            (= mode :class)
@@ -56,15 +47,6 @@
                                            page
                                            (str edit-input-id-prefix "-page")
                                            (assoc configure-opts :class-schema? false :page? true)))])))
-
-(rum/defc tags
-  [page]
-  (let [tags-property (db/entity :block/tags)]
-    (pv/property-value page tags-property
-                       (:block/tags page)
-                       {:page-cp (fn [config page]
-                                   (component-block/page-cp (assoc config :tag? true) page))
-                        :inline-text component-block/inline-text})))
 
 (rum/defcs page-configure < rum/reactive
   [state page *mode]
@@ -90,14 +72,6 @@
         (page-properties page (assoc page-opts :mode mode))]
 
        (page-properties page (assoc page-opts :mode mode)))]))
-
-(rum/defc page-properties-react < rum/reactive
-  [page* page-opts]
-  (let [page (db/sub-block (:db/id page*))]
-    (when (or (db-property-handler/block-has-viewable-properties? page)
-              ;; Allow class and property pages to add new property
-              (some #{"class" "property"} (:block/type page)))
-      (page-properties page page-opts))))
 
 (rum/defc mode-switch < rum/reactive
   [types *mode]
@@ -135,8 +109,11 @@
         types (:block/type page)
         class? (contains? types "class")
         collapsed? (not @*show-info?)
-        has-properties? (seq (remove (set (keys db-property/built-in-properties))
-                                     (keys (:block/properties page))))
+        has-properties? (or
+                         (seq (:block/tags page))
+                         (seq (:block/alias page))
+                         (seq (remove (set (keys db-property/built-in-properties))
+                                      (keys (:block/properties page)))))
         show-info? (or @*show-info? has-properties?)]
     (when (if config/publishing?
             ;; Since publishing is read-only, hide this component if it has no info to show
@@ -149,7 +126,7 @@
                        "border rounded"
                        "border rounded border-transparent")}
         (when-not collapsed?
-          [:div.info-title.cursor.py-1
+          [:div.info-title.cursor.p-1
            {:on-mouse-over #(reset! *hover? true)
             :on-mouse-leave #(when-not (state/dropdown-opened?)
                                (reset! *hover? false))
@@ -162,16 +139,15 @@
                            (swap! *hover? not)))}
            [:<>
             [:div.flex.flex-row.items-center.gap-1
-             [:a.flex.fade-link.ml-3 (ui/icon "info-circle")]
              (mode-switch types *mode)]
-            [:div.px-1.absolute.right-0.top-0
+            [:div.absolute.right-1.top-1
              (shui/button
-              {:variant :ghost :size :sm}
+              {:variant :ghost :size :sm
+               :class "px-1 py-1 h-6 w-6"}
               (ui/icon "x"))]]])
         (if collapsed?
           (when (or (seq (:block/properties page))
                     (and class? (seq (:class/schema.properties page))))
-            [:div.px-2 {:style {:margin-left 2}}
-             (page-properties page {:mode @*mode})])
+            (page-properties page {:mode @*mode}))
           [:div.px-3
            (page-configure page *mode)])]])))

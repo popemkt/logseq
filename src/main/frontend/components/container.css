@@ -658,7 +658,7 @@
   }
 
   .page {
-    margin-top: 0;
+    @apply mt-0 mx-3 my-5;
   }
 
   .non-block-editor textarea,
@@ -668,10 +668,6 @@
     padding: 0;
     font-size: 90%;
     background: none;
-  }
-
-  .references {
-    @apply mx-[28px];
   }
 
   .sidebar-drop-indicator {

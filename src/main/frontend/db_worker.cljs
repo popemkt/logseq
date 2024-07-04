@@ -15,12 +15,13 @@
             [frontend.worker.handler.page :as worker-page]
             [frontend.worker.handler.page.file-based.rename :as file-worker-page-rename]
             [frontend.worker.handler.page.db-based.rename :as db-worker-page-rename]
-            [frontend.worker.rtc.core2 :as rtc-core2]
+            [frontend.worker.rtc.core :as rtc-core]
             [frontend.worker.rtc.db-listener]
             [frontend.worker.rtc.op-mem-layer :as op-mem-layer]
             [frontend.worker.search :as search]
             [frontend.worker.state :as worker-state]
-            [frontend.worker.undo-redo :as undo-redo]
+            ;; [frontend.worker.undo-redo :as undo-redo]
+            [frontend.worker.undo-redo2 :as undo-redo]
             [frontend.worker.util :as worker-util]
             [logseq.db :as ldb]
             [logseq.db.sqlite.common-db :as sqlite-common-db]
@@ -29,8 +30,8 @@
             [promesa.core :as p]
             [shadow.cljs.modern :refer [defclass]]
             [logseq.common.util :as common-util]
-            [frontend.worker.db.fix :as db-fix]
-            [logseq.db.frontend.order :as db-order]))
+            [logseq.db.frontend.order :as db-order]
+            [logseq.db.sqlite.create-graph :as sqlite-create-graph]))
 
 (defonce *sqlite worker-state/*sqlite)
 (defonce *sqlite-conns worker-state/*sqlite-conns)
@@ -160,7 +161,7 @@
       [db search-db])))
 
 (defn- create-or-open-db!
-  [repo]
+  [repo {:keys [config]}]
   (when-not (worker-state/get-sqlite-conn repo)
     (p/let [[db search-db] (get-db-and-search-db repo)
             storage (new-sqlite-storage repo {})]
@@ -170,9 +171,13 @@
       (sqlite-common-db/create-kvs-table! db)
       (search/create-tables-and-triggers! search-db)
       (let [schema (sqlite-util/get-schema repo)
-            conn (sqlite-common-db/get-storage-conn storage schema)]
+            conn (sqlite-common-db/get-storage-conn storage schema)
+            initial-data-exists? (d/entity @conn :logseq.class/Root)]
         (swap! *datascript-conns assoc repo conn)
-        (p/let [_ (op-mem-layer/<init-load-from-indexeddb! repo)]
+        (when (and config (not initial-data-exists?))
+          (let [initial-data (sqlite-create-graph/build-db-initial-data config)]
+            (d/transact! conn initial-data {:initial-db? true})))
+        (p/let [_ (op-mem-layer/<init-load-from-indexeddb2! repo)]
           (db-listener/listen-db-changes! repo conn))))))
 
 (defn- iter->vec [iter]
@@ -246,7 +251,10 @@
 
 (defn- with-write-transit-str
   [p]
-  (p/chain p ldb/write-transit-str))
+  (p/chain p
+           (fn [result]
+             (let [result (when-not (= result @worker-state/*state) result)]
+               (ldb/write-transit-str result)))))
 
 #_:clj-kondo/ignore
 (defclass DBWorker
@@ -278,12 +286,13 @@
      (bean/->js dbs)))
 
   (createOrOpenDB
-   [_this repo & {:keys [close-other-db?]
-                  :or {close-other-db? true}}]
-   (p/do!
-    (when close-other-db?
-      (close-other-dbs! repo))
-    (create-or-open-db! repo)))
+   [_this repo opts-str]
+   (let [{:keys [close-other-db? config]
+          :or {close-other-db? true}} (ldb/read-transit-str opts-str)]
+     (p/do!
+      (when close-other-db?
+        (close-other-dbs! repo))
+      (create-or-open-db! repo {:config config}))))
 
   (getMaxTx
    [_this repo]
@@ -302,10 +311,12 @@
    (when-let [conn (worker-state/get-datascript-conn repo)]
      (let [selector (ldb/read-transit-str selector-str)
            id (ldb/read-transit-str id-str)
-           eid (when (and (vector? id) (= :block/name (first id)))
-                 (:db/id (ldb/get-page @conn (second id))))
-           result (->> (d/pull @conn selector (or eid id))
-                       (sqlite-common-db/with-parent @conn))]
+           eid (if (and (vector? id) (= :block/name (first id)))
+                 (:db/id (ldb/get-page @conn (second id)))
+                 id)
+           result (some->> eid
+                           (d/pull @conn selector)
+                           (sqlite-common-db/with-parent @conn))]
        (ldb/write-transit-str result))))
 
   (pull-many
@@ -352,23 +363,26 @@
      (let [search-result-eids (ldb/read-transit-str search-result-eids-str)]
        (ldb/write-transit-str (ldb/get-page-unlinked-refs @conn page-id search-result-eids)))))
 
+  (set-context
+   [_this context]
+   (let [context (if (string? context)
+                   (ldb/read-transit-str context)
+                   context)]
+     (when context (worker-state/update-context! context))
+     nil))
+
   (transact
    [_this repo tx-data tx-meta context]
    (when repo (worker-state/set-db-latest-tx-time! repo))
    (when-let [conn (worker-state/get-datascript-conn repo)]
      (try
-       (let [tx-data (if (string? tx-data)
-                       (ldb/read-transit-str tx-data)
-                       tx-data)
+       (let [tx-data' (if (string? tx-data)
+                        (ldb/read-transit-str tx-data)
+                        tx-data)
              tx-meta (if (string? tx-meta)
                        (ldb/read-transit-str tx-meta)
                        tx-meta)
-             tx-data' (if (and (= :update-property (:outliner-op tx-meta))
-                               (:many->one? tx-meta) (:property-id tx-meta))
-                        (concat tx-data
-                                (db-fix/fix-cardinality-many->one @conn (:property-id tx-meta)))
-                        tx-data)
-             tx-data' (if (contains? #{:new-property :insert-blocks} (:outliner-op tx-meta))
+             tx-data' (if (contains? #{:insert-blocks} (:outliner-op tx-meta))
                         (map (fn [m]
                                (if (and (map? m) (nil? (:block/order m)))
                                  (assoc m :block/order (db-order/gen-key nil))
@@ -401,26 +415,32 @@
                          (ldb/read-transit-str tx-data)
                          tx-data)]
            (js/console.error e)
-           (prn :debug :tx-data tx-data))))))
+           (prn :debug :tx-data @conn tx-data))))))
 
   (getInitialData
    [_this repo]
    (when-let [conn (worker-state/get-datascript-conn repo)]
      (ldb/write-transit-str (sqlite-common-db/get-initial-data @conn))))
 
+  (get-page-refs-count
+   [_this repo]
+   (when-let [conn (worker-state/get-datascript-conn repo)]
+     (ldb/write-transit-str (sqlite-common-db/get-page->refs-count @conn))))
+
   (fetch-all-pages
    [_this repo exclude-page-ids-str]
-   (when-let [conn (worker-state/get-datascript-conn repo)]
-     (async/go
-       (let [all-pages (sqlite-common-db/get-all-pages @conn (ldb/read-transit-str exclude-page-ids-str))
-             partitioned-data (map-indexed (fn [idx p] [idx p]) (partition-all 2000 all-pages))]
-         (doseq [[idx tx-data] partitioned-data]
-           (worker-util/post-message :sync-db-changes {:repo repo
-                                                       :tx-data tx-data
-                                                       :tx-meta {:initial-pages? true
-                                                                 :end? (= idx (dec (count partitioned-data)))}})
-           (async/<! (async/timeout 100)))))
-     nil))
+   ;; (when-let [conn (worker-state/get-datascript-conn repo)]
+   ;;   (async/go
+   ;;     (let [all-pages (sqlite-common-db/get-all-pages @conn (ldb/read-transit-str exclude-page-ids-str))
+   ;;           partitioned-data (map-indexed (fn [idx p] [idx p]) (partition-all 2000 all-pages))]
+   ;;       (doseq [[idx tx-data] partitioned-data]
+   ;;         (worker-util/post-message :sync-db-changes {:repo repo
+   ;;                                                     :tx-data tx-data
+   ;;                                                     :tx-meta {:initial-pages? true
+   ;;                                                               :end? (= idx (dec (count partitioned-data)))}})
+   ;;         (async/<! (async/timeout 100)))))
+   ;;   nil)
+   )
 
   (closeDB
    [_this repo]
@@ -480,53 +500,42 @@
   (search-build-blocks-indice
    [this repo]
    (when-let [conn (worker-state/get-datascript-conn repo)]
-     (search/build-blocks-indice repo @conn)))
+     (search/build-blocks-indice @conn)))
 
   (search-build-pages-indice
    [this repo]
    (when-let [conn (worker-state/get-datascript-conn repo)]
-     (search/build-blocks-indice repo @conn)))
+     (search/build-page-indice repo @conn)
+     nil))
 
-  ;; page ops
   (page-search
-   [this repo q limit]
+   [this repo q options]
    (when-let [conn (worker-state/get-datascript-conn repo)]
-     (search/page-search repo @conn q limit)))
-
-  (page-rename
-   [this repo page-uuid-str new-name]
-   (assert (common-util/uuid-string? page-uuid-str))
-   (when-let [conn (worker-state/get-datascript-conn repo)]
-     (let [config (worker-state/get-config repo)
-           f (if (sqlite-util/db-based-graph? repo)
-               db-worker-page-rename/rename!
-               file-worker-page-rename/rename!)
-           result (f repo conn config (uuid page-uuid-str) new-name)]
-       (bean/->js {:result result}))))
-
-  (page-delete
-   [this repo page-uuid-str]
-   (assert (common-util/uuid-string? page-uuid-str))
-   (when-let [conn (worker-state/get-datascript-conn repo)]
-     (let [error-handler (fn [{:keys [msg]}]
-                           (worker-util/post-message :notification
-                                                     [[:div [:p msg]] :error]))
-           result (worker-page/delete! repo conn (uuid page-uuid-str) {:error-handler error-handler})]
-       (bean/->js {:result result}))))
+     (search/page-search repo @conn q (bean/->clj options))))
 
   (apply-outliner-ops
    [this repo ops-str opts-str]
    (when-let [conn (worker-state/get-datascript-conn repo)]
-     (let [ops (edn/read-string ops-str)
-           opts (edn/read-string opts-str)
-           result (outliner-op/apply-ops! repo conn ops (worker-state/get-date-formatter repo) opts)]
-       (ldb/write-transit-str result))))
+     (try
+       (worker-util/profile
+        "apply outliner ops"
+        (let [ops (edn/read-string ops-str)
+              opts (edn/read-string opts-str)
+              result (outliner-op/apply-ops! repo conn ops (worker-state/get-date-formatter repo) opts)]
+          (ldb/write-transit-str result)))
+       (catch :default e
+         (let [data (ex-data e)
+               {:keys [type payload]} (when (map? data) data)]
+           (case type
+             :notification
+             (worker-util/post-message type [[:div [:p (:message payload)]] (:type payload)])
+             nil))
+         (throw e)))))
 
   (file-writes-finished?
    [this repo]
    (let [conn (worker-state/get-datascript-conn repo)
          writes @file/*writes]
-
      ;; Clean pages that have been deleted
      (when conn
        (swap! file/*writes (fn [writes]
@@ -549,6 +558,11 @@
    (let [new-state (ldb/read-transit-str new-state-str)]
      (worker-state/set-new-state! new-state)
      nil))
+
+  (sync-ui-state
+   [_this repo state-str]
+   (undo-redo/record-ui-state! repo state-str)
+   nil)
 
   ;; Export
   (block->content
@@ -574,15 +588,15 @@
   (rtc-start2
    [this repo token]
    (with-write-transit-str
-     (js/Promise. (rtc-core2/new-task--rtc-start repo token))))
+     (js/Promise. (rtc-core/new-task--rtc-start repo token))))
 
   (rtc-stop2
    [this]
-   (rtc-core2/rtc-stop))
+   (rtc-core/rtc-stop))
 
   (rtc-toggle-auto-push
    [this]
-   (rtc-core2/rtc-toggle-auto-push))
+   (rtc-core/rtc-toggle-auto-push))
 
   (rtc-grant-graph-access2
    [this token graph-uuid target-user-uuids-str target-user-emails-str]
@@ -590,103 +604,130 @@
          target-user-emails (ldb/read-transit-str target-user-emails-str)]
      (with-write-transit-str
        (js/Promise.
-        (rtc-core2/new-task--grant-access-to-others token graph-uuid
-                                                    :target-user-uuids target-user-uuids
-                                                    :target-user-emails target-user-emails)))))
+        (rtc-core/new-task--grant-access-to-others token graph-uuid
+                                                   :target-user-uuids target-user-uuids
+                                                   :target-user-emails target-user-emails)))))
 
   (rtc-get-graphs2
    [this token]
    (with-write-transit-str
-     (js/Promise. (rtc-core2/new-task--get-graphs token))))
+     (js/Promise. (rtc-core/new-task--get-graphs token))))
 
   (rtc-delete-graph2
    [this token graph-uuid]
    (with-write-transit-str
-     (js/Promise. (rtc-core2/new-task--delete-graph token graph-uuid))))
+     (js/Promise. (rtc-core/new-task--delete-graph token graph-uuid))))
 
   (rtc-get-users-info2
    [this token graph-uuid]
    (with-write-transit-str
-     (js/Promise. (rtc-core2/new-task--get-user-info token graph-uuid))))
+     (js/Promise. (rtc-core/new-task--get-user-info token graph-uuid))))
 
   (rtc-get-block-content-versions2
    [this token graph-uuid block-uuid]
    (with-write-transit-str
-     (js/Promise. (rtc-core2/new-task--get-block-content-versions token graph-uuid block-uuid))))
+     (js/Promise. (rtc-core/new-task--get-block-content-versions token graph-uuid block-uuid))))
 
   (rtc-get-debug-state2
    [this]
    (with-write-transit-str
-     (js/Promise. (rtc-core2/new-task--get-debug-state))))
+     (js/Promise. (rtc-core/new-task--get-debug-state))))
 
   (rtc-async-upload-graph2
    [this repo token remote-graph-name]
    (with-write-transit-str
-     (js/Promise. (rtc-core2/new-task--upload-graph token repo remote-graph-name))))
+     (js/Promise. (rtc-core/new-task--upload-graph token repo remote-graph-name))))
 
   ;; ================================================================
   (rtc-request-download-graph
    [this token graph-uuid]
    (with-write-transit-str
-     (js/Promise. (rtc-core2/new-task--request-download-graph token graph-uuid))))
+     (js/Promise. (rtc-core/new-task--request-download-graph token graph-uuid))))
 
   (rtc-wait-download-graph-info-ready
    [this token download-info-uuid graph-uuid timeout-ms]
    (with-write-transit-str
      (js/Promise.
-      (rtc-core2/new-task--wait-download-info-ready token download-info-uuid graph-uuid timeout-ms))))
+      (rtc-core/new-task--wait-download-info-ready token download-info-uuid graph-uuid timeout-ms))))
 
   (rtc-download-graph-from-s3
    [this graph-uuid graph-name s3-url]
    (with-write-transit-str
-     (js/Promise. (rtc-core2/new-task--download-graph-from-s3 graph-uuid graph-name s3-url))))
+     (js/Promise. (rtc-core/new-task--download-graph-from-s3 graph-uuid graph-name s3-url))))
 
   (rtc-download-info-list
    [this token graph-uuid]
    (with-write-transit-str
-     (js/Promise. (rtc-core2/new-task--download-info-list token graph-uuid))))
+     (js/Promise. (rtc-core/new-task--download-info-list token graph-uuid))))
 
   (rtc-snapshot-graph
    [this token graph-uuid]
    (with-write-transit-str
-     (js/Promise. (rtc-core2/new-task--snapshot-graph token graph-uuid))))
+     (js/Promise. (rtc-core/new-task--snapshot-graph token graph-uuid))))
 
   (rtc-snapshot-list
    [this token graph-uuid]
    (with-write-transit-str
-     (js/Promise. (rtc-core2/new-task--snapshot-list token graph-uuid))))
+     (js/Promise. (rtc-core/new-task--snapshot-list token graph-uuid))))
 
   (undo
-   [_this repo page-block-uuid-str]
+   [_this repo _page-block-uuid-str]
    (when-let [conn (worker-state/get-datascript-conn repo)]
-     (ldb/write-transit-str (undo-redo/undo repo (uuid page-block-uuid-str) conn))))
+     (ldb/write-transit-str (undo-redo/undo repo conn))))
 
   (redo
-   [_this repo page-block-uuid-str]
+   [_this repo _page-block-uuid-str]
    (when-let [conn (worker-state/get-datascript-conn repo)]
-     (ldb/write-transit-str (undo-redo/redo repo (uuid page-block-uuid-str) conn))))
+     (ldb/write-transit-str (undo-redo/redo repo conn))))
 
   (record-editor-info
-   [_this repo page-block-uuid-str editor-info-str]
-   (undo-redo/record-editor-info! repo (uuid page-block-uuid-str) (ldb/read-transit-str editor-info-str))
+   [_this repo _page-block-uuid-str editor-info-str]
+   (undo-redo/record-editor-info! repo (ldb/read-transit-str editor-info-str))
    nil)
-
-  (keep-alive
-   [_this]
-   "alive")
 
   (dangerousRemoveAllDbs
    [this repo]
    (p/let [dbs (.listDB this)]
      (p/all (map #(.unsafeUnlinkDB this (:name %)) dbs)))))
 
+(defn- rename-page!
+  [repo conn page-uuid new-name]
+  (let [config (worker-state/get-config repo)
+        f (if (sqlite-util/db-based-graph? repo)
+            db-worker-page-rename/rename!
+            file-worker-page-rename/rename!)]
+    (f repo conn config page-uuid new-name)))
+
+(defn- delete-page!
+  [repo conn page-uuid]
+  (let [error-handler (fn [{:keys [msg]}]
+                        (worker-util/post-message :notification
+                                                  [[:div [:p msg]] :error]))]
+    (worker-page/delete! repo conn page-uuid {:error-handler error-handler})))
+
+(defn- create-page!
+  [repo conn title options]
+  (let [config (worker-state/get-config repo)]
+    (worker-page/create! repo conn config title options)))
+
+(defn- outliner-register-op-handlers!
+  []
+  (outliner-op/register-op-handlers!
+   {:create-page (fn [repo conn [title options]]
+                   (create-page! repo conn title options))
+    :rename-page (fn [repo conn [page-uuid new-name]]
+                   (rename-page! repo conn page-uuid new-name))
+    :delete-page (fn [repo conn [page-uuid]]
+                   (delete-page! repo conn page-uuid))}))
+
 (defn init
   "web worker entry"
   []
   (let [^js obj (DBWorker.)]
+    (outliner-register-op-handlers!)
     (worker-state/set-worker-object! obj)
     (file/<ratelimit-file-writes!)
-    (js/setInterval #(.postMessage js/self "keepAlive") (* 1000 25))
+    (js/setInterval #(.postMessage js/self "keepAliveResponse") (* 1000 25))
     (Comlink/expose obj)))
 
 (comment

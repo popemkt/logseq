@@ -2,7 +2,6 @@
   (:require [clojure.test :as t :refer [deftest is testing use-fixtures]]
             [datascript.core :as d]
             [frontend.db.conn :as conn]
-            [frontend.handler.page :as page-handler]
             [frontend.state :as state]
             [frontend.test.helper :as test-helper]
             [frontend.worker.rtc.const :as rtc-const]
@@ -16,12 +15,11 @@
             [logseq.outliner.transaction :as outliner-tx]
             [frontend.worker.fixtures :as worker-fixtures]))
 
-
 (use-fixtures :each
   test-helper/db-based-start-and-destroy-db
   (worker-fixtures/listen-test-db-fixture [:sync-db-to-main-thread]))
 
-(deftest filter-remote-data-by-local-unpushed-ops-test
+(deftest update-remote-data-by-local-unpushed-ops-test
   (testing "case1"
     (let [[uuid1 uuid2] (repeatedly (comp str random-uuid))
           affected-blocks-map
@@ -29,61 +27,69 @@
            {:op :move
             :self uuid1
             :parents [uuid2]
-            :left uuid2
-            :content "content-str"}}
+            :block/order "a0"
+            :block/content "content-str"}}
           unpushed-ops
-          [["update" {:block-uuid uuid1
-                      :updated-attrs {:content nil}
-                      :epoch 1}]]
-          r (#'r.remote/filter-remote-data-by-local-unpushed-ops affected-blocks-map unpushed-ops)]
+          [[:update 1 {:block-uuid uuid1
+                       :av-coll [[:block/content "new-content-str" 1 true]]}]]
+          r (#'r.remote/update-remote-data-by-local-unpushed-ops affected-blocks-map unpushed-ops)]
       (is (= {uuid1
               {:op :move
                :self uuid1
                :parents [uuid2]
-               :left uuid2}}
+               :block/order "a0"
+               :block/content "new-content-str"}}
              r))))
   (testing "case2"
-    (let [[uuid1 uuid2] (repeatedly (comp str random-uuid))
-          affected-blocks-map
-          {uuid1
-           {:op :update-attrs
-            :self uuid1
-            :parents [uuid2]
-            :left uuid2
-            :content "content-str"
-            :created-at 123}}
-          unpushed-ops
-          [["update" {:block-uuid uuid1
-                      :updated-attrs {:content nil}
-                      :epoch 1}]]
-          r (#'r.remote/filter-remote-data-by-local-unpushed-ops affected-blocks-map unpushed-ops)]
-      (is (= {uuid1
-              {:op :update-attrs
-               :self uuid1
-               :parents [uuid2]
-               :left uuid2
-               :created-at 123}}
-             r))))
-  (testing "case3"
     (let [[uuid1] (repeatedly (comp str random-uuid))
           affected-blocks-map
           {uuid1
            {:op :remove
             :block-uuid uuid1}}
           unpushed-ops
-          [["move" {:block-uuid uuid1 :epoch 1}]]
-          r (#'r.remote/filter-remote-data-by-local-unpushed-ops affected-blocks-map unpushed-ops)]
-      (is (empty? r)))))
+          [[:move 1 {:block-uuid uuid1}]]
+          r (#'r.remote/update-remote-data-by-local-unpushed-ops affected-blocks-map unpushed-ops)]
+      (is (empty? r))))
 
+  (testing "case3"
+    (let [[uuid1 uuid2] (repeatedly (comp str random-uuid))
+          affected-blocks-map
+          {uuid1
+           {:op :move
+            :self uuid1
+            :parents [uuid2]
+            :block/order "a0"}}
+          unpushed-ops
+          [[:move 1 {:block-uuid uuid1}]]
+          r (#'r.remote/update-remote-data-by-local-unpushed-ops affected-blocks-map unpushed-ops)]
+      (is (empty? r))))
 
-(deftest ^:fix-me gen-remote-ops-test
+  (testing "case4: update remote :update-attrs op"
+    (let [[uuid1 uuid2] (repeatedly random-uuid)
+          affected-blocks-map
+          {uuid1
+           {:op :update-attrs
+            :self uuid1
+            :parents [uuid2]
+            :block/order "a0"
+            :block/content "update content"}}
+          unpushed-ops
+          [[:move 1 {:block-uuid uuid1}]]
+          r (#'r.remote/update-remote-data-by-local-unpushed-ops affected-blocks-map unpushed-ops)]
+      (is (= {uuid1
+              {:op :update-attrs
+               :self uuid1
+               :block/content "update content"}}
+             r)))))
+
+(deftest gen-remote-ops-test
   (let [repo (state/get-current-repo)
         conn (conn/get-db repo false)
         [uuid1 uuid2 uuid3 uuid4] (repeatedly random-uuid)
         opts {:persist-op? false
               :transact-opts {:repo repo
                               :conn conn}}]
-    (page-handler/create! "gen-remote-ops-test" {:redirect? false :create-first-block? false :uuid uuid1})
+    (test-helper/create-page! "gen-remote-ops-test" {:redirect? false :create-first-block? false :uuid uuid1})
     (outliner-tx/transact!
      opts
      (outliner-core/insert-blocks!
@@ -91,23 +97,22 @@
       conn
       [{:block/uuid uuid2 :block/content "uuid2-block"}
        {:block/uuid uuid3 :block/content "uuid3-block"
-        :block/left [:block/uuid uuid2]
         :block/parent [:block/uuid uuid1]}
        {:block/uuid uuid4 :block/content "uuid4-block"
-        :block/left [:block/uuid uuid3]
         :block/parent [:block/uuid uuid1]}]
       (ldb/get-page @conn  "gen-remote-ops-test")
       {:sibling? true :keep-uuid? true}))
 
     (op-mem-layer/init-empty-ops-store! repo)
-    (op-mem-layer/add-ops! repo [["move" {:block-uuid (str uuid2) :epoch 1}]
-                                 ["move" {:block-uuid (str uuid4) :epoch 2}]
-                                 ["move" {:block-uuid (str uuid3) :epoch 3}]
-                                 ["update" {:block-uuid (str uuid4) :epoch 4}]])
+    (op-mem-layer/add-ops! repo [[:move 1 {:block-uuid uuid2}]
+                                 [:move 2 {:block-uuid uuid4}]
+                                 [:move 3 {:block-uuid uuid3}]
+                                 [:update 4 {:block-uuid uuid4
+                                             :av-coll [[:block/content (ldb/write-transit-str "uuid4-block") 4 true]]}]])
     (let [_ (op-mem-layer/new-branch! repo)
-          r1 (#'r.client/gen-block-uuid->remote-ops repo conn "user-uuid" :n 1)
+          r1 (#'r.client/gen-block-uuid->remote-ops repo conn :n 1)
           _ (op-mem-layer/rollback! repo)
-          r2 (#'r.client/gen-block-uuid->remote-ops repo conn "user-uuid" :n 2)]
+          r2 (#'r.client/gen-block-uuid->remote-ops repo conn :n 3)]
       (is (= {uuid2 [:move]}
              (update-vals r1 keys)))
       (is (= {uuid2 [:move]
@@ -115,7 +120,6 @@
               uuid4 [:move :update]}
              (update-vals r2 keys))))
     (op-mem-layer/remove-ops-store! repo)))
-
 
 (deftest ^:fix-me apply-remote-move-ops-test
   (let [repo (state/get-current-repo)
@@ -128,7 +132,7 @@
         [page-uuid
          uuid1-client uuid2-client
          uuid1-remote uuid2-remote] (repeatedly random-uuid)]
-    (page-handler/create! page-name {:redirect? false :create-first-block? false :uuid page-uuid})
+    (test-helper/create-page! page-name {:redirect? false :create-first-block? false :uuid page-uuid})
     (outliner-tx/transact!
      opts
      (outliner-core/insert-blocks!
@@ -187,114 +191,113 @@
           (is (= uuid1-client (:block/uuid (:block/left (d/entity @conn [:block/uuid uuid2-remote])))))
           (is (= uuid2-remote (:block/uuid (:block/left (d/entity @conn [:block/uuid uuid1-remote]))))))))))
 
+;; (deftest ^:large-vars/cleanup-todo apply-remote-update-ops-test
+;;   (let [repo (state/get-current-repo)
+;;         conn (conn/get-db repo false)
+;;         opts {:persist-op? false
+;;               :transact-opts {:repo repo
+;;                               :conn conn}}
+;;         date-formatter (common-config/get-date-formatter (worker-state/get-config repo))
+;;         page-name "apply-remote-update-ops-test"
+;;         [page-uuid
+;;          uuid1-client uuid2-client
+;;          uuid1-remote
+;;          uuid1-not-exist
+;;          tag1-uuid] (repeatedly random-uuid)]
+;;     (test-helper/create-page! page-name {:redirect? false :create-first-block? false :uuid page-uuid})
+;;     (outliner-tx/transact!
+;;      opts
+;;      (outliner-core/insert-blocks!
+;;       repo
+;;       conn
+;;       [{:block/uuid uuid1-client :block/content "uuid1-client"
+;;         :block/left [:block/uuid page-uuid]
+;;         :block/parent [:block/uuid page-uuid]}
+;;        {:block/uuid uuid2-client :block/content "uuid2-client"
+;;         :block/left [:block/uuid uuid1-client]
+;;         :block/parent [:block/uuid page-uuid]}]
+;;       (ldb/get-page @conn page-name)
+;;       {:sibling? true :keep-uuid? true}))
+;;     (testing "apply-remote-update-ops-test1"
+;;       (let [data-from-ws {:req-id "req-id"
+;;                           :t 1 ;; not used
+;;                           :t-before 0
+;;                           :affected-blocks
+;;                           {uuid1-remote {:op :update-attrs
+;;                                          :self uuid1-remote
+;;                                          :parents [uuid1-client]
+;;                                          :left uuid1-client
+;;                                          :content "uuid2-remote"
+;;                                          :created-at 1
+;;                                          :link uuid1-client
+;;                                          :type ["property"]}}}
+;;             update-ops (vals
+;;                         (:update-ops-map
+;;                          (#'r.remote/affected-blocks->diff-type-ops repo (:affected-blocks data-from-ws))))]
+;;         (is (rtc-const/data-from-ws-validator data-from-ws))
+;;         (#'r.remote/apply-remote-update-ops repo conn date-formatter update-ops)
+;;         (let [page-blocks (ldb/get-page-blocks @conn (:db/id (ldb/get-page @conn page-name)) {})]
+;;           (is (= #{uuid1-client uuid2-client uuid1-remote} (set (map :block/uuid page-blocks))))
+;;           (is (= [uuid1-client #{"property"}]
+;;                  ((juxt (comp :block/uuid :block/link) :block/type) (d/entity @conn [:block/uuid uuid1-remote])))))))
 
-(deftest ^:large-vars/cleanup-todo apply-remote-update-ops-test
-  (let [repo (state/get-current-repo)
-        conn (conn/get-db repo false)
-        opts {:persist-op? false
-              :transact-opts {:repo repo
-                              :conn conn}}
-        date-formatter (common-config/get-date-formatter (worker-state/get-config repo))
-        page-name "apply-remote-update-ops-test"
-        [page-uuid
-         uuid1-client uuid2-client
-         uuid1-remote
-         uuid1-not-exist
-         tag1-uuid] (repeatedly random-uuid)]
-    (page-handler/create! page-name {:redirect? false :create-first-block? false :uuid page-uuid})
-    (outliner-tx/transact!
-     opts
-     (outliner-core/insert-blocks!
-      repo
-      conn
-      [{:block/uuid uuid1-client :block/content "uuid1-client"
-        :block/left [:block/uuid page-uuid]
-        :block/parent [:block/uuid page-uuid]}
-       {:block/uuid uuid2-client :block/content "uuid2-client"
-        :block/left [:block/uuid uuid1-client]
-        :block/parent [:block/uuid page-uuid]}]
-      (ldb/get-page @conn page-name)
-      {:sibling? true :keep-uuid? true}))
-    (testing "apply-remote-update-ops-test1"
-      (let [data-from-ws {:req-id "req-id"
-                          :t 1 ;; not used
-                          :t-before 0
-                          :affected-blocks
-                          {uuid1-remote {:op :update-attrs
-                                         :self uuid1-remote
-                                         :parents [uuid1-client]
-                                         :left uuid1-client
-                                         :content "uuid2-remote"
-                                         :created-at 1
-                                         :link uuid1-client
-                                         :type ["property"]}}}
-            update-ops (vals
-                        (:update-ops-map
-                         (#'r.remote/affected-blocks->diff-type-ops repo (:affected-blocks data-from-ws))))]
-        (is (rtc-const/data-from-ws-validator data-from-ws))
-        (#'r.remote/apply-remote-update-ops repo conn date-formatter update-ops)
-        (let [page-blocks (ldb/get-page-blocks @conn (:db/id (ldb/get-page @conn page-name)) {})]
-          (is (= #{uuid1-client uuid2-client uuid1-remote} (set (map :block/uuid page-blocks))))
-          (is (= [uuid1-client #{"property"}]
-                 ((juxt (comp :block/uuid :block/link) :block/type) (d/entity @conn [:block/uuid uuid1-remote])))))))
-
-    (testing "apply-remote-update-ops-test2"
-      (let [data-from-ws {:req-id "req-id"
-                          :t 1
-                          :t-before 0
-                          :affected-blocks
-                          {uuid1-remote {:op :update-attrs
-                                         :self uuid1-remote
-                                         :parents [uuid1-client]
-                                         :left uuid1-client
-                                         :content "uuid2-remote"
-                                         :created-at 1
-                                         :link nil
-                                         :type nil}}}
-            update-ops (vals
-                        (:update-ops-map
-                         (#'r.remote/affected-blocks->diff-type-ops repo (:affected-blocks data-from-ws))))]
-        (is (rtc-const/data-from-ws-validator data-from-ws))
-        (#'r.remote/apply-remote-update-ops repo conn date-formatter update-ops)
-        (let [page-blocks (ldb/get-page-blocks @conn (:db/id (ldb/get-page @conn page-name)) {})]
-          (is (= #{uuid1-client uuid2-client uuid1-remote} (set (map :block/uuid page-blocks))))
-          (is (= [nil nil] ((juxt :block/link :block/type) (d/entity @conn [:block/uuid uuid1-remote])))))))
-    (testing "apply-remote-update-ops-test3"
-      (let [data-from-ws {:req-id "req-id"
-                          :t 1 :t-before 0
-                          :affected-blocks
-                          {uuid1-remote {:op :update-attrs
-                                         :self uuid1-remote
-                                         :parents [uuid2-client]
-                                         :left uuid2-client
-                                         :link uuid1-not-exist}}}
-            update-ops (vals
-                        (:update-ops-map
-                         (#'r.remote/affected-blocks->diff-type-ops repo (:affected-blocks data-from-ws))))]
-        (is (rtc-const/data-from-ws-validator data-from-ws))
-        (#'r.remote/apply-remote-update-ops repo conn date-formatter update-ops)
-        (let [page-blocks (ldb/get-page-blocks @conn (:db/id (ldb/get-page @conn page-name)) {})]
-          (is (= #{uuid1-client uuid2-client uuid1-remote} (set (map :block/uuid page-blocks))))
-          (is (= [nil nil] ((juxt :block/link :block/type) (d/entity @conn [:block/uuid uuid1-remote])))))))
-    (testing "update-attr :block/tags"
-      (let [data-from-ws {:req-id "req-id"
-                          :t 1 :t-before 0
-                          :affected-blocks
-                          {uuid1-remote {:op :update-attrs
-                                         :self uuid1-remote
-                                         :parents [uuid2-client]
-                                         :left uuid2-client
-                                         :tags [tag1-uuid]}}}
-            update-ops (vals
-                        (:update-ops-map
-                         (#'r.remote/affected-blocks->diff-type-ops repo (:affected-blocks data-from-ws))))]
-        (d/transact! conn [{:block/uuid tag1-uuid
-                            :block/type #{"class"},
-                            :block/name "task",
-                            :block/original-name "Task"}])
-        (is (rtc-const/data-from-ws-validator data-from-ws))
-        (#'r.remote/apply-remote-update-ops repo conn date-formatter update-ops)
-        (is (= #{tag1-uuid} (set (map :block/uuid (:block/tags (d/entity @conn [:block/uuid uuid1-remote]))))))))))
+;;     (testing "apply-remote-update-ops-test2"
+;;       (let [data-from-ws {:req-id "req-id"
+;;                           :t 1
+;;                           :t-before 0
+;;                           :affected-blocks
+;;                           {uuid1-remote {:op :update-attrs
+;;                                          :self uuid1-remote
+;;                                          :parents [uuid1-client]
+;;                                          :left uuid1-client
+;;                                          :content "uuid2-remote"
+;;                                          :created-at 1
+;;                                          :link nil
+;;                                          :type nil}}}
+;;             update-ops (vals
+;;                         (:update-ops-map
+;;                          (#'r.remote/affected-blocks->diff-type-ops repo (:affected-blocks data-from-ws))))]
+;;         (is (rtc-const/data-from-ws-validator data-from-ws))
+;;         (#'r.remote/apply-remote-update-ops repo conn date-formatter update-ops)
+;;         (let [page-blocks (ldb/get-page-blocks @conn (:db/id (ldb/get-page @conn page-name)) {})]
+;;           (is (= #{uuid1-client uuid2-client uuid1-remote} (set (map :block/uuid page-blocks))))
+;;           (is (= [nil nil] ((juxt :block/link :block/type) (d/entity @conn [:block/uuid uuid1-remote])))))))
+;;     (testing "apply-remote-update-ops-test3"
+;;       (let [data-from-ws {:req-id "req-id"
+;;                           :t 1 :t-before 0
+;;                           :affected-blocks
+;;                           {uuid1-remote {:op :update-attrs
+;;                                          :self uuid1-remote
+;;                                          :parents [uuid2-client]
+;;                                          :left uuid2-client
+;;                                          :link uuid1-not-exist}}}
+;;             update-ops (vals
+;;                         (:update-ops-map
+;;                          (#'r.remote/affected-blocks->diff-type-ops repo (:affected-blocks data-from-ws))))]
+;;         (is (rtc-const/data-from-ws-validator data-from-ws))
+;;         (#'r.remote/apply-remote-update-ops repo conn date-formatter update-ops)
+;;         (let [page-blocks (ldb/get-page-blocks @conn (:db/id (ldb/get-page @conn page-name)) {})]
+;;           (is (= #{uuid1-client uuid2-client uuid1-remote} (set (map :block/uuid page-blocks))))
+;;           (is (= [nil nil] ((juxt :block/link :block/type) (d/entity @conn [:block/uuid uuid1-remote])))))))
+;;     (testing "update-attr :block/tags"
+;;       (let [data-from-ws {:req-id "req-id"
+;;                           :t 1 :t-before 0
+;;                           :affected-blocks
+;;                           {uuid1-remote {:op :update-attrs
+;;                                          :self uuid1-remote
+;;                                          :parents [uuid2-client]
+;;                                          :left uuid2-client
+;;                                          :tags [tag1-uuid]}}}
+;;             update-ops (vals
+;;                         (:update-ops-map
+;;                          (#'r.remote/affected-blocks->diff-type-ops repo (:affected-blocks data-from-ws))))]
+;;         (d/transact! conn [{:block/uuid tag1-uuid
+;;                             :block/type #{"class"},
+;;                             :block/name "task",
+;;                             :block/original-name "Task"}])
+;;         (is (rtc-const/data-from-ws-validator data-from-ws))
+;;         (#'r.remote/apply-remote-update-ops repo conn date-formatter update-ops)
+;;         (is (= #{tag1-uuid} (set (map :block/uuid (:block/tags (d/entity @conn [:block/uuid uuid1-remote]))))))))))
 
 (deftest ^:fix-me apply-remote-remove-ops-test
   (let [repo (state/get-current-repo)
@@ -307,7 +310,7 @@
         [page-uuid
          uuid1-client uuid2-client
          uuid1-not-exist] (repeatedly random-uuid)]
-    (page-handler/create! page-name {:redirect? false :create-first-block? false :uuid page-uuid})
+    (test-helper/create-page! page-name {:redirect? false :create-first-block? false :uuid page-uuid})
     (outliner-tx/transact!
      opts
      (outliner-core/insert-blocks!
@@ -347,7 +350,7 @@
         (let [page-blocks (ldb/get-page-blocks @conn (:db/id (ldb/get-page @conn page-name)) {})]
           (is (= #{uuid2-client} (set (map :block/uuid page-blocks)))))))))
 
-(deftest ^:fix-me apply-remote-remove-ops-test2
+(deftest apply-remote-remove-ops-test2
   (testing "
 origin:
 - 1
@@ -359,7 +362,10 @@ client: ;; move 3 as child of 2
   - 3
 server: ;; remove 2
 - 1
-- 3"
+- 3
+result:
+- 3
+- 1"
     (let [repo (state/get-current-repo)
           conn (conn/get-db repo false)
           date-formatter (common-config/get-date-formatter (worker-state/get-config repo))
@@ -369,7 +375,7 @@ server: ;; remove 2
           page-name "apply-remote-remove-ops-test2"
           [page-uuid
            uuid1 uuid2 uuid3] (repeatedly random-uuid)]
-      (page-handler/create! page-name {:redirect? false :create-first-block? false :uuid page-uuid})
+      (test-helper/create-page! page-name {:redirect? false :create-first-block? false :uuid page-uuid})
       (outliner-tx/transact!
        opts
        (outliner-core/insert-blocks!
@@ -378,13 +384,13 @@ server: ;; remove 2
         ;;   - 3
         repo conn
         [{:block/uuid uuid1 :block/content "1"
-          :block/left [:block/uuid page-uuid]
+          :block/order "a0"
           :block/parent [:block/uuid page-uuid]}
          {:block/uuid uuid2 :block/content "2"
-          :block/left [:block/uuid uuid1]
+          :block/order "a1"
           :block/parent [:block/uuid page-uuid]}
          {:block/uuid uuid3 :block/content "3"
-          :block/left [:block/uuid uuid2]
+          :block/order "a0"
           :block/parent [:block/uuid uuid2]}]
         (ldb/get-page @conn page-name)
         {:sibling? false :keep-uuid? true}))
@@ -399,23 +405,21 @@ server: ;; remove 2
         (is (rtc-const/data-from-ws-validator data-from-ws))
         (#'r.remote/apply-remote-remove-ops repo conn date-formatter remove-ops)
         (let [page-blocks (ldb/get-page-blocks @conn (:db/id (ldb/get-page @conn page-name)) {})]
-          (is (= #{uuid1 uuid3} (set (map :block/uuid page-blocks))))
-          (is (= page-uuid (:block/uuid (:block/left (d/entity @conn [:block/uuid uuid3]))))))))))
-
+          (is (= [uuid3 uuid1] (map :block/uuid (sort-by :block/order page-blocks)))))))))
 
 (deftest ^:fix-me apply-remote-update&remove-page-ops-test
   (let [repo (state/get-current-repo)
         conn (conn/get-db repo false)
         date-formatter (common-config/get-date-formatter (worker-state/get-config repo))
         [page1-uuid ;; page2-uuid page3-uuid page4-uuid
-         ] (repeatedly random-uuid)]
+         ](repeatedly random-uuid)]
     (testing "apply-remote-update-page-ops-test1"
       (let [data-from-ws {:req-id "req-id" :t 1 :t-before 0
                           :affected-blocks
                           {page1-uuid {:op :update-page
                                        :self page1-uuid
                                        :page-name (str page1-uuid)
-                                       :original-name (str page1-uuid)}}}
+                                       :block/original-name (str page1-uuid)}}}
             update-page-ops (vals
                              (:update-page-ops-map
                               (#'r.remote/affected-blocks->diff-type-ops repo (:affected-blocks data-from-ws))))]
@@ -429,7 +433,7 @@ server: ;; remove 2
                           {page1-uuid {:op :update-page
                                        :self page1-uuid
                                        :page-name (str page1-uuid "-rename")
-                                       :original-name (str page1-uuid "-rename")}}}
+                                       :block/original-name (str page1-uuid "-rename")}}}
             update-page-ops (vals
                              (:update-page-ops-map
                               (#'r.remote/affected-blocks->diff-type-ops repo (:affected-blocks data-from-ws))))]
@@ -462,7 +466,7 @@ server: ;; remove 2
           [page1-uuid page2-uuid
            uuid1-client uuid2-client
            uuid1-remote uuid2-remote] (repeatedly random-uuid)]
-      (page-handler/create! page-name {:redirect? false :create-first-block? false :uuid page1-uuid})
+      (test-helper/create-page! page-name {:redirect? false :create-first-block? false :uuid page1-uuid})
       (outliner-tx/transact!
        opts
        (outliner-core/insert-blocks!
@@ -483,17 +487,17 @@ server: ;; remove 2
                           {page2-uuid {:op :update-page
                                        :self page2-uuid
                                        :page-name page-name
-                                       :original-name page-name}
+                                       :block/original-name page-name}
                            uuid1-remote {:op :move
                                          :self uuid1-remote
                                          :parents [page2-uuid]
                                          :left page2-uuid
-                                         :content "uuid1-remote"}
+                                         :block/content "uuid1-remote"}
                            uuid2-remote {:op :move
                                          :self uuid2-remote
                                          :parents [page2-uuid]
                                          :left uuid1-remote
-                                         :content "uuid2-remote"}}}
+                                         :block/content "uuid2-remote"}}}
             all-ops (#'r.remote/affected-blocks->diff-type-ops repo (:affected-blocks data-from-ws))
             update-page-ops (vals (:update-page-ops-map all-ops))
             move-ops (#'r.remote/move-ops-map->sorted-move-ops (:move-ops-map all-ops))]
@@ -501,6 +505,6 @@ server: ;; remove 2
         (#'r.remote/apply-remote-update-page-ops repo conn date-formatter update-page-ops)
         (#'r.remote/apply-remote-move-ops repo conn date-formatter move-ops)
         (let [page (ldb/get-page @conn page-name)]
-         (is (= #{uuid1-client uuid2-client uuid1-remote uuid2-remote}
-                (set (map :block/uuid (ldb/get-page-blocks @conn (:db/id page) {})))))
-         (is (= page2-uuid (:block/uuid page))))))))
+          (is (= #{uuid1-client uuid2-client uuid1-remote uuid2-remote}
+                 (set (map :block/uuid (ldb/get-page-blocks @conn (:db/id page) {})))))
+          (is (= page2-uuid (:block/uuid page))))))))

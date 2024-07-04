@@ -22,6 +22,10 @@
                                 ;; TODO:lint: Fix when fixing all type hints
                                 object]}
 
+  :discouraged-namespace
+  {logseq.db.sqlite.cli {:message "frontend should not depend on CLI namespace with sqlite3 dependency"}
+   logseq.outliner.cli {:message "frontend should not depend on CLI namespace with sqlite3 dependency"}}
+
   :unused-namespace {:level :warning
                      :exclude [logseq.db.frontend.entity-plus]}
 
@@ -56,6 +60,7 @@
              frontend.db-mixins db-mixins
              frontend.db.query-dsl query-dsl
              frontend.db.react react
+             frontend.db.query-custom query-custom
              frontend.db.query-react query-react
              frontend.db.util db-utils
              frontend.diff diff
@@ -127,7 +132,7 @@
              frontend.worker.handler.page worker-page
              frontend.worker.handler.page.rename worker-page-rename
              frontend.worker.handler.file.util wfu
-             frontend.worker.batch-tx batch-tx
+             logseq.outliner.batch-tx batch-tx
              lambdaisland.glogi log
              logseq.common.config common-config
              logseq.common.graph common-graph
@@ -139,6 +144,8 @@
              logseq.common.util.macro macro-util
              logseq.db ldb
              logseq.db.frontend.content db-content
+             logseq.db.frontend.class db-class
+             logseq.db.frontend.db-ident db-ident
              logseq.db.frontend.inputs db-inputs
              logseq.db.frontend.order db-order
              logseq.db.frontend.property db-property
@@ -149,7 +156,7 @@
              logseq.db.frontend.rules rules
              logseq.db.frontend.schema db-schema
              logseq.db.frontend.validate db-validate
-             logseq.db.sqlite.db sqlite-db
+             logseq.db.sqlite.cli sqlite-cli
              logseq.db.sqlite.util sqlite-util
              logseq.graph-parser graph-parser
              logseq.graph-parser.text text

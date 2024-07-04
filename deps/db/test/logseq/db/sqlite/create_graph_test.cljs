@@ -6,8 +6,7 @@
             [logseq.db.frontend.schema :as db-schema]
             [logseq.db.sqlite.create-graph :as sqlite-create-graph]
             [logseq.db.frontend.validate :as db-validate]
-            [logseq.db.frontend.property :as db-property]
-            [logseq.db :as ldb]))
+            [logseq.db.frontend.property :as db-property]))
 
 (deftest new-graph-db-idents
   (testing "a new graph follows :db/ident conventions for"
@@ -18,7 +17,7 @@
                                @conn)
                           (map first))
           default-idents (map :db/ident ident-ents)]
-      (is (> (count default-idents) 75)
+      (is (> (count default-idents) 45)
           "Approximate number of default idents is correct")
 
       (testing "namespaces"
@@ -54,7 +53,8 @@
                     (remove #(or (= "logseq.kv" (namespace (:db/ident %)))
                                  (= :logseq.property/empty-placeholder (:db/ident %)))))]
     (is (= []
-           (remove ldb/built-in? idents))
+           (remove #(->> % :logseq.property/built-in? (db-property/ref->property-value-content @conn))
+                   idents))
         "All entities with :db/ident have built-in property (except for kv idents)")))
 
 (deftest new-graph-creates-class
@@ -63,7 +63,7 @@
         task (d/entity @conn :logseq.class/task)]
     (is (contains? (:block/type task) "class")
         "Task class has correct type")
-    (is (= 4 (count (:class/schema.properties task)))
+    (is (= 3 (count (:class/schema.properties task)))
         "Has correct number of task properties")
     (is (every? #(contains? (:block/type %) "property")
                 (:class/schema.properties task))

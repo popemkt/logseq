@@ -27,7 +27,8 @@
             [rum.core :as rum]
             [clojure.core.async :as async]
             [frontend.pubsub :as pubsub]
-            [frontend.worker.util :as worker-util]))
+            [frontend.worker.util :as worker-util]
+            [datascript.impl.entity :as de]))
   #?(:cljs (:import [goog.async Debouncer]))
   (:require
    [clojure.pprint]
@@ -204,7 +205,7 @@
    (defn- get-computed-bg-color
      []
      ;; window.getComputedStyle(document.body, null).getPropertyValue('background-color');
-     (let [styles (js/window.getComputedStyle (js/document.querySelector "#app-container"))
+     (let [styles (js/window.getComputedStyle js/document.body)
            bg-color (gobj/get styles "background-color")
            ;; convert rgb(r,g,b) to #rrggbb
            rgb2hex (fn [rgb]
@@ -215,9 +216,9 @@
                                   %))
                           (string/join)
                           (str "#")))]
-       (when (string/starts-with? bg-color "rgb(")
+       (when (string/starts-with? bg-color "rgb")
          (let [rgb (-> bg-color
-                       (string/replace #"^rgb\(" "")
+                       (string/replace #"^rgb[^\d]+" "")
                        (string/replace #"\)$" "")
                        (string/split #","))
                rgb (take 3 rgb)]
@@ -227,26 +228,27 @@
 #?(:cljs
    (defn set-android-theme
      []
-     (when (mobile-util/native-android?)
-       (when-let [bg-color (try (get-computed-bg-color)
-                                (catch :default _
-                                  nil))]
-         (.setNavigationBarColor NavigationBar (clj->js {:color bg-color}))
-         (.setBackgroundColor StatusBar (clj->js {:color bg-color}))))))
+     (let [f #(when (mobile-util/native-android?)
+                (when-let [bg-color (try (get-computed-bg-color)
+                                         (catch :default _
+                                           nil))]
+                  (.setNavigationBarColor NavigationBar (clj->js {:color bg-color}))
+                  (.setBackgroundColor StatusBar (clj->js {:color bg-color}))))]
+       (js/setTimeout f 32))))
 
 #?(:cljs
    (defn set-theme-light
      []
      (p/do!
-      (.setStyle StatusBar (clj->js {:style (.-Light Style)}))
-      (set-android-theme))))
+       (.setStyle StatusBar (clj->js {:style (.-Light Style)}))
+       (set-android-theme))))
 
 #?(:cljs
    (defn set-theme-dark
      []
      (p/do!
-      (.setStyle StatusBar (clj->js {:style (.-Dark Style)}))
-      (set-android-theme))))
+       (.setStyle StatusBar (clj->js {:style (.-Dark Style)}))
+       (set-android-theme))))
 
 (defn find-first
   [pred coll]
@@ -541,14 +543,6 @@
                                 :block    "center"}))))))
 
 #?(:cljs
-   (defn bottom-reached?
-     [node threshold]
-     (let [full-height (gobj/get node "scrollHeight")
-           scroll-top (gobj/get node "scrollTop")
-           client-height (gobj/get node "clientHeight")]
-       (<= (- full-height scroll-top client-height) threshold))))
-
-#?(:cljs
    (defn link?
      [node]
      (contains?
@@ -609,10 +603,7 @@
    (def distinct-by common-util/distinct-by))
 
 #?(:cljs
-   (defn distinct-by-last-wins
-     [f col]
-     {:pre [(sequential? col)]}
-     (reverse (distinct-by f (reverse col)))))
+   (def distinct-by-last-wins common-util/distinct-by-last-wins))
 
 (defn get-git-owner-and-repo
   [repo-url]
@@ -625,8 +616,8 @@
 
 (defn trim-safe
   [s]
-  (when s
-    (string/trim s)))
+  (if (string? s)
+    (string/trim s) s))
 
 (defn trimr-without-newlines
   [s]
@@ -828,12 +819,20 @@
 
 #?(:cljs
    (defn copy-to-clipboard!
-     [text & {:keys [html blocks owner-window]}]
-     (let [data (clj->js
+     [text & {:keys [graph html blocks owner-window]}]
+     (let [blocks (map (fn [block] (if (de/entity? block)
+                                     (-> (into {} block)
+                                         ;; FIXME: why :db/id is not included?
+                                         (assoc :db/id (:db/id block)))
+                                     block)) blocks)
+           data (clj->js
                  (common-util/remove-nils-non-nested
                   {:text text
                    :html html
-                   :blocks (when (seq blocks) (pr-str (mapv #(dissoc % :block.temp/fully-loaded? %) blocks)))}))]
+                   :blocks (when (and graph (seq blocks))
+                             (pr-str
+                              {:graph graph
+                               :blocks (mapv #(dissoc % :block.temp/fully-loaded? %) blocks)}))}))]
        (if owner-window
          (utils/writeClipboard data owner-window)
          (utils/writeClipboard data)))))
@@ -884,12 +883,10 @@
       (when-let [blocks (if container
                           (get-blocks-noncollapse container)
                           (get-blocks-noncollapse))]
-        (let [block-id (.-id block)
-              block-ids (mapv #(.-id %) blocks)]
-          (when-let [index (.indexOf block-ids block-id)]
-            (let [idx (dec index)]
-              (when (>= idx 0)
-                (nth-safe blocks idx)))))))))
+        (when-let [index (.indexOf blocks block)]
+          (let [idx (dec index)]
+            (when (>= idx 0)
+              (nth-safe blocks idx))))))))
 
 #?(:cljs
    (defn get-prev-block-non-collapsed-non-embed
@@ -907,12 +904,10 @@
    (defn get-next-block-non-collapsed
      [block]
      (when-let [blocks (get-blocks-noncollapse)]
-       (let [block-id (.-id block)
-             block-ids (mapv #(.-id %) blocks)]
-         (when-let [index (.indexOf block-ids block-id)]
-           (let [idx (inc index)]
-             (when (>= (count blocks) idx)
-               (nth-safe blocks idx))))))))
+       (when-let [index (.indexOf blocks block)]
+         (let [idx (inc index)]
+           (when (>= (count blocks) idx)
+             (nth-safe blocks idx)))))))
 
 #?(:cljs
    (defn get-next-block-non-collapsed-skip
@@ -1245,6 +1240,11 @@
        (gobj/get e "ctrlKey"))))
 
 #?(:cljs
+   (defn shift-key? [e]
+     (gobj/get e "shiftKey")))
+
+
+#?(:cljs
    (defn right-click?
      [e]
      (let [which (gobj/get e "which")
@@ -1496,16 +1496,6 @@ Arg *stop: atom, reset to true to stop the loop"
                   js/window.msRequestAnimationFrame))
          #(js/setTimeout % 16))))
 
-#?(:cljs
-   (defn tag?
-     "Whether `s` is a tag."
-     [s]
-     (and (string? s)
-          (string/starts-with? s "#")
-          (or
-           (not (string/includes? s " "))
-           (string/starts-with? s "#[[")
-           (string/ends-with? s "]]")))))
 #?(:cljs
    (defn parse-params
      "Parse URL parameters in hash(fragment) into a hashmap"

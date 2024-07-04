@@ -5,28 +5,40 @@
             [frontend.handler.page :as page-handler]
             [frontend.state :as state]
             [frontend.ui :as ui]
-            [rum.core :as rum]))
+            [rum.core :as rum]
+            [goog.dom :as gdom]
+            [frontend.util :as util]))
 
 (rum/defc journal-cp < rum/reactive
-  [page]
-  (let [;; Don't edit the journal title
-        repo (state/sub :git/current-repo)]
-    (page/page {:repo repo
-                :page-name (:block/name page)})))
+  [page idx]
+  [:div.journal-item.content {:key (:db/id page)}
+   (let [repo (state/sub :git/current-repo)]
+     (page/page {:repo repo
+                 :page-name (str (:block/uuid page))
+                 :first-journal? (zero? idx)}))])
 
 (rum/defc journals < rum/reactive
+  {:will-unmount (fn [state]
+                   (state/set-journals-length! 3)
+                   state)}
   [latest-journals]
-  [:div#journals
-   (ui/infinite-list
-    "main-content-container"
-    (for [{:block/keys [name] :as page} latest-journals]
-      [:div.journal-item.content {:key name}
-       (journal-cp page)])
-    {:has-more (page-handler/has-more-journals?)
-     :more-class "text-4xl"
-     :on-top-reached page-handler/create-today-journal!
-     :on-load (fn []
-                (page-handler/load-more-journals!))})])
+  (when (seq latest-journals)
+    [:div#journals
+     (ui/virtualized-list
+      {:custom-scroll-parent (gdom/getElement "main-content-container")
+       :compute-item-key (fn [idx]
+                           (let [block (nth latest-journals idx)]
+                             (str "journal-" (:db/id block))))
+       :initial-item-count 1
+       :total-count (count latest-journals)
+       :item-content (fn [idx]
+                       (when-let [page (util/nth-safe latest-journals idx)]
+                         (journal-cp page idx)))
+       :start-reached (fn [_idx]
+                        (page-handler/create-today-journal!))
+       :end-reached (fn [idx]
+                      (when (= (dec (count latest-journals)) idx)
+                        (page-handler/load-more-journals!)))})]))
 
 (rum/defc all-journals < rum/reactive db-mixins/query
   []

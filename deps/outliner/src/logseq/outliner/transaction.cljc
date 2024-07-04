@@ -1,14 +1,7 @@
 (ns logseq.outliner.transaction
   "Provides a wrapper around logseq.outliner.datascript/transact! using
    transient state from logseq.outliner.core"
-  #?(:cljs (:require-macros [logseq.outliner.transaction]))
-  #?(:cljs (:require [malli.core :as m])))
-
-#_:clj-kondo/ignore
-(def ^:private transact-opts [:or :symbol :map])
-
-#?(:org.babashka/nbb nil
-   :cljs (m/=> transact! [:=> [:cat transact-opts :any] :any]))
+  #?(:cljs (:require-macros [logseq.outliner.transaction])))
 
 (defmacro ^:api transact!
   "Batch all the transactions in `body` to a single transaction, Support nested transact! calls.
@@ -29,7 +22,7 @@
     (delete-blocks! ...))"
   [opts & body]
   `(let [opts# (dissoc ~opts :transact-opts :current-block)]
-     (frontend.worker.batch-tx/with-batch-tx-mode
+     (logseq.outliner.batch-tx/with-batch-tx-mode
       (:conn (:transact-opts ~opts))
       opts#
       ~@body)))

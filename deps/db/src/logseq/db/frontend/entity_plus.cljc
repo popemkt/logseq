@@ -15,51 +15,51 @@
 (defn db-based-graph?
   "Whether the current graph is db-only"
   [db]
-  (= "db" (:db/type (d/entity db :logseq.kv/db-type))))
+  (= "db" (:kv/value (d/entity db :logseq.kv/db-type))))
 
 (def lookup-entity @#'entity/lookup-entity)
 (defn lookup-kv-then-entity
   ([e k] (lookup-kv-then-entity e k nil))
   ([^Entity e k default-value]
-   (case k
-     :block/raw-content
-     (lookup-entity e :block/content default-value)
+   (when k
+     (case k
+      :block/raw-content
+      (lookup-entity e :block/content default-value)
 
-     :block/properties
-     (let [db (.-db e)]
-       (if (db-based-graph? db)
-         (lookup-entity e :block/properties
-                        (->> (into {} e)
-                             (filter (fn [[k _]] (db-property/property? k)))
-                             (into {})))
-         (lookup-entity e :block/properties nil)))
+      :block/properties
+      (let [db (.-db e)]
+        (if (db-based-graph? db)
+          (lookup-entity e :block/properties
+                         (->> (into {} e)
+                              (filter (fn [[k _]] (db-property/property? k)))
+                              (into {})))
+          (lookup-entity e :block/properties nil)))
 
-     :block/content
-     (or
-      (get (.-kv e) k)
-      (let [result (lookup-entity e k default-value)]
-        (or
-         (if (string? result)
-           (let [refs (:block/refs e)
-                 tags (:block/tags e)]
-             (db-content/special-id-ref->page-ref result (distinct (concat refs tags))))
-           result)
-         default-value)))
+      :block/content
+      (or
+       (get (.-kv e) k)
+       (let [result (lookup-entity e k default-value)]
+         (or
+          (if (string? result)
+            (db-content/special-id-ref->page-ref result (:block/refs e))
+            result)
+          default-value)))
 
-     :block/_parent
-     (->> (lookup-entity e k default-value)
-          (remove (fn [e] (:logseq.property/created-from-property e)))
-          seq)
+      :block/_parent
+      (->> (lookup-entity e k default-value)
+           (remove (fn [e] (or (:logseq.property/created-from-property e)
+                               (:block/closed-value-property e))))
+           seq)
 
-     :block/_raw-parent
-     (lookup-entity e :block/_parent default-value)
+      :block/_raw-parent
+      (lookup-entity e :block/_parent default-value)
 
-     :property/closed-values
-     (->> (lookup-entity e :block/_closed-value-property default-value)
-          (sort-by :block/order))
+      :property/closed-values
+      (->> (lookup-entity e :block/_closed-value-property default-value)
+           (sort-by :block/order))
 
-     (or (get (.-kv e) k)
-         (lookup-entity e k default-value)))))
+      (or (get (.-kv e) k)
+          (lookup-entity e k default-value))))))
 
 #?(:org.babashka/nbb
    nil
@@ -77,7 +77,7 @@
 
      IMap
      (-dissoc [this k]
-       (assert (keyword? k) "attribute must be keyword")
+       (assert (keyword? k) (str "attribute must be keyword: " k))
        (set! (.-kv this) (dissoc (.-kv this) k))
        this)
 

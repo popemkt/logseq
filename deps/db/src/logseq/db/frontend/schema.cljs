@@ -6,6 +6,7 @@
 ;; A page is a special block, a page can corresponds to multiple files with the same ":block/name".
 (def ^:large-vars/data-var schema
   {:db/ident        {:db/unique :db.unique/identity}
+   :kv/value       {}
 
    :recent/pages {}
 
@@ -22,8 +23,6 @@
                   :db/index true}
    :block/order {:db/index true}
    :block/collapsed? {}
-   :block/collapsed-properties {:db/valueType :db.type/ref
-                                :db/cardinality :db.cardinality/many}
 
    ;; :markdown, :org
    :block/format {}
@@ -106,21 +105,18 @@
 
    ;; file
    :file/path {:db/unique :db.unique/identity}
-   ;; only store the content of logseq's files
    :file/content {}
-
-   ;; TODO: do we really use this?
-   :file/handle {}
-   ;; :file/created-at {}
-   ;; :file/last-modified-at {}
-   ;; :file/size {}
+   :file/created-at {}
+   :file/last-modified-at {}
+   :file/size {}
    })
 
 (def schema-for-db-based-graph
   (merge
    (dissoc schema
-           :block/namespace :block/properties-text-values :block/pre-block? :recent/pages :file/handle :block/file
-           :block/properties :block/properties-order :block/repeated? :block/deadline :block/scheduled :block/priority :block/marker)
+           :block/namespace :block/properties-text-values :block/pre-block? :recent/pages :block/file
+           :block/properties :block/properties-order :block/repeated? :block/deadline :block/scheduled :block/priority
+           :block/marker :block/macros)
    {:block/name {:db/index true}        ; remove db/unique for :block/name
     ;; class properties
     :class/parent {:db/valueType :db.type/ref
@@ -133,8 +129,7 @@
                                   :db/cardinality :db.cardinality/many}
     :property/schema.classes {:db/valueType :db.type/ref
                               :db/cardinality :db.cardinality/many}
-
-    :file/last-modified-at {}
+    :property.value/content {}
     :asset/uuid {:db/unique :db.unique/identity}
     :asset/meta {}}))
 
@@ -158,7 +153,6 @@
 ;; If only block/content changes
 (def db-version-retract-attributes
   #{:block/refs
-    :block/macros
     :block/warning})
 
 ;; DB graph helpers

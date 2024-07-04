@@ -165,9 +165,6 @@
                                              :fn      (fn [state e]
                                                         (ui-handler/auto-complete-complete state e))}
 
-   :auto-complete/open-link                 {:binding "mod+o"
-                                             :fn      ui-handler/auto-complete-open-link}
-
    :cards/toggle-answers                    {:binding "s"
                                              :fn      srs/toggle-answers}
 
@@ -348,8 +345,8 @@
 
    :editor/add-property                     {:binding "mod+p"
                                              :fn      (fn [e]
-                                                        (.preventDefault e)
-                                                        (state/pub-event! [:editor/new-property]))}
+                                                        (when e (.preventDefault e))
+                                                        (state/pub-event! [:editor/new-property {}]))}
 
    :ui/toggle-brackets                      {:binding "mod+c mod+b"
                                              :fn      config-handler/toggle-ui-show-brackets!}
@@ -405,7 +402,7 @@
                                              :fn      (fn [] (js/document.execCommand "copy"))}
 
    :graph/export-as-html                    {:fn      #(export-handler/download-repo-as-html!
-                                                         (state/get-current-repo))
+                                                        (state/get-current-repo))
                                              :binding []}
 
    :graph/open                              {:fn      #(do
@@ -426,6 +423,10 @@
                                              :inactive (not config/db-graph-enabled?)
                                              :binding false}
 
+   :graph/db-save                           {:fn #(state/pub-event! [:graph/save-db-to-disk])
+                                             ;; TODO: Remove `(not config/db-graph-enabled?)` check once feature is released
+                                             :inactive (or (not config/db-graph-enabled?) (not (util/electron?)))
+                                             :binding "mod+s"}
 
    :graph/re-index                          {:fn      (fn []
                                                         (p/let [multiple-windows? (ipc/ipc "graphHasMultipleWindows" (state/get-current-repo))]
@@ -522,7 +523,7 @@
                                              :fn      ui-handler/toggle-wide-mode!}
 
    :ui/select-theme-color                   {:binding "t i"
-                                             :fn      plugin-handler/show-themes-modal!}
+                                             :fn      #(plugin-handler/show-themes-modal! true)}
 
    :ui/goto-plugins                         {:binding  "t p"
                                              :inactive (not config/lsp-enabled?)
@@ -546,7 +547,6 @@
 
    :git/commit                              {:binding  "mod+g c"
                                              :inactive (not (util/electron?))
-                                             :file-graph? true
                                              :fn       commit/show-commit-modal!}
 
    :dev/replace-graph-with-db-file           {:binding  []
@@ -676,6 +676,7 @@
             :graph/remove
             :graph/add
             :graph/db-add
+            :graph/db-save
             :graph/re-index
             :editor/cycle-todo
             :editor/up
@@ -943,7 +944,6 @@
       :auto-complete/complete
       :auto-complete/shift-complete
       :auto-complete/meta-complete
-      :auto-complete/open-link
       :git/commit
       :dev/show-block-data
       :dev/show-block-ast

@@ -14,7 +14,6 @@
             [frontend.util :as util :refer [react]]
             [logseq.db.frontend.rules :as rules]
             [logseq.db.frontend.content :as db-content]
-            [logseq.db.sqlite.create-graph :as sqlite-create-graph]
             [logseq.graph-parser.db :as gp-db]
             [logseq.common.util :as common-util]
             [logseq.common.util.date-time :as date-time-util]
@@ -40,22 +39,13 @@
 
 (defn get-all-pages
   [repo]
-  (->>
-   (d/q
-    '[:find [(pull ?page [*]) ...]
-      :where
-      [?page :block/name]]
-     (conn/get-db repo))
-   (remove hidden-page?)))
+  (let [db (conn/get-db repo)]
+    (ldb/get-all-pages db)))
 
 (defn get-all-page-original-names
   [repo]
-  (let [db (conn/get-db repo)]
-    (->>
-     (d/datoms db :avet :block/name)
-     (map #(:block/original-name (d/entity db (:e %))))
-     (remove hidden-page?)
-     (remove nil?))))
+  (->> (get-all-pages repo)
+       (map :block/original-name)))
 
 (defn get-page-alias
   [repo page-name]
@@ -90,15 +80,6 @@
                [?block :block/page ?p]]
              (conn/get-db repo-url) pred)
         db-utils/seq-flatten)))
-
-(defn set-file-last-modified-at!
-  "Refresh file timestamps to DB"
-  [repo path last-modified-at]
-  (when (and repo path last-modified-at)
-    (db-utils/transact! repo
-                        [{:file/path path
-                          :file/last-modified-at last-modified-at}]
-                        {:skip-refresh? true})))
 
 (defn get-file-last-modified-at
   [repo path]
@@ -248,16 +229,17 @@ independent of format as format specific heading characters are stripped"
 (def sort-by-order ldb/sort-by-order)
 
 (defn sub-block
-  [id]
+  [id & {:keys [ref?]}]
   (when-let [repo (state/get-current-repo)]
-    (->
-     (react/q repo [:frontend.worker.react/block id]
-              {:query-fn (fn [_]
-                           (let [e (db-utils/entity id)]
-                             [e (:block/tx-id e)]))}
-              nil)
-     react
-     first)))
+    (when id
+      (let [ref (react/q repo [:frontend.worker.react/block id]
+                         {:query-fn (fn [_]
+                                      (let [e (db-utils/entity id)]
+                                        [e (:block/tx-id e)]))}
+                         nil)]
+        (if ref?
+          ref
+          (-> ref react first))))))
 
 (defn sort-by-order-recursive
   [form]
@@ -429,7 +411,7 @@ independent of format as format specific heading characters are stripped"
 (defn get-block-and-children
   [repo block-uuid]
   (let [db (conn/get-db repo)]
-    (ldb/get-block-and-children repo db block-uuid)))
+    (ldb/get-block-and-children db block-uuid)))
 
 (defn get-file-page
   ([file-path]
@@ -517,12 +499,6 @@ independent of format as format specific heading characters are stripped"
            (or (:block/name source-page)
                (:block/name page-entity)
                page-name)))))))
-
-(defn get-page-original-name
-  [page-name]
-  (when (string? page-name)
-    (let [page (ldb/get-page (conn/get-db) page-name)]
-      (:block/original-name page))))
 
 (defn get-journals-length
   []
@@ -653,7 +629,8 @@ independent of format as format specific heading characters are stripped"
           react
           :entities
           (remove (fn [block]
-                    (= page-id (:db/id (:block/page block)))))
+                    (or (= page-id (:db/id (:block/page block)))
+                        (ldb/hidden-page? (:block/page block)))))
           (util/distinct-by :db/id)))))))
 
 ;; TODO: no need to use datalog query, `:block/_refs`
@@ -681,12 +658,6 @@ independent of format as format specific heading characters are stripped"
   "sanitized page-name only"
   [page-name]
   (ldb/journal-page? (ldb/get-page (conn/get-db) page-name)))
-
-(defn get-block-property-values
-  "Get blocks which have this property."
-  [property-id]
-  (let [db (conn/get-db)]
-    (map :v (d/datoms db :avet property-id))))
 
 (defn get-classes-with-property
   "Get classes which have given property as a class property"
@@ -722,15 +693,6 @@ independent of format as format specific heading characters are stripped"
     (when (seq pages)
       (mapv (fn [page] [:db.fn/retractEntity [:block/name page]]) (map util/page-name-sanity-lc pages)))))
 
-(defn set-file-content!
-  ([repo path content]
-   (set-file-content! repo path content {}))
-  ([repo path content opts]
-   (when (and repo path)
-     (let [tx-data {:file/path path
-                    :file/content content}]
-       (db-utils/transact! repo [tx-data] (merge opts {:skip-refresh? true}))))))
-
 ;; TODO: check whether this works when adding pdf back on Web
 (defn get-pre-block
   [repo page-id]
@@ -751,20 +713,21 @@ independent of format as format specific heading characters are stripped"
                page)]
     (ldb/whiteboard-page? page)))
 
-(defn get-orphaned-pages
-  [opts]
-  (let [db (conn/get-db)]
-    (ldb/get-orphaned-pages db
-                            (merge opts
-                                   {:built-in-pages-names
-                                    (if (config/db-based-graph? (state/get-current-repo))
-                                      sqlite-create-graph/built-in-pages-names
-                                      gp-db/built-in-pages-names)}))))
+(comment
+  (defn get-orphaned-pages
+    [opts]
+    (let [db (conn/get-db)]
+      (ldb/get-orphaned-pages db
+                              (merge opts
+                                     {:built-in-pages-names
+                                      (if (config/db-based-graph? (state/get-current-repo))
+                                        sqlite-create-graph/built-in-pages-names
+                                        gp-db/built-in-pages-names)})))))
 
 ;; FIXME: use `Untitled` instead of UUID for db based graphs
 (defn untitled-page?
   [page-name]
-  (when (ldb/get-page (conn/get-db) page-name)
+  (when (some->> page-name (ldb/get-page (conn/get-db)))
     (some? (parse-uuid page-name))))
 
 (defn get-all-whiteboards
@@ -818,7 +781,7 @@ independent of format as format specific heading characters are stripped"
         (:class-parent rules/rules))
    distinct))
 
-;; FIXME: async query
+;; FIXME: async query && use d/datoms instead of datalog
 (defn get-class-objects
   [repo class-id]
   (when-let [class (db-utils/entity repo class-id)]

@@ -2,8 +2,7 @@
   "Provides property types and related helper fns e.g. property value validation
   fns and their allowed schema attributes"
   (:require [datascript.core :as d]
-            [clojure.set :as set]
-            [logseq.common.util.macro :as macro-util]))
+            [clojure.set :as set]))
 
 ;; Config vars
 ;; ===========
@@ -16,18 +15,36 @@
 
 (def user-built-in-property-types
   "Valid property types for users in order they appear in the UI"
-  [:default :string :number :date :checkbox :url :page :template])
+  [:default :number :date :checkbox :url :page :object])
 
 (def closed-value-property-types
-  "Valid schema :type for closed values"
-  #{:string :number :url})
+  "Valid property :type for closed values"
+  #{:default :number :url})
+
+(def position-property-types
+  "Valid property :type for position"
+  #{:default :number :date :checkbox :url :page :object})
 
 (assert (set/subset? closed-value-property-types (set user-built-in-property-types))
         "All closed value types are valid property types")
 
+(def original-value-ref-property-types
+  "Property value ref types where the refed entity stores its value in
+  :property.value/content e.g. :number is stored as a number. new value-ref-property-types
+  should default to this as it allows for more querying power"
+  #{:number :url :checkbox})
+
+(def value-ref-property-types
+  "Property value ref types where the refed entities either store their value in
+  :property.value/content or :block/content (for :default)"
+  (into #{:default}
+        original-value-ref-property-types))
+
 (def ref-property-types
-  "User facing ref types"
-  #{:default :page :date})
+  "User facing ref types. Property values that users see are stored in either
+  :property.value/content, :block/content or :block/original-name.
+  :block/original-name is for all the page related types"
+  (into #{:page :date :object} value-ref-property-types))
 
 (assert (set/subset? ref-property-types
                      (set user-built-in-property-types))
@@ -37,14 +54,13 @@
   "Map of types to their set of allowed :schema attributes"
   (merge-with into
               (zipmap closed-value-property-types (repeat #{:values}))
-              (zipmap #{:string :number :url} (repeat #{:position}))
+              (zipmap position-property-types (repeat #{:position}))
               {:default #{:cardinality}
-               :string #{:cardinality}
                :number #{:cardinality}
                :date #{:cardinality}
                :url #{:cardinality}
                :page #{:cardinality :classes}
-               :template #{:classes}
+               :object #{:cardinality :classes}
                :checkbox #{}}))
 
 (assert (= (set user-built-in-property-types) (set (keys user-built-in-allowed-schema-attributes)))
@@ -65,32 +81,44 @@
          (catch :default _e
            false))))
 
-(defn macro-url?
-  [s]
-  ;; TODO: Confirm that macro expanded value is url when it's easier to pass data into validations
-  (macro-util/macro? s))
-
 (defn- entity?
   [db id]
   (some? (d/entity db id)))
 
-(defn- url-or-closed-url?
-  [db val]
-  (or (url? val)
-      (macro-url? val)
-      (when-let [ent (d/entity db val)]
-        (url? (:block/content ent)))))
+(defn- url-entity?
+  [db val {:keys [new-closed-value?]}]
+  (if new-closed-value?
+    (url? val)
+    (when-let [ent (d/entity db val)]
+      (url? (:property.value/content ent)))))
 
-(defn- property-value-block?
-  [db s]
-  (when-let [ent (d/entity db s)]
-    (and (:block/content ent)
-         (:logseq.property/created-from-property ent))))
+(defn- number-entity?
+  [db id-or-value {:keys [new-closed-value?]}]
+  (if new-closed-value?
+    (number? id-or-value)
+    (when-let [entity (d/entity db id-or-value)]
+      (number? (:property.value/content entity)))))
+
+(defn- checkbox-entity?
+  [db id]
+  (boolean? (:property.value/content (d/entity db id))))
+
+(defn- text-entity?
+  [db s {:keys [new-closed-value?]}]
+  (if new-closed-value?
+    (string? s)
+    (when-let [ent (d/entity db s)]
+      (string? (:block/content ent)))))
 
 (defn- page?
   [db val]
   (when-let [ent (d/entity db val)]
     (some? (:block/original-name ent))))
+
+(defn- object-entity?
+  [db val]
+  (when-let [ent (d/entity db val)]
+    (seq (:block/tags ent))))
 
 (defn- date?
   [db val]
@@ -98,38 +126,28 @@
     (and (some? (:block/original-name ent))
          (contains? (:block/type ent) "journal"))))
 
-(defn- string-or-closed-string?
-  [db s]
-  (or (string? s)
-      (when-let [entity (d/entity db s)]
-        (string? (:block/content entity)))))
 
 (def built-in-validation-schemas
   "Map of types to malli validation schemas that validate a property value for that type"
   {:default  [:fn
               {:error/message "should be a text block"}
-              property-value-block?]
-   :string   [:fn
-              {:error/message "should be a string"}
-              string-or-closed-string?]
+              text-entity?]
    :number   [:fn
               {:error/message "should be a number"}
-              ;; Also handles entity? so no need to use it
-              number?]
+              number-entity?]
    :date     [:fn
               {:error/message "should be a journal date"}
               date?]
-   :checkbox boolean?
+   :checkbox checkbox-entity?
    :url      [:fn
               {:error/message "should be a URL"}
-              url-or-closed-url?]
+              url-entity?]
    :page     [:fn
               {:error/message "should be a page"}
               page?]
-   ;; TODO: strict check on template
-   :template [:fn
-              {:error/message "should has #template"}
-              entity?]
+   :object   [:fn
+              {:error/message "should be a page/block with tags"}
+              object-entity?]
 
    ;; Internal usage
    ;; ==============
@@ -148,7 +166,7 @@
 
 (def property-types-with-db
   "Property types whose validation fn requires a datascript db"
-  #{:default :string :url :date :page :template :entity})
+  #{:default :checkbox :url :number :date :page :object :entity})
 
 ;; Helper fns
 ;; ==========

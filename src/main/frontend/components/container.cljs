@@ -34,6 +34,8 @@
             [frontend.handler.user :as user-handler]
             [frontend.handler.whiteboard :as whiteboard-handler]
             [frontend.handler.recent :as recent-handler]
+            [frontend.handler.db-based.property :as db-property-handler]
+            [frontend.handler.jump :as jump-handler]
             [frontend.mixins :as mixins]
             [frontend.mobile.action-bar :as action-bar]
             [frontend.mobile.footer :as footer]
@@ -283,6 +285,7 @@
         [el-rect set-el-rect!] (rum/use-state nil)
         ref-el              (rum/use-ref nil)
         ref-open?           (rum/use-ref left-sidebar-open?)
+        db-based?           (config/db-based-graph? (state/get-current-repo))
         default-home        (get-default-home-if-valid)
         route-name          (get-in route-match [:data :name])
         on-contents-scroll  #(when-let [^js el (.-target %)]
@@ -349,13 +352,6 @@
                                (close-fn)))}
 
       [:div.flex.flex-col.wrap.gap-1.relative
-       ;; temporarily remove fake hamburger menu
-       ;(when (mobile-util/native-platform?)
-       ;  [:div.fake-bar.absolute
-       ;   [:button
-       ;    {:on-click state/toggle-left-sidebar!}
-       ;    (ui/icon "menu-2" {:size ui/icon-size})]])
-
        [:nav.px-4.flex.flex-col.gap-1.cp__menubar-repos
         {:aria-label "Navigation menu"}
         (repo/repos-dropdown)
@@ -395,7 +391,7 @@
              :icon-extension? true
              :shortcut :go/whiteboards}))
 
-         (when (state/enable-flashcards? (state/get-current-repo))
+         (when (and (state/enable-flashcards? (state/get-current-repo)) (not db-based?))
            [:div.flashcards-nav
             (flashcards srs-open?)])
 
@@ -700,14 +696,13 @@
 (defn- hide-context-menu-and-clear-selection
   [e]
   (state/hide-custom-context-menu!)
-  (let [block (.closest (.-target e) ".ls-block")]
-    (when-not (or (gobj/get e "shiftKey")
-                  (util/meta-key? e)
-                  (state/get-edit-input-id)
-                  (and block
-                       (or (= block (.-target e))
-                           (.contains block (.-target e)))))
-      (editor-handler/clear-selection!))))
+  (when-not (or (gobj/get e "shiftKey")
+                (util/meta-key? e)
+                (state/get-edit-input-id)
+                (= (shui-dialog/get-last-modal-id) :property-dialog)
+                (some-> (.-target e) (.closest ".ls-block"))
+                (some-> (.-target e) (.closest "[data-keep-selection]")))
+    (editor-handler/clear-selection!)))
 
 (rum/defc render-custom-context-menu
   [links position]
@@ -837,8 +832,12 @@
                     (fn [content]
                       (shui/popup-show! e
                         (fn [{:keys [id]}]
-                          [:div {:on-click #(shui/popup-hide! id)} content])
-                        {:content-props {:class "w-[280px] ls-context-menu-content"}
+                          [:div {:on-click #(shui/popup-hide! id)
+                                 :data-keep-selection true}
+                           content])
+                        {:on-before-hide state/dom-clear-selection!
+                         :on-after-hide state/state-clear-selection!
+                         :content-props {:class "w-[280px] ls-context-menu-content"}
                          :as-dropdown? true}))
 
                     handled
@@ -872,15 +871,16 @@
   []
   nil)
 
-(rum/defcs ^:large-vars/cleanup-todo sidebar <
+(rum/defcs ^:large-vars/cleanup-todo root-container <
   (mixins/modal :modal/show?)
   rum/reactive
   (mixins/event-mixin
    (fn [state]
-     (mixins/listen state js/window "click" hide-context-menu-and-clear-selection)
+     (mixins/listen state js/window "pointerdown" hide-context-menu-and-clear-selection)
      (mixins/listen state js/window "keydown"
                     (fn [e]
-                      (when (= 27 (.-keyCode e))
+                      (cond
+                        (= 27 (.-keyCode e))
                         (if (and (state/modal-opened?)
                                  (not
                                   (and
@@ -888,11 +888,25 @@
                                    util/node-test?
                                    (state/editing?))))
                           (state/close-modal!)
-                          (hide-context-menu-and-clear-selection e)))))))
+                          (hide-context-menu-and-clear-selection e))
+
+                        (and
+                         (not (or (.-ctrlKey e) (.-metaKey e) (.-altKey e)))
+                         (not (util/input? (.-target e)))
+                         (not (seq @jump-handler/*jump-data))
+                         (not @(:editor/latest-shortcut @state/state))
+                         (not (state/editing?))
+                         (seq (state/get-selection-blocks)))
+                        (let [shift? (.-shiftKey e)
+                              shortcut (if shift? (str "shift+" (.-key e)) (.-key e))]
+                          (db-property-handler/set-property-by-shortcut! shortcut)))
+                      (state/set-ui-last-key-code! (.-key e))))
+     (mixins/listen state js/window "keyup"
+                    (fn [_e]
+                      (state/set-state! :editor/latest-shortcut nil)))))
   [state route-match main-content]
   (let [{:keys [open-fn]} state
         current-repo (state/sub :git/current-repo)
-        selection-mode? (state/sub :selection/mode)
         granted? (state/sub [:nfs/user-granted? (state/get-current-repo)])
         theme (state/sub :ui/theme)
         accent-color (some-> (state/sub :ui/radix-color) (name))
@@ -954,8 +968,11 @@
                      (when (= "Enter" (.-key e))
                        (ui/focus-element (ui/main-node))))}
        (t :accessibility/skip-to-main-content)]
-      [:div.#app-container (cond-> {} selection-mode?
-                             (assoc :class "blocks-selection-mode"))
+      [:div.#app-container {:on-pointer-up (fn []
+                                             (when-let [container (gdom/getElement "app-container")]
+                                               (d/remove-class! container "blocks-selection-mode")
+                                               (when (> (count (state/get-selection-blocks)) 1)
+                                                 (util/clear-selection!))))}
        [:div#left-container
         {:class (if (state/sub :ui/sidebar-open?) "overflow-hidden" "w-full")}
         (header/header {:open-fn        open-fn

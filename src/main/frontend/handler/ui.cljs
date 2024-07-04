@@ -12,9 +12,11 @@
             [frontend.state :as state]
             [frontend.storage :as storage]
             [frontend.util :as util]
+            [logseq.shui.dialog.core :as shui-dialog]
             [goog.dom :as gdom]
             [goog.object :as gobj]
             [logseq.common.path :as path]
+            [logseq.shui.ui :as shui]
             [promesa.core :as p]
             [rum.core :as rum]))
 
@@ -226,21 +228,10 @@
       ((or on-shift-chosen on-chosen) (nth matched @current-idx) false)
       (and on-enter (on-enter state)))))
 
-(defn auto-complete-open-link
-  [state e]
-  (let [[matched {:keys [on-chosen-open-link]}] (:rum/args state)]
-    (when (and on-chosen-open-link (not (state/editing?)))
-      (let [current-idx (get state :frontend.ui/current-idx)]
-        (util/stop e)
-        (when (and (seq matched)
-                   (> (count matched)
-                      @current-idx))
-          (on-chosen-open-link (nth matched @current-idx) false))))))
-
 (defn toggle-cards!
   []
-  (if (and (= :srs (:modal/id @state/state)) (:modal/show? @state/state))
-    (state/close-modal!)
+  (if (shui-dialog/get-modal :srs)
+    (shui/dialog-close!)
     (state/pub-event! [:modal/show-cards])))
 
 (defn open-new-window-or-tab!

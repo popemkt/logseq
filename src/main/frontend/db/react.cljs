@@ -8,7 +8,7 @@
             [frontend.db.conn :as conn]
             [frontend.db.utils :as db-utils]
             [frontend.state :as state]
-            [frontend.util :as util :refer [react]]
+            [frontend.util :as util]
             [clojure.core.async :as async]
             [frontend.db.async.util :as db-async-util]
             [promesa.core :as p]
@@ -34,13 +34,6 @@
   [k new-result]
   (when-let [result-atom (get-in @query-state [k :result])]
     (reset! result-atom new-result)))
-
-(def kv conn/kv)
-
-(defn remove-key!
-  [repo-url key]
-  (db-utils/transact! repo-url [[:db.fn/retractEntity [:db/ident key]]])
-  (set-new-result! [repo-url :kv key] nil))
 
 (defn clear-query-state!
   []
@@ -205,22 +198,6 @@
   [repo-url affected-keys]
   (when (and repo-url (seq affected-keys))
     (refresh-affected-queries! repo-url affected-keys)))
-
-(defn set-key-value
-  [repo-url key value]
-  (if value
-    (db-utils/transact! repo-url [(kv key value)])
-    (remove-key! repo-url key)))
-
-(defn sub-key-value
-  ([key]
-   (sub-key-value (state/get-current-repo) key))
-  ([repo-url key]
-   (when (conn/get-db repo-url)
-     (let [m (some-> (q repo-url [:kv key] {} key key) react)]
-       (if-let [result (get m key)]
-         result
-         m)))))
 
 (defn run-custom-queries-when-idle!
   []

@@ -1,6 +1,6 @@
 (ns logseq.db.frontend.order
   "Use fractional-indexing order for blocks/properties/closed values/etc."
-  (:require [logseq.common.fractional-index :as index]
+  (:require [logseq.clj-fractional-indexing :as index]
             [datascript.core :as d]))
 
 (defonce *max-key (atom nil))
@@ -34,6 +34,11 @@
   (let [ks (index/generate-n-keys-between start end n)]
     (reset-max-key! max-key-atom (last ks))
     ks))
+
+(defn validate-order-key?
+  [key]
+  (index/validate-order-key key index/base-62-digits)
+  true)
 
 (defn get-prev-order
   [db property value-id]

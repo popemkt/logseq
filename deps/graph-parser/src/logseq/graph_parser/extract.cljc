@@ -124,7 +124,7 @@
             first-block-name)))))
 
 (defn- extract-page-alias-and-tags
-  [page-m page page-name properties]
+  [page-m page-name properties]
   (let [alias (:alias properties)
         alias' (if (coll? alias) alias [(str alias)])
         aliases (and alias'
@@ -132,24 +132,11 @@
                                        (string/blank? %)) ;; disable blank alias
                                   alias')))
         aliases' (keep
-                   (fn [alias]
-                     (let [page-name (common-util/page-name-sanity-lc alias)
-                           aliases (distinct
-                                    (conj
-                                     (remove #{alias} aliases)
-                                     page))
-                           aliases (when (seq aliases)
-                                     (map
-                                       (fn [alias]
-                                         {:block/name (common-util/page-name-sanity-lc alias)})
-                                       aliases))]
-                       (if (seq aliases)
-                         {:block/name page-name
-                          :block/original-name alias
-                          :block/alias aliases}
-                         {:block/name page-name
-                          :block/original-name alias})))
-                   aliases)
+                  (fn [alias]
+                    (let [page-name (common-util/page-name-sanity-lc alias)]
+                      {:block/name page-name
+                       :block/original-name alias}))
+                  aliases)
         result (cond-> page-m
                  (seq aliases')
                  (assoc :block/alias aliases')
@@ -160,7 +147,7 @@
                                           tags (remove string/blank? tags)]
                                       (map (fn [tag] {:block/name (common-util/page-name-sanity-lc tag)
                                                       :block/original-name tag})
-                                        tags))))]
+                                           tags))))]
     (update result :block/properties #(apply dissoc % gp-property/editable-linkable-built-in-properties))))
 
 (defn- build-page-map
@@ -174,10 +161,10 @@
         page-m (->
                 (common-util/remove-nils-non-nested
                  (assoc
-                  (gp-block/page-name->map page false db true date-formatter
+                  (gp-block/page-name->map page db true date-formatter
                                            :from-page from-page)
                   :block/file {:file/path (common-util/path-normalize file)}))
-                (extract-page-alias-and-tags page page-name properties))]
+                (extract-page-alias-and-tags page-name properties))]
     (cond->
       page-m
 
@@ -225,7 +212,7 @@
           options' (assoc options :page-name page-name)
           ;; In case of diff-merge (2way) triggered, use the uuids to override the ones extracted from the AST
           override-uuids (resolve-uuid-fn format ast content options')
-          blocks (->> (gp-block/extract-blocks ast content false format options')
+          blocks (->> (gp-block/extract-blocks ast content format options')
                       (attach-block-ids-if-match override-uuids)
                       (mapv #(gp-block/fix-block-id-if-duplicated! db page-name extracted-block-ids %))
                       ;; FIXME: use page uuid
@@ -256,7 +243,7 @@
                               (when (text/namespace-page? page)
                                 (->> (common-util/split-namespace-pages page)
                                      (map (fn [page]
-                                            (-> (gp-block/page-name->map page true db true date-formatter)
+                                            (-> (gp-block/page-name->map page db true date-formatter)
                                                 (assoc :block/format format))))))))
           pages (->> (concat
                       [page-map]
@@ -267,7 +254,12 @@
                      (remove nil?))
           pages (common-util/distinct-by :block/name pages)
           pages (remove nil? pages)
-          pages (map (fn [page] (assoc page :block/uuid (d/squuid))) pages)
+          pages (map (fn [page]
+                       (let [page-id (or (when db
+                                           (:block/uuid (ldb/get-page db (:block/name page))))
+                                         (d/squuid))]
+                         (assoc page :block/uuid page-id)))
+                     pages)
           blocks (->> (remove nil? blocks)
                       (map (fn [b] (dissoc b :block/title :block/body :block/level :block/children :block/meta))))]
       [pages blocks])

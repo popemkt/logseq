@@ -19,14 +19,15 @@
                        :config {}
                        :git/current-repo nil
 
-                       :batch/txs []
-                       :batch/db-before nil
-                       :batch/opts nil
-
                        :rtc/downloading-graph? false
 
                        :undo/repo->page-block-uuid->undo-ops (atom {})
-                       :undo/repo->page-block-uuid->redo-ops (atom {})}))
+                       :undo/repo->page-block-uuid->redo-ops (atom {})
+
+                       ;; new implementation
+                       :undo/repo->ops (atom {})
+                       :redo/repo->ops (atom {})
+                       }))
 
 (defonce *rtc-ws-url (atom nil))
 
@@ -75,6 +76,12 @@
 (defn set-context!
   [context]
   (swap! *state assoc :worker/context context))
+
+(defn update-context!
+  [context]
+  (swap! *state update :worker/context
+         (fn [c]
+           (merge c context))))
 
 (defn get-config
   [repo]

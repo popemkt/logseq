@@ -18,7 +18,8 @@
             [frontend.handler.user :as user-handler]
             [frontend.handler.file-sync :as file-sync-handler]
             [logseq.common.path :as path]
-            [frontend.handler.property.util :as pu]))
+            [frontend.handler.property.util :as pu]
+            [logseq.db.frontend.property :as db-property]))
 
 (defn- delete-page!
   [page]
@@ -27,32 +28,32 @@
                           (notification/show! (str "Page " (:block/original-name page) " was deleted successfully!")
                                               :success))
                         {:error-handler (fn [{:keys [msg]}]
-                                          (notification/show! msg :warning))})
-  (state/close-modal!))
+                                          (notification/show! msg :warning))}))
 
 (defn delete-page-confirm!
   [page]
   (when page
     (-> (shui/dialog-confirm!
-         {:title [:h3.text-lg.leading-6.font-medium.flex.gap-2.items-center
-                  [:span.top-1.relative
-                   (shui/tabler-icon "alert-triangle")]
-                  (if (config/db-based-graph? (state/get-current-repo))
-                    (t :page/db-delete-confirmation)
-                    (t :page/delete-confirmation))]
-          :content [:p.opacity-60 (str "- " (:block/original-name page))]})
-        (p/then #(delete-page! page)))))
+          {:title [:h3.text-lg.leading-6.font-medium.flex.gap-2.items-center
+                   [:span.top-1.relative
+                    (shui/tabler-icon "alert-triangle")]
+                   (if (config/db-based-graph? (state/get-current-repo))
+                     (t :page/db-delete-confirmation)
+                     (t :page/delete-confirmation))]
+           :content [:p.opacity-60 (str "- " (:block/original-name page))]
+           :outside-cancel? true})
+      (p/then #(delete-page! page))
+      (p/catch #()))))
 
 (defn ^:large-vars/cleanup-todo page-menu
   [page]
-  (when page
-    (let [page-name (:block/name page)
-          repo (state/sub :git/current-repo)
+  (when-let [page-name (and page (db/page? page) (:block/name page))]
+    (let [repo (state/sub :git/current-repo)
           page-original-name (:block/original-name page)
           whiteboard? (contains? (set (:block/type page)) "whiteboard")
           block? (and page (util/uuid-string? page-name) (not whiteboard?))
           contents? (= page-name "contents")
-          public? (get page (pu/get-pid :logseq.property/public))
+          public? (pu/get-block-property-value page :logseq.property/public)
           _favorites-updated? (state/sub :favorites/updated?)
           favorited? (page-handler/favorited? page-name)
           developer-mode? (state/sub [:ui/developer-mode?])
@@ -99,18 +100,19 @@
           (when-not (or contents?
                         config/publishing?
                         (and db-based?
-                             (:logseq.property/built-in? page)))
+                             (db-property/property-value-content (:logseq.property/built-in? page))))
             {:title   (t :page/delete)
              :options {:on-click #(delete-page-confirm! page)}})
 
           (when (and (not (mobile-util/native-platform?))
-                     (state/get-current-page))
+                  (not whiteboard?)
+                  (state/get-current-page))
             {:title (t :page/slide-view)
              :options {:on-click (fn []
                                    (state/sidebar-add-block!
-                                    repo
-                                    (:db/id page)
-                                    :page-slide-view))}})
+                                     repo
+                                     (:db/id page)
+                                     :page-slide-view))}})
 
           ;; TODO: In the future, we'd like to extract file-related actions
           ;; (such as open-in-finder & open-with-default-app) into a sub-menu of
@@ -137,8 +139,7 @@
                        (fn []
                          (page-handler/update-public-attribute!
                           page
-                          (if public? false true))
-                         (state/close-modal!))}})
+                          (if public? false true)))}})
 
           (when (and (util/electron?) file-rpath
                      (not (file-sync-handler/synced-file-graph? repo)))
@@ -153,7 +154,7 @@
                :options {:on-click #(commands/exec-plugin-simple-command!
                                      pid (assoc cmd :page page-name) action)}}))
 
-          (when db-based?
+          (when (and db-based? (not whiteboard?))
             {:title (t :page/toggle-properties)
              :options {:on-click (fn []
                                    (page-handler/toggle-properties! page))}})

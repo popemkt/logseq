@@ -73,9 +73,11 @@
 
      (shui/dropdown-menu-item
       {:key "copy as"
-       :on-click (fn [_]
-                   (let [block-uuids (editor-handler/get-selected-toplevel-block-uuids)]
-                     (state/set-modal!
+       :on-pointer-down (fn [e]
+                   (util/stop-propagation e)
+                   (let [block-uuids (state/get-selection-block-ids)]
+                     (shui/popup-hide!)
+                     (shui/dialog-open!
                       #(export/export-blocks block-uuids {:whiteboard? false}))))}
       (t :content/copy-export-as))
 
@@ -150,36 +152,40 @@
       (reset! *template-including-parent? true))
 
     (if @edit?
-      (do
+      (let [submit! (fn []
+                      (let [title (string/trim @input)]
+                        (when (not (string/blank? title))
+                          (p/let [exists? (page-handler/<template-exists? title)]
+                            (if exists?
+                              (notification/show!
+                                [:p (t :context-menu/template-exists-warning)]
+                                :error)
+                              (p/do!
+                                (property-handler/set-block-property! repo block-id (pu/get-pid :logseq.property/template) title)
+                                (when (false? template-including-parent?)
+                                  (property-handler/set-block-property! repo block-id
+                                    (pu/get-pid :logseq.property/template-including-parent)
+                                    false))
+                                (shui/popup-hide!)))))))]
         (state/clear-edit!)
         [:<>
          [:div.px-4.py-2.text-sm {:on-click (fn [e] (util/stop e))}
           [:p (t :context-menu/input-template-name)]
           [:input#new-template.form-input.block.w-full.sm:text-sm.sm:leading-5.my-2
            {:auto-focus true
+            :on-key-down (fn [e]
+                           (util/stop-propagation e)
+                           (when (and (= "Enter" (util/ekey e))
+                                   (not (string/blank? (util/trim-safe @input))))
+                             (submit!)))
             :on-change (fn [e]
                          (reset! input (util/evalue e)))}]
           (when has-children?
             (template-checkbox template-including-parent?))
-          (ui/button (t :submit)
-                     :on-click (fn []
-                                 (let [title (string/trim @input)]
-                                   (when (not (string/blank? title))
-                                     (p/let [exists? (page-handler/<template-exists? title)]
-                                       (if exists?
-                                         (notification/show!
-                                          [:p (t :context-menu/template-exists-warning)]
-                                          :error)
-                                         (p/do!
-                                          (property-handler/set-block-property! repo block-id (pu/get-pid :logseq.property/template) title)
-                                          (when (false? template-including-parent?)
-                                            (property-handler/set-block-property! repo block-id
-                                                                                  (pu/get-pid :logseq.property/template-including-parent)
-                                                                                  false))
-                                          (state/hide-custom-context-menu!))))))))]
+          (ui/button (t :submit) :on-click submit!)]
          (shui/dropdown-menu-separator)])
       (shui/dropdown-menu-item
-       {:key "Make a Template"
+        {:key "Make a Template"
         :on-click (fn [e]
                     (util/stop e)
                     (reset! edit? true))}
@@ -243,7 +249,8 @@
          (shui/dropdown-menu-item
           {:key      "Copy as"
            :on-click (fn [_]
-                       (state/set-modal! #(export/export-blocks [block-id] {:whiteboard? false})))}
+                       (shui/dialog-open!
+                         #(export/export-blocks [block-id] {:whiteboard? false})))}
           (t :content/copy-export-as))
 
          (shui/dropdown-menu-item

@@ -13,15 +13,29 @@
             [frontend.state :as state]
             [frontend.handler.db-based.property.util :as db-pu]
             [logseq.db :as ldb]
-            [logseq.db.frontend.property :as db-property]))
+            [logseq.db.frontend.property :as db-property]
+            [frontend.db.conn :as conn]))
 
 (defn loaded? []
   js/window.Reveal)
 
 (defn- with-properties
   [m block]
-  (let [db-based? (config/db-based-graph? (state/get-current-repo))
-        properties (if db-based? (db-property/properties block) (:block/properties block))]
+  (let [repo (state/get-current-repo)
+        db-based? (config/db-based-graph? repo)
+        properties (if db-based?
+                     (as-> (db-property/properties block) properties
+                       (->> properties
+                            (keep (fn [[k v]]
+                                    ;; Don't inject hidden props like created-from-property
+                                    (when-not (:hide? (:block/schema (db/entity repo k)))
+                                      [k
+                                       (if (:db/id v)
+                                         ;; Can't use db-property-util/lookup b/c vals aren't entities
+                                         (db-property/ref->property-value-content (conn/get-db) v)
+                                         v)])))
+                            (into {})))
+                     (:block/properties block))]
     (if (seq properties)
       (merge m
              (update-keys
@@ -96,7 +110,7 @@
         repo (state/get-current-repo)
         blocks (-> (db/get-page-blocks-no-cache repo (:db/id page))
                    (outliner-tree/blocks->vec-tree (:db/id page)))
-        blocks (if journal?
+        blocks (if (and journal? (not (config/db-based-graph? repo)))
                  (rest blocks)
                  blocks)
         blocks (map (fn [block]

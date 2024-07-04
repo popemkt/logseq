@@ -24,7 +24,6 @@
  :help/reference-autocomplete "Completamento automatico del riferimento di pagina"
  :help/block-reference "Riferimento di blocco"
  :help/open-link-in-sidebar "Apri il link nel pannello laterale"
- :search/page-names "Cerca pagine per nome"
  :help/context-menu "Menù contestuale del blocco"
  :help/markdown-syntax "Sintassi Markdown"
  :help/org-mode-syntax "Sintassi Org mode"
@@ -56,9 +55,7 @@
  :page/delete "Elimina pagina"
  :page/add-to-favorites "Aggiungi ai Preferiti"
  :page/unfavorite "Rimuovi la pagina dai Preferiti"
- :page/show-journals "Mostra diario"
  :block/name "Nome pagina"
- :page/earlier "Prima"
  :page/copy-page-url "Copia URL pagina"
  :file/name "Nome File"
  :file/last-modified-at "Ultima modifica alle"
@@ -187,9 +184,6 @@
  :pdf/toggle-dashed "Stile tratteggiato per evidenziare l'area"
  :updater/new-version-install "Una nuova versione è stata scaricata."
  :updater/quit-and-install "Riavvia per installarla"
- :paginates/pages "Totale {1} pagine"
- :paginates/prev "Precedente"
- :paginates/next "Successivo"
  :select/default-prompt "Selezionane uno"
  :select.graph/prompt "Seleziona un grafo"
  :select.graph/empty-placeholder-description "Non ci sono grafi corrispondenti. Vuoi aggiungerne uno nuovo?"
@@ -205,7 +199,6 @@
  :command.auto-complete/prev "Auto completamento: Seleziona l'oggetto precedente"
  :command.auto-complete/next "Auto completamento: Seleziona l'oggetto successivo"
  :command.auto-complete/shift-complete "Auto completamento: Apri l'oggetto selezionato nel pannello laterale"
- :command.auto-complete/open-link "Auto completamento: Apri l'oggetto selezionato nel browser"
  :command.cards/toggle-answers "Carte: mostra/nascondi risposte/chiusure"
  :command.cards/next-card "Carte: prossima carta"
  :command.cards/forgotten "Carte: dimenticato"
@@ -657,7 +650,6 @@
  :whiteboard/arrow-head "Punta della freccia"
  :whiteboard/auto-resize "Ridimensiona automaticamente"
  :whiteboard/bold "Grassetto"
- :whiteboard/cache-outdated "La cache è obsoleta. Clicca 'Re-indicizza' nel menù a discesa del grafo."
  :whiteboard/circle "Cerchio"
  :whiteboard/collapse "Collassa"
  :whiteboard/color "Colore"
@@ -755,5 +747,4 @@
  :linked-references/filter-includes "Include: "
  :linked-references/reference-count (fn [filtered-count total] (str (when filtered-count (str filtered-count " di ")) total (if (= total 1) " Riferimento Collegato" " Riferimenti Collegati")))
  :settings-page/git-commit-on-close "Esegui commit Git alla chiusura della finestra"
- :unlinked-references/reference-count (fn [total] (str total (if (= total 1) " Riferimento Scollegato" " Riferimenti Scollegati")))
- :whiteboard/reference-count (fn [refs-count] (if (= refs-count 1) "Riferimento" "Riferimenti"))}
+ :unlinked-references/reference-count (fn [total] (str total (if (= total 1) " Riferimento Scollegato" " Riferimenti Scollegati")))}

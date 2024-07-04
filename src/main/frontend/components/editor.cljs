@@ -26,6 +26,7 @@
             [frontend.util.keycode :as keycode]
             [goog.dom :as gdom]
             [goog.string :as gstring]
+            [dommy.core :as dom]
             [logseq.graph-parser.property :as gp-property]
             [logseq.common.util :as common-util]
             [promesa.core :as p]
@@ -147,9 +148,11 @@
                           (empty? matched-pages)
                           (when-not (db/page-exists? q)
                             (if db-tag?
-                              (concat [(str (t :new-class) " " q)]
+                              (concat [(str (t :new-page) " " q)
+                                       (str (t :new-class) " " q)]
                                       matched-pages)
-                              (cons q matched-pages)))
+                              (cons (str (t :new-page) " " q)
+                                    matched-pages)))
 
                           ;; reorder, shortest and starts-with first.
                           :else
@@ -383,7 +386,7 @@
 (rum/defc code-block-mode-picker < rum/reactive
   [id format]
   (when-let [modes (some->> js/window.CodeMirror (.-modes) (js/Object.keys) (js->clj) (remove #(= "null" %)))]
-    (when-let [input (gdom/getElement id)]
+    (when-let [^js input (gdom/getElement id)]
       (let [pos          (state/get-editor-last-pos)
             current-pos  (cursor/pos input)
             edit-content (or (state/sub-edit-content) "")
@@ -401,13 +404,18 @@
                                                  last-pattern (str "```" q)]
                                              (editor-handler/insert-command! id
                                                                              prefix format {:last-pattern last-pattern})
-                                             (commands/handle-step [:codemirror/focus])))
-                            :on-enter    (fn []
-                                           (state/clear-editor-action!)
-                                           (commands/handle-step [:codemirror/focus]))
+                                             (-> (editor-handler/save-block!
+                                                   (state/get-current-repo)
+                                                   (:block/uuid (state/get-edit-block))
+                                                   (.-value input))
+                                               (p/then #(commands/handle-step [:codemirror/focus])))
+                                             ))
+                            :on-enter (fn []
+                                        (state/clear-editor-action!)
+                                        (commands/handle-step [:codemirror/focus]))
                             :item-render (fn [mode _chosen?]
                                            [:strong mode])
-                            :class       "code-block-mode-picker"})]))))
+                            :class "code-block-mode-picker"})]))))
 
 (rum/defcs input < rum/reactive
                    (rum/local {} ::input-value)
@@ -415,14 +423,14 @@
                      (fn [state]
                        (mixins/on-key-down
                          state
-      {;; enter
-       13 (fn [state e]
-            (let [input-value (get state ::input-value)
-                  input-option (:options (state/get-editor-show-input))]
-              (when (seq @input-value)
-                ;; no new line input
-                (util/stop e)
-                (let [[_id on-submit] (:rum/args state)
+                         {;; enter
+                          13 (fn [state e]
+                               (let [input-value (get state ::input-value)
+                                     input-option (:options (state/get-editor-show-input))]
+                                 (when (seq @input-value)
+                                   ;; no new line input
+                                   (util/stop e)
+                                   (let [[_id on-submit] (:rum/args state)
                       command (:command (first input-option))]
                   (on-submit command @input-value))
                 (reset! input-value nil))))
@@ -689,69 +697,6 @@
         set-default-width?
         pos)))))
 
-(rum/defc editor-action-query-wrap
-  [trigger children & {:keys [on-input-keydown sub-input-keydown?]}]
-  (let [[q set-q!] (rum/use-state "")
-        [keydown-e set-keydown-e!] (rum/use-state nil)]
-
-    (rum/use-effect!
-      (fn []
-        (when-let [^js input (state/get-input)]
-          (let [keyup-handle (fn []
-                               (let [content (.-value input)
-                                     pos (some-> (cursor/get-caret-pos input) :pos)
-                                     content (subs content 0 pos)
-                                     pos (string/last-index-of content trigger)
-                                     content (subs content (inc pos))]
-                                 (-> (p/delay 300)
-                                   (p/then #(set-q! content)))))
-                keydown-handle (fn [^js e]
-                                 (when-not (false? (when (fn? on-input-keydown)
-                                                     (on-input-keydown e)))
-                                   (case (.-key e)
-                                     ("ArrowUp" "ArrowDown")
-                                     (.preventDefault e)
-                                     :dune))
-                                 (when sub-input-keydown?
-                                   (set-keydown-e! e)))]
-            (doto input
-              (.addEventListener "keyup" keyup-handle false)
-              (.addEventListener "keydown" keydown-handle false))
-            #(doto input
-               (.removeEventListener "keyup" keyup-handle)
-               (.removeEventListener "keydown" keydown-handle)))))
-      [])
-
-    (children q keydown-e)))
-
-(rum/defc ask-ai-content
-  [query  {:keys [id format action ^js keydown-e]}]
-  (let [*el (rum/use-ref nil)]
-    (rum/use-effect!
-      (fn []
-        (when keydown-e
-          (when (contains? #{"ArrowUp" "ArrowDown"} (.-key keydown-e))
-            (some-> (rum/deref *el)
-              (.querySelector ".ui__button")
-              (.focus)))))
-      [keydown-e])
-
-    [:h1
-     {:ref *el}
-     [:p.text-sm [:blockquote id]]
-     [:p "TODO: " (str action) [:code query]]
-     [:p (shui/button
-           {:size :sm
-            :on-click (fn []
-                        (editor-handler/insert-command!
-                          id #(util/format " [[%s]] " query)
-                          format
-                          {:restore? true
-                           :backward-truncate-number (inc (count query))
-                           :command action})
-                        )} query)]
-     [:p "input key: " (shui/badge (some-> keydown-e (.-key)))]]))
-
 (defn- exist-editor-commands-popup?
   []
   (some->> (shui-popup/get-popups)
@@ -827,20 +772,6 @@
                                        :data-editor-popup-ref "code-block-mode-picker"}
                        :force-popover? true})
 
-                    :editor.action/ask-ai
-                    (shui/popup-show!
-                      pos (editor-action-query-wrap
-                            commands/command-ask
-                            (fn [query ^js keydown-e]
-                              (ask-ai-content query
-                                {:id id :format format :action action :keydown-e keydown-e}))
-                            {:sub-input-keydown? true})
-                      {:id :editor.commands/ask-ai
-                       :align :start
-                       :root-props {:onOpenChange #(when-not % (state/clear-editor-action!))}
-                       :content-props {:onOpenAutoFocus #(.preventDefault %)}
-                       :force-popover? true})
-
                     ;; TODO: try remove local model state
                     false)]
           #(when pid
@@ -882,58 +813,77 @@
        :else
        nil)]))
 
-(defn- editor-on-blur
-  [^js e]
-  (cond
-    (let [action (state/get-editor-action)]
+(defn- editor-on-hide
+  [state value* type e]
+  (let [repo (state/get-current-repo)
+        action (state/get-editor-action)
+        [opts _id config] (:rum/args state)
+        block (:block opts)
+        value (or value* "")]
+    (cond
+      (and (= type :esc) (exist-editor-commands-popup?))
+      nil
+
       (or (contains?
-            #{:commands :block-commands
-              :page-search :page-search-hashtag :block-search :template-search
-              :property-search :property-value-search
-              :datepicker} action)
-        (and (keyword? action)
-          (= (namespace action) "editor.action"))))
-    ;; FIXME: This should probably be handled as a keydown handler in editor, but this handler intercepts Esc first
-    (util/stop e)
+           #{:commands :block-commands
+             :page-search :page-search-hashtag :block-search :template-search
+             :property-search :property-value-search
+             :datepicker} action)
+          (and (keyword? action)
+               (= (namespace action) "editor.action")))
+      (when e (util/stop e))
 
-    ;; editor/input component handles Escape directly, so just prevent handling it here
-    (= :input (state/get-editor-action))
-    nil
+      ;; editor/input component handles Escape directly, so just prevent handling it here
+      (= :input action)
+      nil
 
-    :else
-    (let [{:keys [on-hide value]} (editor-handler/get-state)]
-      (when on-hide
-        (on-hide value nil)))))
+      :else
+      (let [select? (and (= type :esc)
+                         (not (string/includes? value "```")))]
+        (when-let [container (gdom/getElement "app-container")]
+          (dom/remove-class! container "blocks-selection-mode"))
+        (p/do!
+         (editor-handler/save-block! repo (:block/uuid block) value)
+         (editor-handler/escape-editing select?)
+         (some-> config :on-escape-editing
+                 (apply [(str uuid) (= type :esc)])))))))
 
 (rum/defcs box < rum/reactive
   {:init (fn [state]
-           (assoc state ::id (str (random-uuid))))
+           (assoc state
+                  ::id (str (random-uuid))
+                  ::ref (atom nil)))
    :did-mount (fn [state]
                 (state/set-editor-args! (:rum/args state))
                 state)}
+  (mixins/event-mixin
+   (fn [state]
+     (mixins/hide-when-esc-or-outside
+      state
+      {:node @(::ref state)
+       :on-hide (fn [_state e type]
+                  (when-not (= type :esc)
+                    (editor-on-hide state (:value (editor-handler/get-state)) type e)))})))
   (mixins/event-mixin setup-key-listener!)
   lifecycle/lifecycle
-  [state {:keys [format block parent-block on-hide]} id config]
-  (let [content (state/sub-edit-content (:block/uuid block))
+  [state {:keys [format block parent-block]} id config]
+  (let [*ref (::ref state)
+        content (state/sub-edit-content (:block/uuid block))
         heading-class (get-editor-style-class block content format)
         opts (cond->
               {:id                id
+               :ref               #(reset! *ref %)
                :cacheMeasurements (editor-row-height-unchanged?) ;; check when content updated (as the content variable is binded)
                :default-value     (or content "")
                :minRows           (if (state/enable-grammarly?) 2 1)
                :on-click          (editor-handler/editor-on-click! id)
                :on-change         (editor-handler/editor-on-change! block id search-timeout)
                :on-paste          (paste-handler/editor-on-paste! id)
-               :on-blur           (fn [e]
-                                    (if-let [on-blur (:on-blur config)]
-                                      (on-blur e)
-                                      (editor-on-blur e)))
                :on-key-down       (fn [e]
                                     (if-let [on-key-down (:on-key-down config)]
                                       (on-key-down e)
-                                      (when (and (= (util/ekey e) "Escape") on-hide)
-                                        (when-not (exist-editor-commands-popup?)
-                                          (on-hide content :esc)))))
+                                      (when (= (util/ekey e) "Escape")
+                                        (editor-on-hide state content :esc e))))
                :auto-focus true
                :class heading-class}
                (some? parent-block)

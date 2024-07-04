@@ -3,13 +3,14 @@
   (:require [clojure.set :as set]
             [datascript.core :as d]
             [frontend.schema-register :include-macros true :as sr]
-            [frontend.worker.batch-tx :include-macros true :as batch-tx]
+            [logseq.outliner.batch-tx :include-macros true :as batch-tx]
             [frontend.worker.db-listener :as db-listener]
             [frontend.worker.state :as worker-state]
             [logseq.common.config :as common-config]
             [logseq.common.util :as common-util]
             [logseq.outliner.core :as outliner-core]
             [logseq.outliner.transaction :as outliner-tx]
+            [logseq.db :as ldb]
             [malli.core :as m]
             [malli.util :as mu]))
 
@@ -353,7 +354,7 @@ when undo this op, this original entity-map will be transacted back into db")
                                            (nil? block-origin-link))
                                       (conj [:db/retract db-id :block/link]))
               _ (when (seq retract-attrs-tx-data)
-                  (d/transact! conn retract-attrs-tx-data {:gen-undo-ops? false}))
+                  (ldb/transact! conn retract-attrs-tx-data {:gen-undo-ops? false}))
               new-block (cond-> block-entity
                           (some? block-origin-content)
                           (assoc :block/content block-origin-content)
@@ -553,13 +554,14 @@ when undo this op, this original entity-map will be transacted back into db")
                        (:gen-undo-boundary-op? tx-meta true)
                        tx-meta)))
 
-(defn record-editor-info!
-  [repo page-block-uuid editor-info]
-  (swap! (:undo/repo->page-block-uuid->undo-ops @worker-state/*state)
-         update-in [repo page-block-uuid]
-         (fn [stack]
-           (when (seq stack)
-             (conj (vec stack) [::record-editor-info editor-info])))))
+(comment
+  (defn record-editor-info!
+    [repo page-block-uuid editor-info]
+    (swap! (:undo/repo->page-block-uuid->undo-ops @worker-state/*state)
+           update-in [repo page-block-uuid]
+           (fn [stack]
+             (when (seq stack)
+               (conj (vec stack) [::record-editor-info editor-info]))))))
 
 ;;; listen db changes and push undo-ops (ends)
 
