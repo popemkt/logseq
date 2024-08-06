@@ -1,16 +1,18 @@
 (ns logseq.db.sqlite.util
   "Utils fns for backend sqlite db"
-  (:require [clojure.string :as string]
-            [logseq.db.frontend.schema :as db-schema]
-            [logseq.common.util :as common-util]
+  (:require [cljs-bean.transit]
+            [clojure.string :as string]
             [cognitect.transit :as transit]
-            [datascript.transit :as dt]
-            [datascript.impl.entity :as de]
             [datascript.core :as d]
-            [cljs-bean.transit]
-            [logseq.db.frontend.property.type :as db-property-type]
+            [datascript.impl.entity :as de]
+            [datascript.transit :as dt]
+            [logseq.common.util :as common-util]
+            [logseq.common.uuid :as common-uuid]
+            [logseq.common.config :as common-config]
+            [logseq.db.frontend.order :as db-order]
             [logseq.db.frontend.property :as db-property]
-            [logseq.db.frontend.order :as db-order]))
+            [logseq.db.frontend.property.type :as db-property-type]
+            [logseq.db.frontend.schema :as db-schema]))
 
 (defonce db-version-prefix "logseq_db_")
 (defonce file-version-prefix "logseq_local_")
@@ -75,15 +77,15 @@
 (defn build-new-property
   "Build a standard new property so that it is is consistent across contexts. Takes
    an optional map with following keys:
-   * :original-name - Case sensitive property name. Defaults to deriving this from db-ident
+   * :title - Case sensitive property name. Defaults to deriving this from db-ident
    * :block-uuid - :block/uuid for property"
   ([db-ident prop-schema] (build-new-property db-ident prop-schema {}))
-  ([db-ident prop-schema {:keys [original-name block-uuid ref-type?]}]
+  ([db-ident prop-schema {:keys [title block-uuid ref-type?]}]
    (assert (keyword? db-ident))
    (let [db-ident' (if (qualified-keyword? db-ident)
                      db-ident
                      (db-property/create-user-property-ident-from-name (name db-ident)))
-         prop-name (or original-name (name db-ident'))
+         prop-name (or title (name db-ident'))
          classes (:classes prop-schema)
          prop-schema (assoc prop-schema :type (get prop-schema :type :default))]
      (block-with-timestamps
@@ -93,8 +95,8 @@
         :block/format :markdown
         :block/schema (merge {:type :default} (dissoc prop-schema :classes :cardinality))
         :block/name (common-util/page-name-sanity-lc (name prop-name))
-        :block/uuid (or block-uuid (d/squuid))
-        :block/original-name (name prop-name)
+        :block/uuid (or block-uuid (common-uuid/gen-uuid :db-ident-block-uuid db-ident'))
+        :block/title (name prop-name)
         :db/index true
         :db/cardinality (if (= :many (:cardinality prop-schema))
                           :db.cardinality/many
@@ -106,27 +108,54 @@
         (assoc :db/valueType :db.type/ref))))))
 
 (defn build-new-class
-  "Build a standard new class so that it is is consistent across contexts"
+  "Build a standard new class so that it is consistent across contexts"
   [block]
   {:pre [(qualified-keyword? (:db/ident block))]}
   (block-with-timestamps
-   (merge (cond->
-           {:block/type "class"
-            :block/format :markdown}
-            (not= (:db/ident block) :logseq.class/Root)
-            (assoc :class/parent :logseq.class/Root))
-          block)))
+   (cond-> (merge block
+                  {:block/type "class"
+                   :block/format :markdown})
+     (not= (:db/ident block) :logseq.class/Root)
+     (assoc :class/parent :logseq.class/Root))))
 
 (defn build-new-page
   "Builds a basic page to be transacted. A minimal version of gp-block/page-name->map"
   [page-name]
   (block-with-timestamps
    {:block/name (common-util/page-name-sanity-lc page-name)
-    :block/original-name page-name
+    :block/title page-name
     :block/uuid (d/squuid)
-    :block/format :markdown}))
+    :block/format :markdown
+    :block/type "page"}))
 
 (defn page?
   [block]
-  (and (:block/name block)
-       (nil? (:block/page block))))
+  (contains? #{"page" "journal" "whiteboard" "class" "property" "hidden"}
+             (:block/type block)))
+
+(defn class?
+  [entity]
+  (= (:block/type entity) "class"))
+(defn property?
+  [entity]
+  (= (:block/type entity) "property"))
+(defn closed-value?
+  [entity]
+  (= (:block/type entity) "closed value"))
+(defn whiteboard?
+  "Given a page entity or map, check if it is a whiteboard page"
+  [page]
+  (= (:block/type page) "whiteboard"))
+
+(defn journal?
+  "Given a page entity or map, check if it is a journal page"
+  [page]
+  (= (:block/type page) "journal"))
+
+(defn hidden?
+  [page]
+  (when page
+    (if (string? page)
+      (or (string/starts-with? page "$$$")
+          (= common-config/favorites-page-name page))
+      (= (:block/type page) "hidden"))))

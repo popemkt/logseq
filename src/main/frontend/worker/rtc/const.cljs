@@ -37,7 +37,7 @@
      [:map
       [:block-uuid :uuid]
       [:page-name :string]
-      [:original-name :string]]]]
+      [:block/title :string]]]]
    [:remove-page
     [:cat :keyword
      [:map
@@ -59,7 +59,9 @@
       [:db/cardinality {:optional true} :keyword]
       [:db/index {:optional true} :boolean]]]]])
 
-(def to-ws-ops-validator (m/validator [:sequential to-ws-op-schema]))
+(comment
+  (def to-ws-ops-validator (m/validator [:sequential to-ws-op-schema])))
+
 (def to-ws-ops-decoder (m/decoder [:sequential to-ws-op-schema] mt/string-transformer))
 
 (def ^:private extra-attr-map-schema
@@ -70,17 +72,30 @@
     [:sequential [:or :uuid :string]]]])
 
 (def data-from-ws-schema
+  "TODO: split this mix schema to multiple ones"
   [:map
    [:req-id :string]
    [:t {:optional true} :int]
    [:t-before {:optional true} :int]
    [:failed-ops {:optional true} [:sequential to-ws-op-schema]]
    [:s3-presign-url {:optional true} :string]
-   [:diff-data {:optional true} [:map-of :keyword :any]]
-   [:online-users {:optional true} [:sequential [:map
-                                                 [:user/uuid :uuid]
-                                                 [:user/name :string]
-                                                 [:user/email :string]]]]
+   [:server-schema-version {:optional true} :int]
+   [:server-only-db-ident-blocks {:optional true} [:maybe :string] ;;transit
+    ]
+   [:users {:optional true} [:sequential
+                             [:map {:closed true}
+                              [:user/uuid :uuid]
+                              [:user/name :string]
+                              [:user/email :string]
+                              [:user/online? :boolean]
+                              [:user/avatar {:optional true} :string]
+                              [:graph<->user/user-type :keyword]]]]
+   [:online-users {:optional true} [:sequential
+                                    [:map {:closed true}
+                                     [:user/uuid :uuid]
+                                     [:user/name :string]
+                                     [:user/email :string]
+                                     [:user/avatar {:optional true} :string]]]]
    [:refed-blocks {:optional true}
     [:maybe
      [:sequential
@@ -127,8 +142,7 @@
        [:map
         [:op :keyword]
         [:self :uuid]
-        [:page-name :string]
-        [:block/original-name :string]
+        [:block/title :string]
         [:db/ident {:optional true} :keyword]
         [:block/order {:optional true} db-malli-schema/block-order]
         [::m/default extra-attr-map-schema]]]
@@ -136,6 +150,7 @@
        [:map
         [:op :keyword]
         [:block-uuid :uuid]]]]]]
+   [:asset-uuid->url {:optional true} [:map-of :uuid :string]]
    [:ex-data {:optional true} [:map [:type :keyword]]]
    [:ex-message {:optional true} :string]])
 
@@ -220,14 +235,24 @@
       [:action :string]
       [:graph-uuid :string]
       [:t :int]
+      [:schema-version :int]
       [:db-ident-blocks [:sequential
                          [:map
-                          [:block/uuid :uuid]
                           [:db/ident :keyword]
-                          [:block/parent {:optional true} :uuid]
-                          [:block/type {:optional true} [:set :string]]
-                          [:block/order {:optional true} :string]
-                          [:block/content {:optional true} :string]]]]]]]))
+                          [::m/default extra-attr-map-schema]]]]]]
+
+    ["get-assets-upload-urls"
+     [:map
+      [:req-id :string]
+      [:action :string]
+      [:graph-uuid :string]
+      [:asset-uuid->metadata [:map-of :uuid [:map-of :string :string]]]]]
+    ["get-assets-download-urls"
+     [:map
+      [:req-id :string]
+      [:action :string]
+      [:graph-uuid :string]
+      [:asset-uuids [:sequential :uuid]]]]]))
 (def data-to-ws-encoder (m/encoder data-to-ws-schema (mt/transformer
                                                       mt/string-transformer
                                                       (mt/key-transformer {:encode m/-keyword->string}))))

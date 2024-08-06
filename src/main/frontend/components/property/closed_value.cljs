@@ -63,7 +63,7 @@
            (let [block (second (:rum/args state))
                  value (or (str (db-property/closed-value-content block)) "")
                  icon (:logseq.property/icon block)
-                 description (or (get-in block [:block/schema :description]) "")]
+                 description (or (db-property/property-value-content (:logseq.property/description block)) "")]
              (assoc state
                     ::value (atom value)
                     ::icon (atom icon)
@@ -102,7 +102,7 @@
                              :title "Delete this icon"}
           (ui/icon "X")])]]
      ;; Disable description for types that can't edit them
-     (when-not (#{:page :date} property-type)
+     (when-not (#{:node :date} property-type)
        [:div.grid.grid-cols-5.gap-1.items-start.leading-8
         [:label.col-span-2 "Description:"]
         [:div.col-span-3
@@ -117,7 +117,7 @@
   [state item {:keys [toggle-fn delete-choice update-icon]} parent-opts]
   (let [*hover? (::hover? state)
         value (db-property/closed-value-content item)
-        page? (:block/original-name item)
+        page? (db/page? item)
         property-block? (db-property/property-created-block? item)]
     [:div.flex.flex-1.flex-row.items-center.gap-2.justify-between
      {:on-mouse-over #(reset! *hover? true)
@@ -174,7 +174,7 @@
               :update-icon
               (fn [icon]
                 (property-handler/set-block-property! (state/get-current-repo) (:block/uuid block) :logseq.property/icon
-                                                      (select-keys icon [:id :type]))))
+                                                      (select-keys icon [:id :type :color]))))
        parent-opts))))
 
 (rum/defc add-existing-values

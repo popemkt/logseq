@@ -120,7 +120,7 @@
 
    :block-content
    '[(block-content ?b ?query)
-     [?b :block/content ?content]
+     [?b :block/title ?content]
      [(clojure.string/includes? ?content ?query)]]
 
    :page
@@ -170,12 +170,19 @@
     :page-property
     '[(page-property ?p ?prop ?val)
       [?p :block/name]
-      [?p ?prop ?pv]
-      (or [?pv :block/content ?val]
-          [?pv :property.value/content ?val]
-          [?pv :block/original-name ?val])
       [?prop-e :db/ident ?prop]
-      [?prop-e :block/type "property"]]
+      [?prop-e :block/type "property"]
+      [?p ?prop ?pv]
+      (or
+       ;; non-ref value
+       (and
+        [(missing? $ ?prop-e :db/valueType)]
+        [?p ?prop ?val])
+       ;; ref value
+       (and
+        [?prop-e :db/valueType :db.type/ref]
+        (or [?pv :block/title ?val]
+            [?pv :property.value/content ?val])))]
 
     :has-property
     '[(has-property ?b ?prop)
@@ -186,13 +193,20 @@
 
     :property
     '[(property ?b ?prop ?val)
-      [?b ?prop ?pv]
-      (or [?pv :block/content ?val]
-          [?pv :property.value/content ?val]
-          [?pv :block/original-name ?val])
-      [(missing? $ ?b :block/name)]
       [?prop-e :db/ident ?prop]
-      [?prop-e :block/type "property"]]
+      [?prop-e :block/type "property"]
+      [?b ?prop ?pv]
+      (or
+       ;; non-ref value
+       (and
+        [(missing? $ ?prop-e :db/valueType)]
+        [?b ?prop ?val])
+       ;; ref value
+       (and
+        [?prop-e :db/valueType :db.type/ref]
+        (or [?pv :block/title ?val]
+            [?pv :property.value/content ?val])))
+      [(missing? $ ?b :block/name)]]
 
     :task
     '[(task ?b ?statuses)

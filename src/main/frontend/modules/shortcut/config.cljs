@@ -348,7 +348,22 @@
                                                         (when e (.preventDefault e))
                                                         (state/pub-event! [:editor/new-property {}]))}
 
-   :ui/toggle-brackets                      {:binding "mod+c mod+b"
+   :editor/add-property-deadline            {:binding "p d"
+                                             :selection? true
+                                             :fn      (fn []
+                                                        (state/pub-event! [:editor/new-property {:property-key "Deadline"}]))}
+
+   :editor/add-property-status              {:binding "p s"
+                                             :selection? true
+                                             :fn      (fn []
+                                                        (state/pub-event! [:editor/new-property {:property-key "Status"}]))}
+
+   :editor/add-property-priority            {:binding "p p"
+                                             :selection? true
+                                             :fn      (fn []
+                                                        (state/pub-event! [:editor/new-property {:property-key "Priority"}]))}
+
+   :ui/toggle-brackets                      {:binding "t b"
                                              :fn      config-handler/toggle-ui-show-brackets!}
 
    :go/search                               {:binding "mod+k"
@@ -539,38 +554,35 @@
    :editor/toggle-open-blocks               {:binding "t o"
                                              :fn      editor-handler/toggle-open!}
 
-   :ui/accent-color-reset                   {:binding "c o"
-                                             :fn      state/unset-color-accent!}
+   :ui/customize-appearance                 {:binding "c c"
+                                             :fn      #(state/pub-event! [:modal/toggle-appearance-modal])}
 
-   :ui/accent-colors-picker                 {:binding "c c"
-                                             :fn      #(state/pub-event! [:modal/toggle-accent-colors-modal])}
+   :git/commit {:binding "mod+g c"
+                :inactive (not (util/electron?))
+                :fn commit/show-commit-modal!}
 
-   :git/commit                              {:binding  "mod+g c"
-                                             :inactive (not (util/electron?))
-                                             :fn       commit/show-commit-modal!}
+   :dev/replace-graph-with-db-file {:binding []
+                                    :inactive (or (not (util/electron?)) (not (state/developer-mode?)))
+                                    :fn :frontend.handler.common.developer/replace-graph-with-db-file}
 
-   :dev/replace-graph-with-db-file           {:binding  []
-                                              :inactive (or (not (util/electron?)) (not (state/developer-mode?)))
-                                              :fn       :frontend.handler.common.developer/replace-graph-with-db-file}
+   :dev/show-block-data {:binding []
+                         :inactive (not (state/developer-mode?))
+                         :fn :frontend.handler.common.developer/show-block-data}
 
-   :dev/show-block-data                     {:binding  []
-                                             :inactive (not (state/developer-mode?))
-                                             :fn       :frontend.handler.common.developer/show-block-data}
+   :dev/show-block-ast {:binding []
+                        :inactive (not (state/developer-mode?))
+                        :fn :frontend.handler.common.developer/show-block-ast}
 
-   :dev/show-block-ast                      {:binding  []
-                                             :inactive (not (state/developer-mode?))
-                                             :fn       :frontend.handler.common.developer/show-block-ast}
+   :dev/show-page-data {:binding []
+                        :inactive (not (state/developer-mode?))
+                        :fn :frontend.handler.common.developer/show-page-data}
 
-   :dev/show-page-data                      {:binding  []
-                                             :inactive (not (state/developer-mode?))
-                                             :fn       :frontend.handler.common.developer/show-page-data}
-
-   :dev/show-page-ast                       {:binding  []
-                                             :inactive (not (state/developer-mode?))
-                                             :fn       :frontend.handler.common.developer/show-page-ast}})
+   :dev/show-page-ast {:binding []
+                       :inactive (not (state/developer-mode?))
+                       :fn :frontend.handler.common.developer/show-page-ast}})
 
 (let [keyboard-commands
-      {::commands       (set (keys all-built-in-keyboard-shortcuts))
+      {::commands (set (keys all-built-in-keyboard-shortcuts))
        ::dicts/commands dicts/abbreviated-commands}]
   (assert (= (::commands keyboard-commands) (::dicts/commands keyboard-commands))
     (str "Keyboard commands must have an english label"
@@ -754,6 +766,9 @@
             :editor/copy-current-file
             :editor/copy-page-url
             :editor/new-whiteboard
+            :editor/add-property-deadline
+            :editor/add-property-status
+            :editor/add-property-priority
             :ui/toggle-wide-mode
             :ui/select-theme-color
             :ui/goto-plugins
@@ -767,8 +782,7 @@
             :dev/show-page-data
             :dev/show-page-ast
             :dev/replace-graph-with-db-file
-            :ui/accent-colors-picker
-            :ui/accent-color-reset])
+            :ui/customize-appearance])
        (with-meta {:before m/enable-when-not-editing-mode!}))
 
      :shortcut.handler/misc
@@ -870,7 +884,11 @@
       :editor/select-parent
       :editor/select-block-up
       :editor/select-block-down
-      :editor/delete-selection]
+      :editor/delete-selection
+      :editor/add-property
+      :editor/add-property-deadline
+      :editor/add-property-status
+      :editor/add-property-priority]
 
      :shortcut.category/toggle
      [:ui/toggle-help
@@ -884,8 +902,7 @@
       :ui/toggle-right-sidebar
       :ui/toggle-settings
       :ui/toggle-contents
-      :ui/accent-colors-picker
-      :ui/accent-color-reset]
+      :ui/customize-appearance]
 
      :shortcut.category/whiteboard
      [:editor/new-whiteboard
@@ -955,7 +972,7 @@
      :shortcut.category/plugins
      []}))
 
-(let [category-maps {::category       (set (keys @*category))
+(let [category-maps {::category (set (keys @*category))
                      ::dicts/category dicts/categories}]
   (assert (= (::category category-maps) (::dicts/category category-maps))
     (str "Keys for category maps must have an english label "

@@ -1,7 +1,6 @@
 (ns frontend.db.restore
   "Fns for DB restore(from text or sqlite)"
   (:require [frontend.db.conn :as db-conn]
-            [frontend.db.react :as react]
             [frontend.state :as state]
             [frontend.persist-db :as persist-db]
             [promesa.core :as p]
@@ -29,7 +28,6 @@
     (println ::restore-graph! "loads" (count initial-data) "datoms in" (t/in-millis (t/interval start-time end-time)) "ms")
 
     (state/set-state! :graph/loading? false)
-    (react/clear-query-state!)
     (state/pub-event! [:ui/re-render-root])
     ;; (async/go
     ;;   (async/<! (async/timeout 100))

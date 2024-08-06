@@ -1,18 +1,18 @@
 (ns frontend.worker.rtc.core
   "Main(use missionary) ns for rtc related fns"
   (:require [frontend.common.missionary-util :as c.m]
+            [frontend.worker.rtc.asset :as r.asset]
             [frontend.worker.rtc.client :as r.client]
+            [frontend.worker.rtc.client-op :as client-op]
             [frontend.worker.rtc.exception :as r.ex]
             [frontend.worker.rtc.full-upload-download-graph :as r.upload-download]
             [frontend.worker.rtc.log-and-state :as rtc-log-and-state]
-            [frontend.worker.rtc.op-mem-layer :as op-mem-layer]
             [frontend.worker.rtc.remote-update :as r.remote-update]
             [frontend.worker.rtc.skeleton]
             [frontend.worker.rtc.ws :as ws]
             [frontend.worker.rtc.ws-util :as ws-util]
             [frontend.worker.state :as worker-state]
             [frontend.worker.util :as worker-util]
-            [goog.string :as gstring]
             [logseq.common.config :as common-config]
             [logseq.db :as ldb]
             [malli.core :as ma]
@@ -23,10 +23,6 @@
   [:map
    [:ws-state {:optional true} [:enum :connecting :open :closing :closed]]])
 (def ^:private rtc-state-validator (ma/validator rtc-state-schema))
-
-(defn- get-ws-url
-  [token]
-  (gstring/format @worker-state/*rtc-ws-url token))
 
 (def ^:private sentinel (js-obj))
 (defn- get-remote-updates
@@ -53,7 +49,7 @@
         merge-flow (m/latest vector auto-push-flow clock-flow)]
     (m/eduction (filter first)
                 (map second)
-                (filter (fn [v] (when (pos? (op-mem-layer/get-unpushed-block-update-count repo)) v)))
+                (filter (fn [v] (when (pos? (client-op/get-unpushed-ops-count repo)) v)))
                 merge-flow)))
 
 (defn- create-mixed-flow
@@ -139,24 +135,27 @@
   TODO: auto refresh token if needed"
   [graph-uuid repo conn date-formatter token
    & {:keys [auto-push? debug-ws-url] :or {auto-push? true}}]
-  (let [ws-url              (or debug-ws-url (get-ws-url token))
-        *auto-push?         (atom auto-push?)
-        *last-calibrate-t   (atom nil)
-        *online-users       (atom nil)
-        started-dfv         (m/dfv)
-        add-log-fn          (fn [type message]
-                              (assert (map? message) message)
-                              (rtc-log-and-state/rtc-log type (assoc message :graph-uuid graph-uuid)))
+  (let [ws-url                     (or debug-ws-url (ws-util/get-ws-url token))
+        *auto-push?                (atom auto-push?)
+        *last-calibrate-t          (atom nil)
+        *online-users              (atom nil)
+        *assets-sync-loop-canceler (atom nil)
+        started-dfv                (m/dfv)
+        add-log-fn                 (fn [type message]
+                                     (assert (map? message) message)
+                                     (rtc-log-and-state/rtc-log type (assoc message :graph-uuid graph-uuid)))
         {:keys [*current-ws get-ws-create-task]}
         (new-task--get-ws-create--memoized ws-url)
-        get-ws-create-task  (r.client/ensure-register-graph-updates
-                             get-ws-create-task graph-uuid repo conn *last-calibrate-t *online-users)
-        mixed-flow          (create-mixed-flow repo get-ws-create-task *auto-push?)]
+        get-ws-create-task         (r.client/ensure-register-graph-updates
+                                    get-ws-create-task graph-uuid repo conn *last-calibrate-t *online-users)
+        {:keys [assets-sync-loop-task]}
+        (r.asset/create-assets-sync-loop get-ws-create-task graph-uuid conn)
+        mixed-flow                 (create-mixed-flow repo get-ws-create-task *auto-push?)]
     (assert (some? *current-ws))
-    {:rtc-state-flow  (create-rtc-state-flow (create-ws-state-flow *current-ws))
-     :*rtc-auto-push? *auto-push?
-     :*online-users   *online-users
-     :onstarted-task  started-dfv
+    {:rtc-state-flow     (create-rtc-state-flow (create-ws-state-flow *current-ws))
+     :*rtc-auto-push?    *auto-push?
+     :*online-users      *online-users
+     :onstarted-task     started-dfv
      :rtc-loop-task
      (holding-rtc-lock
       started-dfv
@@ -165,6 +164,8 @@
           ;; init run to open a ws
           (m/? get-ws-create-task)
           (started-dfv true)
+          (reset! *assets-sync-loop-canceler
+                  (c.m/run-task assets-sync-loop-task :assets-sync-loop-task))
           (->>
            (let [event (m/?> mixed-flow)]
              (case (:type event)
@@ -186,6 +187,7 @@
            (m/reduce {} nil)
            (m/?))
           (catch Cancelled e
+            (when @*assets-sync-loop-canceler (@*assets-sync-loop-canceler))
             (add-log-fn :rtc.log/cancelled {})
             (throw e)))))}))
 
@@ -209,11 +211,12 @@
         (let [user-uuid (:sub (worker-util/parse-jwt token))
               config (worker-state/get-config repo)
               date-formatter (common-config/get-date-formatter config)
-              {:keys [onstarted-task rtc-state-flow *rtc-auto-push? rtc-loop-task *online-users]}
+              {:keys [rtc-state-flow *rtc-auto-push? rtc-loop-task *online-users]
+               onstarted-task :onstarted-task}
               (create-rtc-loop graph-uuid repo conn date-formatter token)
               canceler (c.m/run-task rtc-loop-task :rtc-loop-task)
               start-ex (m/? onstarted-task)]
-          (if (:ex-data start-ex)
+          (if-let [start-ex (:ex-data start-ex)]
             (r.ex/->map start-ex)
             (do (reset! *rtc-loop-metadata {:repo repo
                                             :graph-uuid graph-uuid
@@ -241,14 +244,14 @@
 
 (defn new-task--get-graphs
   [token]
-  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (get-ws-url token))]
+  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (ws-util/get-ws-url token))]
     (m/join :graphs
             (ws-util/send&recv get-ws-create-task {:action "list-graphs"}))))
 
 (defn new-task--delete-graph
   "Return a task that return true if succeed"
   [token graph-uuid]
-  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (get-ws-url token))]
+  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (ws-util/get-ws-url token))]
     (m/sp
       (let [{:keys [ex-data]}
             (m/? (ws-util/send&recv get-ws-create-task
@@ -259,14 +262,14 @@
 (defn new-task--get-user-info
   "Return a task that return users-info about the graph."
   [token graph-uuid]
-  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (get-ws-url token))]
+  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (ws-util/get-ws-url token))]
     (m/join :users
             (ws-util/send&recv get-ws-create-task
                                {:action "get-users-info" :graph-uuid graph-uuid}))))
 
 (defn new-task--grant-access-to-others
   [token graph-uuid & {:keys [target-user-uuids target-user-emails]}]
-  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (get-ws-url token))]
+  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (ws-util/get-ws-url token))]
     (ws-util/send&recv get-ws-create-task
                        (cond-> {:action "grant-access"
                                 :graph-uuid graph-uuid}
@@ -276,7 +279,7 @@
 (defn new-task--get-block-content-versions
   "Return a task that return map [:ex-data :ex-message :versions]"
   [token graph-uuid block-uuid]
-  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (get-ws-url token))]
+  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (ws-util/get-ws-url token))]
     (m/join :versions (ws-util/send&recv get-ws-create-task
                                          {:action "query-block-content-versions"
                                           :block-uuids [block-uuid]
@@ -302,7 +305,7 @@
                  :auto-push? rtc-auto-push?
                  :online-users online-users})
               rtc-state-flow (m/watch *rtc-auto-push?) (m/watch *rtc-lock) (m/watch *online-users)
-              (op-mem-layer/create-pending-ops-count-flow repo)
+              (client-op/create-pending-ops-count-flow repo)
               (rtc-log-and-state/create-local-t-flow graph-uuid)
               (rtc-log-and-state/create-remote-t-flow graph-uuid))))
           (catch Cancelled _))))))
@@ -313,13 +316,13 @@
 
 (defn new-task--snapshot-graph
   [token graph-uuid]
-  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (get-ws-url token))]
+  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (ws-util/get-ws-url token))]
     (m/join #(select-keys % [:snapshot-uuid :graph-uuid])
             (ws-util/send&recv get-ws-create-task {:action "snapshot-graph"
                                                    :graph-uuid graph-uuid}))))
 (defn new-task--snapshot-list
   [token graph-uuid]
-  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (get-ws-url token))]
+  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (ws-util/get-ws-url token))]
     (m/join :snapshot-list
             (ws-util/send&recv get-ws-create-task {:action "snapshot-list"
                                                    :graph-uuid graph-uuid}))))
@@ -328,24 +331,24 @@
   [token repo remote-graph-name]
   (m/sp
     (if-let [conn (worker-state/get-datascript-conn repo)]
-      (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (get-ws-url token))]
+      (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (ws-util/get-ws-url token))]
         (m/? (r.upload-download/new-task--upload-graph get-ws-create-task repo conn remote-graph-name)))
       (r.ex/->map (ex-info "Not found db-conn" {:type :rtc.exception/not-found-db-conn
                                                 :repo repo})))))
 
 (defn new-task--request-download-graph
   [token graph-uuid]
-  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (get-ws-url token))]
+  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (ws-util/get-ws-url token))]
     (r.upload-download/new-task--request-download-graph get-ws-create-task graph-uuid)))
 
 (defn new-task--download-info-list
   [token graph-uuid]
-  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (get-ws-url token))]
+  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (ws-util/get-ws-url token))]
     (r.upload-download/new-task--download-info-list get-ws-create-task graph-uuid)))
 
 (defn new-task--wait-download-info-ready
   [token download-info-uuid graph-uuid timeout-ms]
-  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (get-ws-url token))]
+  (let [{:keys [get-ws-create-task]} (new-task--get-ws-create--memoized (ws-util/get-ws-url token))]
     (r.upload-download/new-task--wait-download-info-ready
      get-ws-create-task download-info-uuid graph-uuid timeout-ms)))
 

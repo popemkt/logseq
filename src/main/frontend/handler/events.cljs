@@ -56,7 +56,6 @@
             [frontend.handler.user :as user-handler]
             [frontend.handler.property.util :as pu]
             [frontend.handler.db-based.property.util :as db-pu]
-            [frontend.handler.file-based.property.util :as property-util]
             [frontend.handler.property :as property-handler]
             [frontend.handler.file-based.nfs :as nfs-handler]
             [frontend.handler.code :as code-handler]
@@ -141,7 +140,9 @@
 (defmethod handle :user/login [[_ host-ui?]]
   (if (or host-ui? (not util/electron?))
     (js/window.open config/LOGIN-URL)
-    (login/open-login-modal!)))
+    (if (mobile-util/native-platform?)
+      (route-handler/redirect! {:to :user-login})
+      (login/open-login-modal!))))
 
 (defmethod handle :graph/added [[_ repo {:keys [empty-graph?]}]]
   (search-handler/rebuild-indices!)
@@ -369,13 +370,14 @@
     (plugin/open-select-theme!)
     (route-handler/go-to-search! :themes)))
 
-(defmethod handle :modal/toggle-accent-colors-modal [_]
-  (let [label "accent-colors-picker"]
+(defmethod handle :modal/toggle-appearance-modal [_]
+  (let [label "customize-appearance"]
     (if (shui/dialog-get label)
       (shui/dialog-close! label)
       (shui/dialog-open!
-        #(settings/modal-accent-colors-inner)
+        #(settings/modal-appearance-inner)
         {:id      label
+         :overlay-props {:label label}
          :label   label}))))
 
 (defmethod handle :modal/set-git-username-and-email [[_ _content]]
@@ -677,13 +679,14 @@
   (shui/dialog-open!
     [:div {:style {:max-width 700}}
      [:p (t :sync-from-local-changes-detected)]
-     (ui/button
-       (t :yes)
-       :autoFocus "on"
-       :class "ui__modal-enter"
-       :on-click (fn []
-                   (state/close-modal!)
-                   (nfs-handler/refresh! (state/get-current-repo) refresh-cb)))]))
+     [:div.flex.justify-end
+      (ui/button
+        (t :yes)
+        :autoFocus "on"
+        :class "ui__modal-enter"
+        :on-click (fn []
+                    (shui/dialog-close!)
+                    (nfs-handler/refresh! (state/get-current-repo) refresh-cb)))]]))
 
 (defmethod handle :sync/create-remote-graph [[_ current-repo]]
   (let [graph-name (js/decodeURI (util/node-path.basename current-repo))]
@@ -843,25 +846,12 @@
 (defmethod handle :graph/save-db-to-disk [[_ _opts]]
   (persist-db/export-current-graph! {:succ-notification? true}))
 
-(defmethod handle :search/transact-data [[_ repo data]]
-  (let [file-based? (config/local-file-based-graph? repo)
-        data' (cond-> data
-                file-based?
-                ;; remove built-in properties from content
-                (update :blocks-to-add
-                  (fn [blocks]
-                    (map #(update % :content
-                            (fn [content]
-                              (property-util/remove-built-in-properties (get % :format :markdown) content)))
-                      blocks))))]
-    (search/transact-blocks! repo data')))
-
 (defmethod handle :class/configure [[_ page]]
   (shui/dialog-open!
     #(vector :<>
        (class-component/configure page {})
        (db-page/page-properties page {:configure? true
-                                      :mode :class}))
+                                      :mode :tag}))
     {:label "page-configure"
      :align :top}))
 
@@ -984,7 +974,7 @@
                         :edit-original-block
                         (fn [{:keys [editing-default-property?]}]
                           (when editing-block
-                            (let [content (:block/content (db/entity (:db/id editing-block)))
+                            (let [content (:block/title (db/entity (:db/id editing-block)))
                                   esc? (= "Escape" (state/get-ui-last-key-code))
                                   [content' pos] (cond
                                                    esc?
@@ -1029,10 +1019,11 @@
         word word)]
      [:div.text-lg
       [:p "Switch to another repo: "]
-      (repo/repos-dropdown {:on-click (fn [e]
-                                        (util/stop e)
-                                        (state/set-state! :error/multiple-tabs-access-opfs? false)
-                                        (state/close-modal!))})]]))
+      [:div.border.rounded.bg-gray-01.overflow-hidden.w-60
+       (repo/repos-dropdown {:on-click (fn [e]
+                                         (util/stop e)
+                                         (state/set-state! :error/multiple-tabs-access-opfs? false)
+                                         (shui/dialog-close!))})]]]))
 
 (defmethod handle :show/multiple-tabs-error-dialog [_]
   (state/set-state! :error/multiple-tabs-access-opfs? true)

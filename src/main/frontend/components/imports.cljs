@@ -29,7 +29,8 @@
             [rum.core :as rum]
             [logseq.shui.ui :as shui]
             [lambdaisland.glogi :as log]
-            [logseq.db.frontend.validate :as db-validate]))
+            [logseq.db.frontend.validate :as db-validate]
+            [logseq.db :as ldb]))
 
 ;; Can't name this component as `frontend.components.import` since shadow-cljs
 ;; will complain about it.
@@ -38,9 +39,9 @@
 
 (defn- finished-cb
   []
-  (route-handler/redirect-to-home!)
   (notification/show! "Import finished!" :success)
-  (ui-handler/re-render-root!))
+  (ui-handler/re-render-root!)
+  (route-handler/redirect-to-home!))
 
 (defn- roam-import-handler
   [e]
@@ -215,7 +216,7 @@
        :on-key-down (fn [e]
                       (when (= "Enter" (util/ekey e))
                         (on-submit)))})
-     
+
      [:div.sm:flex.sm:items-start
       [:div.mt-3.text-center.sm:mt-0.sm:text-left
        [:h3#modal-headline.leading-6.font-medium
@@ -237,10 +238,10 @@
   [entities]
   {:entities (count entities)
    :pages (count (filter :block/name entities))
-   :blocks (count (filter :block/content entities))
-   :classes (count (filter #(contains? (:block/type %) "class") entities))
+   :blocks (count (filter :block/title entities))
+   :classes (count (filter ldb/class? entities))
    :objects (count (filter #(seq (:block/tags %)) entities))
-   :properties (count (filter #(contains? (:block/type %) "property") entities))
+   :properties (count (filter ldb/property? entities))
    :property-values (count (mapcat :block/properties entities))})
 
 (defn- validate-imported-data
@@ -263,7 +264,9 @@
                      (if (:page location)
                        (str "Page icons can't be imported. Go to the page " (pr-str (:page location)) " to manually import it.")
                        (str "Block icons can't be imported. Manually import it at the block: " (pr-str (:block location))))
-                     (str "Property value has type " (get-in schema [:type :to]) " instead of type " (get-in schema [:type :from])))]))
+                     (if (not= (get-in schema [:type :to]) (get-in schema [:type :from]))
+                       (str "Property value has type " (get-in schema [:type :to]) " instead of type " (get-in schema [:type :from]))
+                       (str "Property should be imported manually")))]))
            (map (fn [[k v]]
                   [:dl.my-2.mb-0
                    [:dt.m-0 [:strong (str k)]]
@@ -274,7 +277,7 @@
       (do
         (log/error :import-errors {:msg (str "Import detected " (count errors) " invalid block(s):")
                                    :counts (assoc (counts-from-entities entities) :datoms datom-count)})
-        (pprint/pprint (map :entity errors))
+        (pprint/pprint errors)
         (notification/show! (str "Import detected " (count errors) " invalid block(s). These blocks may be buggy when you interact with them. See the javascript console for more.")
                             :warning false))
       (log/info :import-valid {:msg "Valid import!"
@@ -326,14 +329,16 @@
                    ;; doc file options
                    ;; Write to frontend first as writing to worker first is poor ux with slow streaming changes
                    :export-file (fn export-file [conn m opts]
-                                  (let [tx-report
+                                  (let [tx-reports
                                         (gp-exporter/add-file-to-db-graph conn (:file/path m) (:file/content m) opts)]
-                                    (db-browser/transact! @db-browser/*worker repo (:tx-data tx-report) (:tx-meta tx-report))))}
+                                    (doseq [tx-report tx-reports]
+                                      (db-browser/transact! @db-browser/*worker repo (:tx-data tx-report) (:tx-meta tx-report)))))}
           {:keys [files import-state]} (gp-exporter/export-file-graph repo db-conn config-file *files options)]
     (log/info :import-file-graph {:msg (str "Import finished in " (/ (t/in-millis (t/interval start-time (t/now))) 1000) " seconds")})
     (state/set-state! :graph/importing nil)
     (state/set-state! :graph/importing-state nil)
     (validate-imported-data @db-conn import-state files)
+    (state/pub-event! [:graph/ready (state/get-current-repo)])
     (finished-cb)))
 
 (defn import-file-to-db-handler
@@ -372,7 +377,8 @@
 
 
   (rum/defc importer < rum/reactive
-    [{:keys [query-params]}]
+  [{:keys [query-params]}]
+  (let [db-based? (config/db-based-graph? (state/get-current-repo))]
     (if (state/sub :graph/importing)
       (let [{:keys [total current-idx current-page]} (state/sub :graph/importing-state)
             left-label (if (and current-idx total (= current-idx total))
@@ -394,63 +400,67 @@
          [:h1 (t :on-boarding/importing-title)]
          [:h2 (t :on-boarding/importing-desc)]]
         [:section.d.md:flex.flex-col
-         [:label.action-input.flex.items-center.mx-2.my-2
-          [:span.as-flex-center [:i (svg/logo 28)]]
-          [:span.flex.flex-col
-           [[:strong "SQLite"]
-            [:small (t :on-boarding/importing-sqlite-desc)]]]
-          [:input.absolute.hidden
-           {:id        "import-sqlite-db"
-            :type      "file"
-            :on-change (fn [e]
-                         (shui/dialog-open!
-                          #(set-graph-name-dialog e {:sqlite? true})))}]]
+         (when db-based?
+           [:label.action-input.flex.items-center.mx-2.my-2
+            [:span.as-flex-center [:i (svg/logo 28)]]
+            [:span.flex.flex-col
+             [[:strong "SQLite"]
+              [:small (t :on-boarding/importing-sqlite-desc)]]]
+            [:input.absolute.hidden
+             {:id        "import-sqlite-db"
+              :type      "file"
+              :on-change (fn [e]
+                           (shui/dialog-open!
+                            #(set-graph-name-dialog e {:sqlite? true})))}]])
 
          (when (or util/electron? util/web-platform?)
-          [:label.action-input.flex.items-center.mx-2.my-2
-           [:span.as-flex-center [:i (svg/logo 28)]]
-           [:span.flex.flex-col
-            [[:strong "File to DB graph"]
-             [:small  "Import a file-based Logseq graph folder into a new DB graph"]]]
-           [:input.absolute.hidden
-            {:id        "import-file-graph"
-             :type      "file"
-             :webkitdirectory "true"
-             :on-change (debounce (fn [e]
-                                    (import-file-to-db-handler e {}))
-                                  1000)}]])
+           [:label.action-input.flex.items-center.mx-2.my-2
+            [:span.as-flex-center [:i (svg/logo 28)]]
+            [:span.flex.flex-col
+             [[:strong "File to DB graph"]
+              [:small  "Import a file-based Logseq graph folder into a new DB graph"]]]
+            [:input.absolute.hidden
+             {:id        "import-file-graph"
+              :type      "file"
+              :webkitdirectory "true"
+              :on-change (debounce (fn [e]
+                                     (import-file-to-db-handler e {}))
+                                   1000)}]])
 
-         [:label.action-input.flex.items-center.mx-2.my-2
-          [:span.as-flex-center [:i (svg/logo 28)]]
-          [:span.flex.flex-col
-           [[:strong "EDN / JSON"]
-            [:small (t :on-boarding/importing-lsq-desc)]]]
-          [:input.absolute.hidden
-           {:id        "import-lsq"
-            :type      "file"
-            :on-change lsq-import-handler}]]
+         (when-not db-based?
+           [:label.action-input.flex.items-center.mx-2.my-2
+            [:span.as-flex-center [:i (svg/logo 28)]]
+            [:span.flex.flex-col
+             [[:strong "EDN / JSON"]
+              [:small (t :on-boarding/importing-lsq-desc)]]]
+            [:input.absolute.hidden
+             {:id        "import-lsq"
+              :type      "file"
+              :on-change lsq-import-handler}]])
 
-         [:label.action-input.flex.items-center.mx-2.my-2
-          [:span.as-flex-center [:i (svg/roam-research 28)]]
-          [:div.flex.flex-col
-           [[:strong "RoamResearch"]
-            [:small (t :on-boarding/importing-roam-desc)]]]
-          [:input.absolute.hidden
-           {:id        "import-roam"
-            :type      "file"
-            :on-change roam-import-handler}]]
+         (when-not db-based?
+           [:label.action-input.flex.items-center.mx-2.my-2
+            [:span.as-flex-center [:i (svg/roam-research 28)]]
+            [:div.flex.flex-col
+             [[:strong "RoamResearch"]
+              [:small (t :on-boarding/importing-roam-desc)]]]
+            [:input.absolute.hidden
+             {:id        "import-roam"
+              :type      "file"
+              :on-change roam-import-handler}]])
 
-         [:label.action-input.flex.items-center.mx-2.my-2
-          [:span.as-flex-center.ml-1 (ui/icon "sitemap" {:size 26})]
-          [:span.flex.flex-col
-           [[:strong "OPML"]
-            [:small (t :on-boarding/importing-opml-desc)]]]
+         (when-not db-based?
+           [:label.action-input.flex.items-center.mx-2.my-2
+            [:span.as-flex-center.ml-1 (ui/icon "sitemap" {:size 26})]
+            [:span.flex.flex-col
+             [[:strong "OPML"]
+              [:small (t :on-boarding/importing-opml-desc)]]]
 
-          [:input.absolute.hidden
-           {:id        "import-opml"
-            :type      "file"
-            :on-change opml-import-handler}]]]
+            [:input.absolute.hidden
+             {:id        "import-opml"
+              :type      "file"
+              :on-change opml-import-handler}]])]
 
         (when (= "picker" (:from query-params))
           [:section.e
-           [:a.button {:on-click #(route-handler/redirect-to-home!)} "Skip"]])])))
+           [:a.button {:on-click #(route-handler/redirect-to-home!)} "Skip"]])]))))

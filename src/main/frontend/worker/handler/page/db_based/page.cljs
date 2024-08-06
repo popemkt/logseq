@@ -15,8 +15,11 @@
 
 (defn- build-page-tx [conn properties page {:keys [whiteboard? class? tags]}]
   (when (:block/uuid page)
-    (let [page' (merge page
-                       (when whiteboard? {:block/type "whiteboard"})
+    (let [page (assoc page :block/type (cond class? "class"
+                                             whiteboard? "whiteboard"
+                                             (:block/type page) (:block/type page)
+                                             :else "page"))
+          page' (merge page
                        (when tags {:block/tags (mapv #(hash-map :db/id
                                                                 (:db/id (d/entity @conn [:block/uuid %])))
                                                      tags)}))
@@ -58,7 +61,7 @@
        :block/page page-id
        :block/parent page-id
        :block/order (db-order/gen-key nil nil)
-       :block/content ""
+       :block/title ""
        :block/format format})]))
 
 (defn create!

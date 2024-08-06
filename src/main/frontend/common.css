@@ -334,7 +334,6 @@ h1.title, h1.title input {
 .content .selected {
   transition: background-color 0.2s cubic-bezier(0, 1, 0, 1);
   background-color: var(--ls-block-highlight-color, var(--rx-gray-04));
-  padding: -1px;
 }
 
 span.timestamp {
@@ -385,7 +384,7 @@ button.menu:focus {
 
 .menu-link {
   @apply text-popover-foreground/75 select-none hover:text-popover-foreground/100;
-  @apply text-sm px-2 py-1.5 mx-1 hover:rounded transition-opacity duration-150;
+  @apply text-sm px-2 py-1.5 hover:rounded transition-opacity duration-150;
 }
 
 .menu-separator {
@@ -649,7 +648,7 @@ html.is-mobile {
     margin-top: 5px;
   }
 
-  main.theme-inner {
+  main.theme-container-inner {
     @apply overflow-x-hidden;
   }
 }
@@ -664,4 +663,12 @@ html.is-mobile {
   img {
     @apply inline-block;
   }
+}
+
+button[role="checkbox"][data-state=unchecked] {
+    border-color: var(--lx-gray-12, var(--ls-primary-text-color, hsl(var(--foreground))));
+}
+
+.dark-theme button[role="checkbox"][data-state=unchecked] {
+    border-color: var(--lx-gray-11, var(--ls-primary-text-color, hsl(var(--foreground))));
 }

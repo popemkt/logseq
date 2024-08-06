@@ -10,32 +10,35 @@
             [datascript.storage :refer [IStorage]]
             [frontend.worker.db-listener :as db-listener]
             [frontend.worker.db-metadata :as worker-db-metadata]
+            [frontend.worker.db.migrate :as db-migrate]
             [frontend.worker.export :as worker-export]
             [frontend.worker.file :as file]
             [frontend.worker.handler.page :as worker-page]
-            [frontend.worker.handler.page.file-based.rename :as file-worker-page-rename]
             [frontend.worker.handler.page.db-based.rename :as db-worker-page-rename]
+            [frontend.worker.handler.page.file-based.rename :as file-worker-page-rename]
+            [frontend.worker.rtc.asset-db-listener]
+            [frontend.worker.rtc.client-op :as client-op]
             [frontend.worker.rtc.core :as rtc-core]
             [frontend.worker.rtc.db-listener]
-            [frontend.worker.rtc.op-mem-layer :as op-mem-layer]
             [frontend.worker.search :as search]
-            [frontend.worker.state :as worker-state]
-            ;; [frontend.worker.undo-redo :as undo-redo]
+            [frontend.worker.state :as worker-state] ;; [frontend.worker.undo-redo :as undo-redo]
             [frontend.worker.undo-redo2 :as undo-redo]
             [frontend.worker.util :as worker-util]
+            [logseq.common.config :as common-config]
+            [logseq.common.util :as common-util]
             [logseq.db :as ldb]
+            [logseq.db.frontend.order :as db-order]
             [logseq.db.sqlite.common-db :as sqlite-common-db]
+            [logseq.db.sqlite.create-graph :as sqlite-create-graph]
             [logseq.db.sqlite.util :as sqlite-util]
             [logseq.outliner.op :as outliner-op]
             [promesa.core :as p]
-            [shadow.cljs.modern :refer [defclass]]
-            [logseq.common.util :as common-util]
-            [logseq.db.frontend.order :as db-order]
-            [logseq.db.sqlite.create-graph :as sqlite-create-graph]))
+            [shadow.cljs.modern :refer [defclass]]))
 
 (defonce *sqlite worker-state/*sqlite)
 (defonce *sqlite-conns worker-state/*sqlite-conns)
 (defonce *datascript-conns worker-state/*datascript-conns)
+(defonce *client-ops-conns worker-state/*client-ops-conns)
 (defonce *opfs-pools worker-state/*opfs-pools)
 (defonce *publishing? (atom false))
 
@@ -80,8 +83,8 @@
 
 (defn upsert-addr-content!
   "Upsert addr+data-seq"
-  [repo data delete-addrs]
-  (let [^Object db (worker-state/get-sqlite-conn repo)]
+  [repo data delete-addrs & {:keys [client-ops-db?] :or {client-ops-db? false}}]
+  (let [^Object db (worker-state/get-sqlite-conn repo (if client-ops-db? :client-ops :db))]
     (assert (some? db) "sqlite db not exists")
     (.transaction db (fn [tx]
                        (doseq [item data]
@@ -93,8 +96,8 @@
                                         :bind #js [addr]}))))))
 
 (defn restore-data-from-addr
-  [repo addr]
-  (let [^Object db (worker-state/get-sqlite-conn repo)]
+  [repo addr & {:keys [client-ops-db?] :or {client-ops-db? false}}]
+  (let [^Object db (worker-state/get-sqlite-conn repo (if client-ops-db? :client-ops :db))]
     (assert (some? db) "sqlite db not exists")
     (when-let [content (-> (.exec db #js {:sql "select content from kvs where addr = ?"
                                           :bind #js [addr]
@@ -124,61 +127,88 @@
     (-restore [_ addr]
       (restore-data-from-addr repo addr))))
 
+(defn new-sqlite-client-ops-storage
+  [repo]
+  (reify IStorage
+    (-store [_ addr+data-seq delete-addrs]
+      (let [data (map
+                  (fn [[addr data]]
+                    #js {:$addr addr
+                         :$content (sqlite-util/transit-write data)})
+                  addr+data-seq)]
+        (upsert-addr-content! repo data delete-addrs :client-ops-db? true)))
+
+    (-restore [_ addr]
+      (restore-data-from-addr repo addr :client-ops-db? true))))
+
 (defn- close-db-aux!
-  [repo ^Object db ^Object search]
+  [repo ^Object db ^Object search ^Object client-ops]
   (swap! *sqlite-conns dissoc repo)
   (swap! *datascript-conns dissoc repo)
+  (swap! *client-ops-conns dissoc repo)
   (when db (.close db))
   (when search (.close search))
+  (when client-ops (.close client-ops))
   (when-let [^js pool (worker-state/get-opfs-pool repo)]
     (.releaseAccessHandles pool))
   (swap! *opfs-pools dissoc repo))
 
 (defn- close-other-dbs!
   [repo]
-  (doseq [[r {:keys [db search]}] @*sqlite-conns]
+  (doseq [[r {:keys [db search client-ops]}] @*sqlite-conns]
     (when-not (= repo r)
-      (close-db-aux! r db search))))
+      (close-db-aux! r db search client-ops))))
 
 (defn close-db!
   [repo]
-  (let [{:keys [db search]} (@*sqlite-conns repo)]
-    (close-db-aux! repo db search)))
+  (let [{:keys [db search client-ops]} (@*sqlite-conns repo)]
+    (close-db-aux! repo db search client-ops)))
 
-(defn- get-db-and-search-db
+(defn- get-dbs
   [repo]
   (if @*publishing?
     (p/let [^object DB (.-DB ^object (.-oo1 ^object @*sqlite))
             db (new DB "/db.sqlite" "c")
             search-db (new DB "/search-db.sqlite" "c")]
-      [db search-db])
+      [db search-db nil])
     (p/let [^js pool (<get-opfs-pool repo)
             capacity (.getCapacity pool)
             _ (when (zero? capacity)   ; file handle already releases since pool will be initialized only once
                 (.acquireAccessHandles pool))
             db (new (.-OpfsSAHPoolDb pool) repo-path)
-            search-db (new (.-OpfsSAHPoolDb pool) (str "search" repo-path))]
-      [db search-db])))
+            search-db (new (.-OpfsSAHPoolDb pool) (str "search" repo-path))
+            client-ops-db (new (.-OpfsSAHPoolDb pool) (str "client-ops-" repo-path))]
+      [db search-db client-ops-db])))
 
 (defn- create-or-open-db!
   [repo {:keys [config]}]
   (when-not (worker-state/get-sqlite-conn repo)
-    (p/let [[db search-db] (get-db-and-search-db repo)
-            storage (new-sqlite-storage repo {})]
+    (p/let [[db search-db client-ops-db] (get-dbs repo)
+            storage (new-sqlite-storage repo {})
+            client-ops-storage (new-sqlite-client-ops-storage repo)]
       (swap! *sqlite-conns assoc repo {:db db
-                                       :search search-db})
+                                       :search search-db
+                                       :client-ops client-ops-db})
       (.exec db "PRAGMA locking_mode=exclusive")
       (sqlite-common-db/create-kvs-table! db)
+      (sqlite-common-db/create-kvs-table! client-ops-db)
       (search/create-tables-and-triggers! search-db)
       (let [schema (sqlite-util/get-schema repo)
             conn (sqlite-common-db/get-storage-conn storage schema)
+            client-ops-conn (sqlite-common-db/get-storage-conn client-ops-storage client-op/schema-in-db)
             initial-data-exists? (d/entity @conn :logseq.class/Root)]
         (swap! *datascript-conns assoc repo conn)
+        (swap! *client-ops-conns assoc repo client-ops-conn)
         (when (and config (not initial-data-exists?))
           (let [initial-data (sqlite-create-graph/build-db-initial-data config)]
             (d/transact! conn initial-data {:initial-db? true})))
-        (p/let [_ (op-mem-layer/<init-load-from-indexeddb2! repo)]
-          (db-listener/listen-db-changes! repo conn))))))
+
+        (when-not (ldb/page-exists? @conn common-config/views-page-name)
+          (ldb/create-views-page! conn))
+
+        (db-migrate/migrate conn search-db)
+
+        (db-listener/listen-db-changes! repo conn)))))
 
 (defn- iter->vec [iter]
   (when iter
@@ -247,7 +277,7 @@
 
 (defn- get-search-db
   [repo]
-  (worker-state/get-sqlite-conn repo {:search? true}))
+  (worker-state/get-sqlite-conn repo :search))
 
 (defn- with-write-transit-str
   [p]
@@ -475,9 +505,10 @@
   ;; Search
   (search-blocks
    [this repo q option]
-   (p/let [db (get-search-db repo)
-           result (search/search-blocks db q (bean/->clj option))]
-     (bean/->js result)))
+   (p/let [search-db (get-search-db repo)
+           conn (worker-state/get-datascript-conn repo)
+           result (search/search-blocks repo conn search-db q (bean/->clj option))]
+     (ldb/write-transit-str result)))
 
   (search-upsert-blocks
    [this repo blocks]
@@ -500,18 +531,11 @@
   (search-build-blocks-indice
    [this repo]
    (when-let [conn (worker-state/get-datascript-conn repo)]
-     (search/build-blocks-indice @conn)))
+     (search/build-blocks-indice repo @conn)))
 
   (search-build-pages-indice
    [this repo]
-   (when-let [conn (worker-state/get-datascript-conn repo)]
-     (search/build-page-indice repo @conn)
-     nil))
-
-  (page-search
-   [this repo q options]
-   (when-let [conn (worker-state/get-datascript-conn repo)]
-     (search/page-search repo @conn q (bean/->clj options))))
+   nil)
 
   (apply-outliner-ops
    [this repo ops-str opts-str]

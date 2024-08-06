@@ -26,14 +26,14 @@
 
 (def block-attrs ldb/block-attrs)
 
-(def hidden-page? ldb/hidden-page?)
+(def hidden-page? ldb/hidden?)
 
 (defn get-all-tagged-pages
   [repo]
   (d/q '[:find ?page-name ?tag
          :where
          [?page :block/tags ?e]
-         [?e :block/original-name ?tag]
+         [?e :block/title ?tag]
          [?page :block/name ?page-name]]
        (conn/get-db repo)))
 
@@ -42,10 +42,10 @@
   (let [db (conn/get-db repo)]
     (ldb/get-all-pages db)))
 
-(defn get-all-page-original-names
+(defn get-all-page-titles
   [repo]
   (->> (get-all-pages repo)
-       (map :block/original-name)))
+       (map :block/title)))
 
 (defn get-page-alias
   [repo page-name]
@@ -148,7 +148,7 @@ independent of format as format specific heading characters are stripped"
                   [?page :block/uuid ?page-uuid]
                   [?b :block/page ?page]
                   (has-property ?b :logseq.property/heading)
-                  [?b :block/content ?content]
+                  [?b :block/title ?content]
                   [(?content-matches ?content ?route-name ?b)]]
                 db
                 (uuid page-uuid-str)
@@ -171,7 +171,7 @@ independent of format as format specific heading characters are stripped"
                   [?b :block/page ?page]
                   [?b :block/properties ?prop]
                   [(get ?prop :heading) _]
-                  [?b :block/content ?content]
+                  [?b :block/title ?content]
                   [(?content-matches ?content ?route-name)]]
                 db
                 (uuid page-uuid-str)
@@ -200,7 +200,7 @@ independent of format as format specific heading characters are stripped"
 (defn page-alias-set
   [repo-url page-id]
   (->>
-   (ldb/get-page-alias (conn/get-db repo-url) page-id)
+   (ldb/get-block-alias (conn/get-db repo-url) page-id)
    (set)
    (set/union #{page-id})))
 
@@ -210,14 +210,14 @@ independent of format as format specific heading characters are stripped"
         alias-ids (->> (page-alias-set repo page-id)
                        (remove #{page-id}))]
     (when (seq alias-ids)
-      (map (fn [id] (:block/original-name (db-utils/entity id))) alias-ids))))
+      (map (fn [id] (:block/title (db-utils/entity id))) alias-ids))))
 
 (defn with-pages
   [blocks]
   (let [pages-ids (->> (map (comp :db/id :block/page) blocks)
                        (remove nil?))
         pages (when (seq pages-ids)
-                (db-utils/pull-many '[:db/id :block/name :block/original-name :block/journal-day] pages-ids))
+                (db-utils/pull-many '[:db/id :block/name :block/title :block/journal-day] pages-ids))
         pages-map (reduce (fn [acc p] (assoc acc (:db/id p) p)) {} pages)
         blocks (map
                 (fn [block]
@@ -416,18 +416,18 @@ independent of format as format specific heading characters are stripped"
 (defn get-file-page
   ([file-path]
    (get-file-page file-path true))
-  ([file-path original-name?]
+  ([file-path title?]
    (when-let [repo (state/get-current-repo)]
      (when-let [db (conn/get-db repo)]
        (some->
         (d/q
-         (if original-name?
+         (if title?
            '[:find ?page-name
              :in $ ?path
              :where
              [?file :file/path ?path]
              [?page :block/file ?file]
-             [?page :block/original-name ?page-name]]
+             [?page :block/title ?page-name]]
            '[:find ?page-name
              :in $ ?path
              :where
@@ -571,7 +571,7 @@ independent of format as format specific heading characters are stripped"
                                react)]
       (->> mentioned-pages
            (keep (fn [page]
-                   (when-not (and (not include-journals?) (ldb/journal-page? page))
+                   (when-not (and (not include-journals?) (ldb/journal? page))
                      page)))
            (mapv (fn [page]
                    [(:block/name page) (get-page-alias-names repo (:db/id page))]))))))
@@ -603,21 +603,23 @@ independent of format as format specific heading characters are stripped"
                            k)]
                    [k blocks])))))))))
 
-(defn get-page-referenced-blocks
-  ([page-id]
-   (get-page-referenced-blocks (state/get-current-repo) page-id nil))
-  ([page-id options]
-   (get-page-referenced-blocks (state/get-current-repo) page-id options))
-  ([repo page-id options]
+(defn get-referenced-blocks
+  ([eid]
+   (get-referenced-blocks (state/get-current-repo) eid nil))
+  ([eid options]
+   (get-referenced-blocks (state/get-current-repo) eid options))
+  ([repo eid options]
    (when repo
      (when (conn/get-db repo)
-       (let [pages (page-alias-set repo page-id)]
+       (let [entity (db-utils/entity eid)
+             page? (ldb/page? entity)
+             ids (page-alias-set repo eid)]
          (->>
           (react/q repo
-                   [:frontend.worker.react/refs page-id]
+                   [:frontend.worker.react/refs eid]
                    {:query-fn (fn []
                                 (let [entities (mapcat (fn [id]
-                                                         (:block/_path-refs (db-utils/entity id))) pages)
+                                                         (:block/_path-refs (db-utils/entity id))) ids)
                                       blocks (map (fn [e]
                                                     {:block/parent (:block/parent e)
                                                      :block/order (:block/order e)
@@ -629,35 +631,28 @@ independent of format as format specific heading characters are stripped"
           react
           :entities
           (remove (fn [block]
-                    (or (= page-id (:db/id (:block/page block)))
-                        (ldb/hidden-page? (:block/page block)))))
+                    (or
+                     (= (:db/id (:block/link block)) eid)
+                     (= (:db/id block) eid)
+                     (= eid (:db/id (:block/page block)))
+                     (ldb/hidden? (:block/page block))
+                     (contains? (set (map :db/id (:block/tags block))) (:db/id entity)))))
           (util/distinct-by :db/id)))))))
 
-;; TODO: no need to use datalog query, `:block/_refs`
 (defn get-block-referenced-blocks
   ([block-id]
    (get-block-referenced-blocks block-id {}))
   ([block-id options]
    (when-let [repo (state/get-current-repo)]
      (when (conn/get-db repo)
-       (let [block (db-utils/entity block-id)
-             query-result (->> (react/q repo [:frontend.worker.react/refs
-                                              (:db/id block)]
-                                        {}
-                                        '[:find [(pull ?ref-block ?block-attrs) ...]
-                                          :in $ ?block-id ?block-attrs
-                                          :where
-                                          [?ref-block :block/refs ?block-id]]
-                                        block-id
-                                        block-attrs)
-                               react
-                               (sort-by-order-recursive))]
-         (db-utils/group-by-page query-result))))))
+       (->> (get-referenced-blocks repo block-id options)
+            (sort-by-order-recursive)
+            db-utils/group-by-page)))))
 
 (defn journal-page?
   "sanitized page-name only"
   [page-name]
-  (ldb/journal-page? (ldb/get-page (conn/get-db) page-name)))
+  (ldb/journal? (ldb/get-page (conn/get-db) page-name)))
 
 (defn get-classes-with-property
   "Get classes which have given property as a class property"
@@ -711,7 +706,7 @@ independent of format as format specific heading characters are stripped"
   (let [page (if (string? page)
                (get-page page)
                page)]
-    (ldb/whiteboard-page? page)))
+    (ldb/whiteboard? page)))
 
 (comment
   (defn get-orphaned-pages
@@ -736,7 +731,7 @@ independent of format as format specific heading characters are stripped"
     '[:find [(pull ?page [:db/id
                           :block/uuid
                           :block/name
-                          :block/original-name
+                          :block/title
                           :block/created-at
                           :block/updated-at]) ...]
       :where
@@ -760,14 +755,15 @@ independent of format as format specific heading characters are stripped"
                     :nonce (:nonce shape)}))))))
 
 (defn get-all-classes
-  [repo]
-  (d/q
-   '[:find ?name ?id
-     :where
-     [?page :block/type "class"]
-     [?page :block/original-name ?name]
-     [?page :block/uuid ?id]]
-    (conn/get-db repo)))
+  [repo & {:keys [except-root-class?]
+           :or {except-root-class? false}}]
+  (let [db (conn/get-db repo)
+        classes (->> (d/datoms db :avet :block/type "class")
+                     (map (fn [d]
+                            (db-utils/entity db (:e d)))))]
+    (if except-root-class?
+      (keep (fn [e] (when-not (= :logseq.class/Root (:db/ident e)) e)) classes)
+      classes)))
 
 (defn get-class-children
   [repo eid]
@@ -781,24 +777,35 @@ independent of format as format specific heading characters are stripped"
         (:class-parent rules/rules))
    distinct))
 
-;; FIXME: async query && use d/datoms instead of datalog
 (defn get-class-objects
   [repo class-id]
   (when-let [class (db-utils/entity repo class-id)]
     (if (first (:class/_parent class))        ; has children classes
-      (d/q
-       '[:find [?object ...]
-         :in $ % ?parent
-         :where
-         (class-parent ?parent ?c)
-         (or-join [?object ?c]
-          [?object :block/tags ?parent]
-          [?object :block/tags ?c])]
-       (conn/get-db repo)
-       (:class-parent rules/rules)
-       class-id)
-      (map :db/id (:block/_tags class)))))
+      (let [all-classes (conj (->> (get-class-children repo class-id)
+                                   (map #(db-utils/entity repo %)))
+                              class)]
+        (->> (mapcat :block/_tags all-classes)
+             distinct))
+      (:block/_tags class))))
 
+(defn sub-class-objects
+  [repo class-id]
+  (when class-id
+    (-> (react/q repo [:frontend.worker.react/objects class-id]
+                 {:query-fn (fn [_]
+                              (get-class-objects repo class-id))}
+                 nil)
+        react)))
+
+(defn get-property-related-objects
+  [repo property-id]
+  (when-let [property (db-utils/entity repo property-id)]
+    (->> (d/q '[:find [?objects ...]
+                :in $ ?prop
+                :where [?objects ?prop]]
+              (conn/get-db repo)
+              (:db/ident property))
+         (map #(db-utils/entity repo %)))))
 
 (defn get-all-namespace-relation
   [repo]
@@ -806,7 +813,7 @@ independent of format as format specific heading characters are stripped"
          :where
          [?page :block/name ?page-name]
          [?page :block/namespace ?e]
-         [?e :block/original-name ?parent]]
+         [?e :block/title ?parent]]
     (conn/get-db repo)))
 
 (defn get-all-namespace-parents
@@ -927,7 +934,7 @@ independent of format as format specific heading characters are stripped"
                        (map :e)))]
         (when (seq ids)
           (db-utils/pull-many repo
-                              '[:db/id :block/name :block/original-name
+                              '[:db/id :block/name :block/title
                                 {:block/file [:db/id :file/path]}]
                               ids))))))
 

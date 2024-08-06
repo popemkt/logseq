@@ -14,7 +14,8 @@
             [goog.object :as gobj]
             [goog.functions :refer [debounce]]
             [frontend.config :as config]
-            [frontend.handler.property.util :as pu]))
+            [frontend.handler.property.util :as pu]
+            [logseq.db :as ldb]))
 
 (defonce emojis (vals (bean/->clj (gobj/get emoji-data "emojis"))))
 
@@ -28,13 +29,23 @@
     (and (= :tabler-icon (:type icon)) (:id icon))
     (ui/icon (:id icon) opts)))
 
-(defn get-page-icon
-  [page-entity opts]
-  (let [default-icon (ui/icon "page" (merge opts {:extension? true}))
-        page-icon (get page-entity (pu/get-pid :logseq.property/icon))]
+(defn get-node-icon
+  [node-entity opts]
+  (let [default-icon-id (cond
+                          (ldb/class? node-entity)
+                          "hash"
+                          (ldb/property? node-entity)
+                          "letter-p"
+                          (ldb/page? node-entity)
+                          "page"
+                          :else
+                          "letter-n")
+        default-icon (ui/icon default-icon-id (assoc opts :size 14))
+        node-icon (get node-entity (pu/get-pid :logseq.property/icon))]
     (or
-     (when-not (string/blank? page-icon)
-       (icon page-icon opts))
+     (when-not (string/blank? node-icon)
+       [:span {:style {:color (or (:color node-icon) "inherit")}}
+        (icon node-icon opts)])
      default-icon)))
 
 (defn- search-emojis
@@ -67,12 +78,32 @@
     {:icons icons
      :emojis emojis}))
 
-(rum/defc pane-block
-  [label items]
-  [:div.pane-block
+(rum/defc icons-row
+  [items]
+  [:div.its.icons-row items])
+
+(rum/defc pane-section
+  [label items & {:keys [virtual-list?]}]
+  [:div.pane-section
+   {:class (when virtual-list? "has-virtual-list")}
    [:div.hd.px-1.pb-1.leading-none
     [:strong.text-xs.font-medium.text-gray-07.dark:opacity-80 label]]
-   [:div.its items]])
+   (if virtual-list?
+     (let [total (count items)
+           step 9 rows (quot total step)
+           mods (mod total step)
+           rows (if (zero? mods) rows (inc rows))
+           items (vec items)]
+       (ui/virtualized-list
+         {:total-count rows
+          :item-content (fn [idx]
+                          (icons-row
+                            (let [last? (= (dec rows) idx)
+                                  start (* idx step)
+                                  end (* (inc idx) (if (and last? (not (zero? mods))) mods step))]
+                              (try (subvec items start end)
+                                (catch js/Error _e nil)))))}))
+     [:div.its items])])
 
 (rum/defc emoji-cp < rum/static
   [{:keys [id name] :as emoji} {:keys [on-chosen hover]}]
@@ -89,34 +120,37 @@
 
 (rum/defc emojis-cp < rum/static
   [emojis opts]
-  (pane-block
+  (pane-section
     (util/format "Emojis (%s)" (count emojis))
     (for [emoji emojis]
-      (rum/with-key (emoji-cp emoji opts) (:id emoji)))))
+      (rum/with-key (emoji-cp emoji opts) (:id emoji)))
+    {:virtual-list? true}))
 
 (rum/defc icon-cp < rum/static
   [icon {:keys [on-chosen hover]}]
   [:button.w-9.h-9.transition-opacity
-   {:key icon
-    :tabIndex "0"
-    :title icon
-    :on-click (fn [e]
-                (on-chosen e {:type :tabler-icon
-                              :id icon
-                              :name icon}))
-    :on-mouse-over #(reset! hover {:type :tabler-icon
-                                   :id icon
-                                   :name icon
-                                   :icon icon})
-    :on-mouse-out #()}
+   (when-let [icon (cond-> icon (string? icon) (string/replace " " ""))]
+     {:key icon
+      :tabIndex "0"
+      :title icon
+      :on-click (fn [e]
+                  (on-chosen e {:type :tabler-icon
+                                :id icon
+                                :name icon}))
+      :on-mouse-over #(reset! hover {:type :tabler-icon
+                                     :id icon
+                                     :name icon
+                                     :icon icon})
+      :on-mouse-out #()})
    (ui/icon icon {:size 24})])
 
 (rum/defc icons-cp < rum/static
   [icons opts]
-  (pane-block
+  (pane-section
     (util/format "Icons (%s)" (count icons))
     (for [icon icons]
-      (icon-cp icon opts))))
+      (icon-cp icon opts))
+    {:virtual-list? true}))
 
 (defn get-used-items
   []
@@ -142,11 +176,11 @@
                     (emoji-cp d opts)))]
     [:div.all-pane.pb-10
      (when (count used-items)
-       (pane-block "Frequently used"
+       (pane-section "Frequently used"
          (->> used-items (map item-cp))))
-     (pane-block (util/format "Emojis (%s)" (count emojis))
+     (pane-section (util/format "Emojis (%s)" (count emojis))
        (->> emoji-items (map item-cp)))
-     (pane-block (util/format "Icons (%s)" (count (get-tabler-icons)))
+     (pane-section (util/format "Icons (%s)" (count (get-tabler-icons)))
        (->> icon-items (map item-cp)))]))
 
 (rum/defc tab-observer
@@ -197,8 +231,8 @@
     (rum/use-effect!
       (fn []
         ;; calculate items
-        (let [^js blocks (.querySelectorAll (get-cnt) ".pane-block")
-              items (map #(some-> (.querySelectorAll % ".its > button") (js/Array.from) (js->clj)) blocks)
+        (let [^js sections (.querySelectorAll (get-cnt) ".pane-section")
+              items (map #(some-> (.querySelectorAll % ".its > button") (js/Array.from) (js->clj)) sections)
               step 9
               items (map #(let [count (count %)
                                 m (mod count step)]
@@ -213,24 +247,61 @@
       [])
     [:span.absolute.hidden {:ref *el-ref}]))
 
+(rum/defc color-picker
+  [*color]
+  (let [[color, set-color!] (rum/use-state @*color)
+        *el (rum/use-ref nil)
+        content-fn (fn []
+                     (let [colors ["#6e7b8b" "#5e69d2" "#00b5ed" "#00b55b"
+                                   "#f2be00" "#e47a00" "#f38e81" "#fb434c" nil]]
+                       [:div.color-picker-presets
+                        (for [c colors]
+                          (shui/button
+                            {:on-click (fn [] (set-color! c) (shui/popup-hide!))
+                             :size :sm :variant :outline
+                             :class "it" :style {:background-color c}}
+                            (if c "" (shui/tabler-icon "minus" {:class "scale-75 opacity-70"}))))]))]
+    (rum/use-effect!
+      (fn []
+        (when-let [^js picker (some-> (rum/deref *el) (.closest ".cp__emoji-icon-picker"))]
+          (let [color (if (string/blank? color) "inherit" color)]
+            (.setProperty (.-style picker) "--ls-color-icon-preset" color)
+            (storage/set :ls-icon-color-preset color)))
+        (reset! *color color))
+      [color])
+
+    (shui/button {:size :sm
+                  :ref *el
+                  :class "color-picker"
+                  :on-click (fn [^js e] (shui/popup-show! (.-target e) content-fn {:content-props {:side-offset 6}}))
+                  :variant :outline}
+      [:strong {:style {:color (or color "inherit")}}
+       (shui/tabler-icon "palette")])))
+
 (rum/defcs ^:large-vars/cleanup-todo icon-search <
   (rum/local "" ::q)
   (rum/local nil ::result)
   (rum/local false ::select-mode?)
   (rum/local :all ::tab)
   (rum/local nil ::hover)
+  {:init (fn [s]
+           (assoc s ::color (atom (storage/get :ls-icon-color-preset))))}
   [state {:keys [on-chosen] :as opts}]
   (let [*q (::q state)
         *result (::result state)
         *tab (::tab state)
+        *color (::color state)
         *hover (::hover state)
         *input-ref (rum/create-ref)
         *result-ref (rum/create-ref)
         result @*result
         opts (assoc opts :hover *hover
                     :on-chosen (fn [e m]
-                                 (and on-chosen (on-chosen e m))
-                                 (when (:type m) (add-used-item! m))))
+                                 (let [icon? (= (:type m) :tabler-icon)
+                                       m (if (and icon? (not (string/blank? @*color)))
+                                           (assoc m :color @*color) m)]
+                                   (and on-chosen (on-chosen e m))
+                                   (when (:type m) (add-used-item! m)))))
         *select-mode? (::select-mode? state)
         reset-q! #(when-let [^js input (rum/deref *input-ref)]
                     (reset! *q "")
@@ -281,6 +352,7 @@
      ;; body
      [:div.bd
       {:ref *result-ref
+       :class (or (some-> @*tab (name)) "other")
        :on-mouse-leave #(reset! *hover nil)}
       [:div.search-result
        (if (seq result)
@@ -299,16 +371,19 @@
      [:div.ft
       (if-not @*hover
         ;; tabs
-        [:div.flex.flex-1.flex-row.items-center.gap-2
-         (let [tabs [[:all "All"] [:emoji "Emojis"] [:icon "Icons"]]]
-           (for [[id label] tabs
-                 :let [active? (= @*tab id)]]
-             (shui/button
-               {:variant :ghost
-                :size :sm
-                :class (util/classnames [{:active active?} "tab-item"])
-                :on-click #(reset! *tab id)}
-               label)))]
+        [:<>
+         [:div.flex.flex-1.flex-row.items-center.gap-2
+          (let [tabs [[:all "All"] [:emoji "Emojis"] [:icon "Icons"]]]
+            (for [[id label] tabs
+                  :let [active? (= @*tab id)]]
+              (shui/button
+                {:variant :ghost
+                 :size :sm
+                 :class (util/classnames [{:active active?} "tab-item"])
+                 :on-click #(reset! *tab id)}
+                label)))]
+         (when (not= :emoji @*tab)
+           (color-picker *color))]
 
         ;; preview
         [:div.hover-preview
@@ -318,7 +393,7 @@
            :key   (:id @*hover)
            :title (:name @*hover)}
           (if (= :tabler-icon (:type @*hover))
-            (ui/icon (:icon @*hover) {:size 32})
+            (ui/icon (:icon @*hover) {:size 30})
             (:native (first (:skins @*hover))))]])]]))
 
 (rum/defc icon-picker
@@ -339,7 +414,8 @@
          :class (if has-icon? "px-1 leading-none" "font-normal text-sm px-[0.5px] opacity-50")
          :on-click #(when-not disabled?
                       (shui/popup-show! (.-target %) content-fn
-                        {:content-props {:class "w-auto"}}))}
+                        {:content-props {:class "ls-icon-picker"}}))}
         (if has-icon?
-          (icon icon-value (merge {:size 18} icon-props))
+          [:span {:style {:color (or (:color icon-value) "inherit")}}
+           (icon icon-value (merge {:size 18} icon-props))]
           "Empty")))))

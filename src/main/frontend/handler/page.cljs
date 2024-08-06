@@ -31,6 +31,7 @@
             [logseq.common.config :as common-config]
             [logseq.common.util :as common-util]
             [logseq.common.util.page-ref :as page-ref]
+            [logseq.common.util.block-ref :as block-ref]
             [promesa.core :as p]
             [logseq.common.path :as path]
             [electron.ipc :as ipc]
@@ -42,7 +43,8 @@
             [logseq.graph-parser.db :as gp-db]
             [frontend.modules.outliner.ui :as ui-outliner-tx]
             [frontend.modules.outliner.op :as outliner-op]
-            [frontend.handler.property.util :as pu]))
+            [frontend.handler.property.util :as pu]
+            [datascript.impl.entity :as de]))
 
 (def <create! page-common-handler/<create!)
 (def <delete! page-common-handler/<delete!)
@@ -162,7 +164,7 @@
             (keep (fn [page-uuid]
                     (:db/id (db/get-page page-uuid)))
                   favorites)
-            current-blocks (ldb/sort-by-order (ldb/get-page-blocks @conn (:db/id favorites-page) {}))]
+            current-blocks (ldb/sort-by-order (ldb/get-page-blocks @conn (:db/id favorites-page)))]
         (p/do!
          (ui-outliner-tx/transact!
           {:outliner-op :reorder-favorites}
@@ -245,16 +247,16 @@
   (let [graph-specific-hidden?
         (if (config/db-based-graph? repo)
           (fn [p]
-            (and (contains? (set (:block/type p)) "property") (ldb/built-in? p)))
+            (and (ldb/property? p) (ldb/built-in? p)))
           (fn [p]
             (gp-db/built-in-pages-names (string/upper-case (:block/name p)))))]
     (->> (db/get-all-pages repo)
-        (remove (fn [p]
-                  (let [name (:block/name p)]
-                    (or (util/uuid-string? name)
-                        (common-config/draw? name)
-                        (graph-specific-hidden? p)))))
-        (common-handler/fix-pages-timestamps))))
+         (remove (fn [p]
+                   (let [name (:block/name p)]
+                     (or (util/uuid-string? name)
+                         (common-config/draw? name)
+                         (graph-specific-hidden? p)))))
+         (common-handler/fix-pages-timestamps))))
 
 (defn get-filters
   [page]
@@ -333,14 +335,15 @@
              (common-util/safe-subs edit-content pos current-pos)))
         db-based? (config/db-based-graph? (state/get-current-repo))]
     (if hashtag?
-      (fn [chosen e]
+      (fn [chosen-result e]
         (util/stop e)
         (state/clear-editor-action!)
-        (let [class? (and db-based? hashtag?
-                          (or (string/includes? chosen (str (t :new-class) " "))
+        (let [chosen (:block/title chosen-result)
+              class? (and db-based? hashtag?
+                          (or (string/includes? chosen (str (t :new-tag) " "))
                               (ldb/class? (db/get-page chosen))))
               chosen (-> chosen
-                         (string/replace-first (str (t :new-class) " ") "")
+                         (string/replace-first (str (t :new-tag) " ") "")
                          (string/replace-first (str (t :new-page) " ") ""))
               wrapped? (= page-ref/left-brackets (common-util/safe-subs edit-content (- pos 2) pos))
               wrapped-tag (if (and (util/safe-re-find #"\s+" chosen) (not wrapped?))
@@ -358,15 +361,14 @@
              (let [tag (string/trim chosen)
                    edit-block (state/get-edit-block)
                    get-page-fn (if class? db/get-case-page db/get-page)]
-               (when (and (not (string/blank? tag)) (:block/uuid edit-block))
-                 (p/let [tag-entity (get-page-fn tag)
-                         _ (when-not tag-entity
+               (when (:block/uuid edit-block)
+                 (p/let [_ (when-not (de/entity? chosen-result) ; page not exists yet
                              (if class?
                                (<create-class! tag {:redirect? false
                                                     :create-first-block? false})
                                (<create! tag {:redirect? false
                                               :create-first-block? false})))
-                         tag-entity (get-page-fn tag)]
+                         tag-entity (or (when (de/entity? chosen-result) chosen-result) (get-page-fn tag))]
                    (when class?
                      (add-tag (state/get-current-repo) (:block/uuid edit-block) tag-entity))))))
            (editor-handler/insert-command! id
@@ -377,13 +379,24 @@
                                             :command :page-ref})
 
            (when input (.focus input)))))
-      (fn [chosen e]
+      (fn [chosen-result e]
         (util/stop e)
         (state/clear-editor-action!)
-        (let [chosen' (string/replace-first chosen (str (t :new-page) " ") "")
-              page-ref-text (get-page-ref-text chosen')]
+        (let [chosen (:block/title chosen-result)
+              chosen' (string/replace-first chosen (str (t :new-page) " ") "")
+              ref-text (if (and (de/entity? chosen-result) (not (ldb/page? chosen-result)))
+                         (cond
+                           (and db-based? (seq (:block/tags chosen-result)))
+                           (page-ref/->page-ref (:block/title chosen-result))
+                           db-based?
+                           (page-ref/->page-ref (:block/uuid chosen-result))
+                           :else
+                           (block-ref/->block-ref (:block/uuid chosen-result)))
+                         (get-page-ref-text chosen'))]
+          (when (de/entity? chosen-result)
+            (state/conj-block-ref! chosen-result))
           (editor-handler/insert-command! id
-                                          page-ref-text
+                                          ref-text
                                           format
                                           {:last-pattern (str page-ref/left-brackets (if (editor-handler/get-selected-text) "" q))
                                            :end-pattern page-ref/right-brackets
@@ -466,11 +479,15 @@
     (notification/show! "No file found" :warning)))
 
 (defn copy-page-url
-  ([] (copy-page-url (page-util/get-current-page-name)))
-  ([page-name]
-   (if page-name
+  ([]
+   (let [id (if (config/db-based-graph? (state/get-current-repo))
+              (page-util/get-current-page-uuid)
+              (page-util/get-current-page-name))]
+     (copy-page-url id)))
+  ([page-uuid]
+   (if page-uuid
      (util/copy-to-clipboard!
-      (url-util/get-logseq-graph-page-url nil (state/get-current-repo) page-name))
+      (url-util/get-logseq-graph-page-url nil (state/get-current-repo) (str page-uuid)))
      (notification/show! "No page found to copy" :warning))))
 
 (defn toggle-properties!

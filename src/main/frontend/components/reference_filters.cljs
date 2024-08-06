@@ -6,6 +6,7 @@
             [frontend.search :as search]
             [frontend.ui :as ui]
             [frontend.util :as util]
+            [promesa.core :as p]
             [rum.core :as rum]
             [frontend.config :as config]
             [frontend.state :as state]
@@ -20,7 +21,7 @@
   [page filters filtered-references*]
   [:div.flex.gap-2.flex-wrap.items-center
    (let [filtered-references (if (de/entity? (first filtered-references*))
-                               (map (fn [e] [(:block/original-name e)]) filtered-references*)
+                               (map (fn [e] [(:block/title e)]) filtered-references*)
                                filtered-references*)] <
         (for [[ref-name ref-count] filtered-references]
           (when ref-name
@@ -84,6 +85,8 @@
       [:input.cp__filters-input.w-full.bg-transparent
        {:placeholder (t :linked-references/filter-search)
         :autofocus true
+        :ref (fn [^js el] (when el
+                            (-> (p/delay 32) (p/then #(.focus el)))))
         :on-change (fn [e]
                      (reset! filter-search (util/evalue e)))}]]
      (let [all-filters (set

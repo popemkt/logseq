@@ -11,13 +11,9 @@
   "block name, lowercase, only page-blocks have this attr"
   :string)
 
-(sr/defkeyword :block/original-name
-  "like `:block/name`, but not unified into lowercase"
-  :string)
-
 (sr/defkeyword :block/type
   "block type"
-  [:enum #{"property"} #{"class"} #{"whiteboard"} #{"hidden"}])
+  [:enum "page" "property" "class" "whiteboard" "hidden"])
 
 (sr/defkeyword :block/parent
   "page blocks don't have this attr")
@@ -28,14 +24,14 @@
 - some no-order blocks don't have this attr too,
   TODO: list these types")
 
-(sr/defkeyword :block/content
-  "content string of the blocks.
+(sr/defkeyword :block/title
+  "Title or content string of the blocks.
 in db-version, page-references(e.g. [[page-name]]) are stored as [[~^uuid]]."
   :string)
 
-(sr/defkeyword :block/raw-content
-  "like `:block/content`,
-but when eval `(:block/raw-content block-entity)`, return raw-content of this block"
+(sr/defkeyword :block/raw-title
+  "like `:block/title`,
+but when eval `(:block/raw-title block-entity)`, return raw title of this block"
   :string)
 
 (sr/defkeyword :kv/value

@@ -268,7 +268,7 @@
             (subs v' 1)
             (or (page-ref/get-page-name v') v'))
           ;; Convert number pages to string
-          (and (double? v) (= :page (get-in (db-utils/entity k) [:block/schema :type])))
+          (and (double? v) (= :node (get-in (db-utils/entity k) [:block/schema :type])))
           (str v)
           :else
           v')))
@@ -652,7 +652,7 @@ Some bindings in this fn:
   "Like ldb/block-attrs but for query dsl an db graphs"
   ;; '*' needed as we need to pull user properties and don't know their names in advance
   '[*
-    {:block/page [:db/id :block/name :block/original-name :block/journal-day]}
+    {:block/page [:db/id :block/name :block/title :block/journal-day]}
     {:block/_parent ...}])
 
 (defn query

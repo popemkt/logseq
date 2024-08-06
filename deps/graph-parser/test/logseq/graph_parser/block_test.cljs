@@ -23,22 +23,22 @@
         (and (:block/uuid result)
              (not= (:uuid x) (:block/uuid result))
              (= (select-keys result
-                             [:block/properties :block/content :block/properties-text-values :block/properties-order]) (gp-block/block-keywordize y))))
-    {:properties {:id "63f199bc-c737-459f-983d-84acfcda14fe"}, :tags [], :format :markdown, :meta {:start_pos 51, :end_pos 101}, :macros [], :content "bar\nid:: 63f199bc-c737-459f-983d-84acfcda14fe", :properties-text-values {:id "63f199bc-c737-459f-983d-84acfcda14fe"}, :level 1, :uuid #uuid "63f199bc-c737-459f-983d-84acfcda14fe", :properties-order [:id]}
+                             [:block/properties :block/title :block/properties-text-values :block/properties-order]) (gp-block/block-keywordize y))))
+    {:properties {:id "63f199bc-c737-459f-983d-84acfcda14fe"}, :tags [], :format :markdown, :meta {:start_pos 51, :end_pos 101}, :macros [], :title "bar\nid:: 63f199bc-c737-459f-983d-84acfcda14fe", :properties-text-values {:id "63f199bc-c737-459f-983d-84acfcda14fe"}, :level 1, :uuid #uuid "63f199bc-c737-459f-983d-84acfcda14fe", :properties-order [:id]}
     {:properties {},
-     :content "bar",
+     :title "bar",
      :properties-text-values {},
      :properties-order []}
 
-    {:properties {:id "63f199bc-c737-459f-983d-84acfcda14fe"}, :tags [], :format :org, :meta {:start_pos 51, :end_pos 101}, :macros [], :content "bar\n:id: 63f199bc-c737-459f-983d-84acfcda14fe", :properties-text-values {:id "63f199bc-c737-459f-983d-84acfcda14fe"}, :level 1, :uuid #uuid "63f199bc-c737-459f-983d-84acfcda14fe", :properties-order [:id]}
+    {:properties {:id "63f199bc-c737-459f-983d-84acfcda14fe"}, :tags [], :format :org, :meta {:start_pos 51, :end_pos 101}, :macros [], :title "bar\n:id: 63f199bc-c737-459f-983d-84acfcda14fe", :properties-text-values {:id "63f199bc-c737-459f-983d-84acfcda14fe"}, :level 1, :uuid #uuid "63f199bc-c737-459f-983d-84acfcda14fe", :properties-order [:id]}
     {:properties {},
-     :content "bar",
+     :title "bar",
      :properties-text-values {},
      :properties-order []}
 
-    {:properties {:id "63f199bc-c737-459f-983d-84acfcda14fe"}, :tags [], :format :markdown, :meta {:start_pos 51, :end_pos 101}, :macros [], :content "bar\n  \n  id:: 63f199bc-c737-459f-983d-84acfcda14fe\nblock body", :properties-text-values {:id "63f199bc-c737-459f-983d-84acfcda14fe"}, :level 1, :uuid #uuid "63f199bc-c737-459f-983d-84acfcda14fe", :properties-order [:id]}
+    {:properties {:id "63f199bc-c737-459f-983d-84acfcda14fe"}, :tags [], :format :markdown, :meta {:start_pos 51, :end_pos 101}, :macros [], :title "bar\n  \n  id:: 63f199bc-c737-459f-983d-84acfcda14fe\nblock body", :properties-text-values {:id "63f199bc-c737-459f-983d-84acfcda14fe"}, :level 1, :uuid #uuid "63f199bc-c737-459f-983d-84acfcda14fe", :properties-order [:id]}
     {:properties {},
-     :content "bar\nblock body",
+     :title "bar\nblock body",
      :properties-text-values {},
      :properties-order []}))
 
@@ -114,11 +114,15 @@
   [db content]
   (->> (d/q '[:find (pull ?b [* {:block/refs [:block/uuid]}])
               :in $ ?content
-              :where [?b :block/content ?content]]
+              :where [?b :block/title ?content]]
             db
             content)
        (map first)
        first))
+
+(defn- parse-file
+  [conn file-path file-content & [options]]
+  (graph-parser/parse-file conn file-path file-content (merge-with merge options {:extract-options {:verbose false}})))
 
 (deftest refs-from-block-refs
   (let [conn (gp-db/start-conn)
@@ -127,7 +131,7 @@
         block-ref-via-content (str "Link to " (block-ref/->block-ref id))
         block-ref-via-block-properties (str "B block\nref:: " (block-ref/->block-ref id))
         body (str "- " block "\n- " block-ref-via-content "\n- " block-ref-via-block-properties)]
-    (graph-parser/parse-file conn "foo.md" body {})
+    (parse-file conn "foo.md" body {})
 
     (testing "Block refs in blocks"
       (is (= [{:block/uuid (uuid id)}]
@@ -141,7 +145,7 @@
 
     (testing "Block refs in pre-block"
       (let [block-ref-via-page-properties (str "page-ref:: " (block-ref/->block-ref id))]
-        (graph-parser/parse-file conn "foo2.md" block-ref-via-page-properties {})
+        (parse-file conn "foo2.md" block-ref-via-page-properties {})
         (is (contains?
              (set (:block/refs (find-block-for-content @conn block-ref-via-page-properties)))
              {:block/uuid (uuid id)})
@@ -152,7 +156,7 @@
         deadline-block "do something\nDEADLINE: <2023-02-21 Tue>"
         scheduled-block "do something else\nSCHEDULED: <2023-02-20 Mon>"
         body (str "- " deadline-block "\n- " scheduled-block)]
-    (graph-parser/parse-file conn "foo.md" body {})
+    (parse-file conn "foo.md" body {})
 
     (is (= 20230220
            (:block/scheduled (find-block-for-content @conn scheduled-block)))

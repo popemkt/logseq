@@ -1,8 +1,9 @@
 (ns logseq.db.frontend.property
   "Property related fns for DB graphs and frontend/datascript usage"
-  (:require [datascript.core :as d]
-            [clojure.string :as string]
+  (:require [clojure.string :as string]
+            [datascript.core :as d]
             [flatland.ordered.map :refer [ordered-map]]
+            [logseq.common.uuid :as common-uuid]
             [logseq.db.frontend.db-ident :as db-ident]))
 
 ;; Main property vars
@@ -19,26 +20,26 @@
      * :view-context - Keyword to indicate which view contexts a property can be
        seen in when :public? is set. Valid values are :page and :block. Property can
        be viewed in any context if not set
-   * :original-name - Property's :block/original-name
+   * :title - Property's :block/title
    * :name - Property's :block/name as a keyword. If none given, one is derived from the db/ident
    * :attribute - Property keyword that is saved to a datascript attribute outside of :block/properties
    * :closed-values - Vec of closed-value maps for properties with choices. Map
      has keys :value, :db-ident, :uuid and :icon"
   (ordered-map
-   :block/alias           {:original-name "Alias"
+   :block/alias           {:title "Alias"
                            :attribute :block/alias
-                           :schema {:type :page
+                           :schema {:type :node
                                     :cardinality :many
                                     :view-context :page
                                     :public? true}}
-   :block/tags           {:original-name "Tags"
+   :block/tags           {:title "Tags"
                           :attribute :block/tags
-                          :schema {:type :page
+                          :schema {:type :node
                                    :cardinality :many
                                    :public? true
                                    :classes #{:logseq.class/Root}}}
-   :logseq.property/page-tags {:original-name "pageTags"
-                               :schema {:type :page
+   :logseq.property/page-tags {:title "pageTags"
+                               :schema {:type :node
                                         :public? true
                                         :view-context :page
                                         :cardinality :many}}
@@ -68,14 +69,11 @@
                                               :hide? true}}
    :logseq.property/ls-type {:schema {:type :keyword
                                       :hide? true}}
-   :logseq.property/hl-type {:schema {:type :keyword
-                                      :hide? true}}
-   :logseq.property/hl-color {:schema {:type :default
-                                       :hide? true}}
-   :logseq.property.pdf/hl-page {:schema {:type :number
-                                          :hide? true}}
-   :logseq.property.pdf/hl-stamp {:schema {:type :number
-                                           :hide? true}}
+   :logseq.property/hl-type {:schema {:type :keyword :hide? true}}
+   :logseq.property/hl-color {:schema {:type :default :hide? true}}
+   :logseq.property.pdf/hl-page {:schema {:type :number :hide? true}}
+   :logseq.property.pdf/hl-stamp {:schema {:type :number :hide? true}}
+   :logseq.property.pdf/hl-value {:schema {:type :map :hide? true}}
    :logseq.property.pdf/file
    {:schema {:type :default :hide? true :public? true :view-context :page}}
    :logseq.property.pdf/file-path
@@ -84,10 +82,10 @@
                                      :schema {:type :default
                                               :hide? true}}
    :logseq.property.linked-references/includes {:schema {; could be :entity to support blocks(objects) in the future
-                                                         :type :page
+                                                         :type :node
                                                          :cardinality :many
                                                          :hide? true}}
-   :logseq.property.linked-references/excludes {:schema {:type :page
+   :logseq.property.linked-references/excludes {:schema {:type :node
                                                          :cardinality :many
                                                          :hide? true}}
    :logseq.property.tldraw/page {:name :logseq.tldraw.page
@@ -99,17 +97,16 @@
 
    ;; Task props
    :logseq.task/status
-   {:original-name "Status"
+   {:title "Status"
     :schema
     {:type :default
      :public? true
-     :position :block-left
-     :shortcut "s"}
+     :position :block-left}
     :closed-values
     (mapv (fn [[db-ident value icon]]
             {:db-ident db-ident
              :value value
-             :uuid (random-uuid)
+             :uuid (common-uuid/gen-uuid :db-ident-block-uuid db-ident)
              :icon {:type :tabler-icon :id icon}})
           [[:logseq.task/status.backlog "Backlog" "Backlog"]
            [:logseq.task/status.todo "Todo" "Todo"]
@@ -118,32 +115,30 @@
            [:logseq.task/status.done "Done" "Done"]
            [:logseq.task/status.canceled "Canceled" "Cancelled"]])}
    :logseq.task/priority
-   {:original-name "Priority"
+   {:title "Priority"
     :schema
     {:type :default
      :public? true
-     :position :block-left
-     :shortcut "p"}
+     :position :block-left}
     :closed-values
     (mapv (fn [[db-ident value icon]]
             {:db-ident db-ident
              :value value
-             :uuid (random-uuid)
+             :uuid (common-uuid/gen-uuid :db-ident-block-uuid db-ident)
              :icon {:type :tabler-icon :id icon}})
-          [[:logseq.task/priority.urgent "Urgent" "cell-signal-5"]
-           [:logseq.task/priority.high "High" "cell-signal-4"]
-           [:logseq.task/priority.medium "Medium" "cell-signal-3"]
-           [:logseq.task/priority.low "Low" "cell-signal-2"]])}
+          [[:logseq.task/priority.urgent "Urgent" "priorityLvlUrgent"]
+           [:logseq.task/priority.high "High" "priorityLvlHigh"]
+           [:logseq.task/priority.medium "Medium" "priorityLvlMedium"]
+           [:logseq.task/priority.low "Low" "priorityLvlLow"]])}
    :logseq.task/deadline
-   {:original-name "Deadline"
+   {:title "Deadline"
     :schema {:type :date
              :public? true
-             :position :block-below
-             :shortcut "d"}}
+             :position :block-below}}
 
    ;; TODO: Add more props :Assignee, :Estimate, :Cycle, :Project
 
-   :logseq.property/icon {:original-name "Icon"
+   :logseq.property/icon {:title "Icon"
                           :schema {:type :map}}
    :logseq.property/public {:schema
                             {:type :checkbox
@@ -154,7 +149,39 @@
                                              {:type :checkbox
                                               :hide? true
                                               :view-context :page
-                                              :public? true}}))
+                                              :public? true}}
+   :logseq.property/description {:schema
+                                 {:type :default
+                                  :public? true}}
+
+   :logseq.property.table/sorting {:schema
+                                   {:type :coll
+                                    :hide? true
+                                    :public? false}}
+
+   :logseq.property.table/filters {:schema
+                                   {:type :coll
+                                    :hide? true
+                                    :public? false}}
+
+   :logseq.property.table/hidden-columns {:schema
+                                          {:type :keyword
+                                           :cardinality :many
+                                           :hide? true
+                                           :public? false}}
+
+   :logseq.property.table/ordered-columns {:schema
+                                           {:type :coll
+                                            :hide? true
+                                            :public? false}}
+   :logseq.property/view-for {:schema
+                              {:type :keyword
+                               :hide? true
+                               :public? false}}
+   :logseq.property.asset/remote-metadata {:schema
+                                           {:type :map
+                                            :hide? true
+                                            :public? false}}))
 
 (def built-in-properties
   (->> built-in-properties*
@@ -178,7 +205,7 @@
 
 (def logseq-property-namespaces
   #{"logseq.property" "logseq.property.tldraw" "logseq.property.pdf" "logseq.task"
-    "logseq.property.linked-references"})
+    "logseq.property.linked-references" "logseq.property.asset" "logseq.property.table"})
 
 (defn logseq-property?
   "Determines if keyword is a logseq property"
@@ -224,17 +251,15 @@
 (defn closed-value-content
   "Gets content/value of a given closed value ent/map. Works for all closed value types"
   [ent]
-  (or (:block/content ent)
+  (or (:block/title ent)
       (:property.value/content ent)))
 
 (defn property-value-content
   "Given an entity, gets the content for the property value of a ref type
   property i.e. what the user sees. For page types the content is the page name"
   [ent]
-  (or (:block/content ent)
-      (if-some [content (:property.value/content ent)]
-        content
-        (:block/original-name ent))))
+  (or (:block/title ent)
+      (:property.value/content ent)))
 
 (defn ref->property-value-content
   "Given a ref from a pulled query e.g. `{:db/id X}`, gets a readable name for
@@ -292,6 +317,6 @@
   [db block]
   (->> (properties block)
        (map (fn [[k v]]
-              [(:block/original-name (d/entity db k))
+              [(:block/title (d/entity db k))
                (ref->property-value-contents db v)]))
        (into {})))

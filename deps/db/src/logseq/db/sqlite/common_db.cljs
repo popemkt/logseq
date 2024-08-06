@@ -21,12 +21,17 @@
   (when (and db (string? page-name))
     (first (sort (map :e (get-pages-by-name db page-name))))))
 
-(defn get-first-page-by-original-name
-  "Return the oldest page's db id for :block/original-name"
+(defn get-first-page-by-title
+  "Return the oldest page's db id for :block/title"
   [db page-name]
   {:pre [(string? page-name)]}
-  (first (sort (map :e
-                    (d/datoms db :avet :block/original-name page-name)))))
+  (->> (d/datoms db :avet :block/title page-name)
+       (filter (fn [d]
+                 (let [e (d/entity db (:e d))]
+                   (or (sqlite-util/page? e) (:block/tags e)))))
+       (map :e)
+       sort
+       first))
 
 (comment
   (defn- get-built-in-files
@@ -77,34 +82,32 @@
 (defn- property-with-values
   [db block]
   (when (entity-plus/db-based-graph? db)
-    (let [block (d/entity db (:db/id block))
-          block-properties (when (seq (:block/properties block))
-                             (mapcat
-                              (fn [[_property-id property-values]]
-                                (let [values (if (and (coll? property-values)
-                                                      (map? (first property-values)))
-                                               property-values
-                                               #{property-values})
-                                      value-ids (when (every? map? values)
-                                                  (->> (map :db/id values)
-                                                       (filter (fn [id] (or (int? id) (keyword? id))))))
-                                      value-blocks (->>
-                                                    (when (seq value-ids)
-                                                      (map
-                                                       (fn [id] (d/pull db '[*] id))
-                                                       value-ids))
-                                                    ;; FIXME: why d/pull returns {:db/id db-ident} instead of {:db/id number-eid}?
-                                                    (map (fn [block]
-                                                           (let [from-property-id (get-in block [:logseq.property/created-from-property :db/id])]
-                                                             (if (keyword? from-property-id)
-                                                               (assoc-in block [:logseq.property/created-from-property :db/id] (:db/id (d/entity db from-property-id)))
-                                                               block)))))
-                                      page (when (seq values)
-                                             (when-let [page-id (:db/id (:block/page (d/entity db (:db/id (first values)))))]
-                                               (d/pull db '[*] page-id)))]
-                                  (remove nil? (concat [page] value-blocks))))
-                              (:block/properties block)))]
-      block-properties)))
+    (let [block (d/entity db (:db/id block))]
+      (->> (:block/properties block)
+           vals
+           (mapcat
+            (fn [property-values]
+              (let [values (->>
+                            (if (and (coll? property-values)
+                                     (map? (first property-values)))
+                              property-values
+                              #{property-values})
+                            (remove sqlite-util/page?))
+                    value-ids (when (every? map? values)
+                                (->> (map :db/id values)
+                                     (filter (fn [id] (or (int? id) (keyword? id))))))
+                    value-blocks (->>
+                                  (when (seq value-ids)
+                                    (map
+                                     (fn [id] (d/pull db '[*] id))
+                                     value-ids))
+                             ;; FIXME: why d/pull returns {:db/id db-ident} instead of {:db/id number-eid}?
+                                  (keep (fn [block]
+                                          (let [from-property-id (get-in block [:logseq.property/created-from-property :db/id])]
+                                            (if (keyword? from-property-id)
+                                              (assoc-in block [:logseq.property/created-from-property :db/id] (:db/id (d/entity db from-property-id)))
+                                              block)))))]
+                value-blocks)))))))
 
 (defn get-block-children-ids
   "Returns children UUIDs"
@@ -140,7 +143,7 @@
                              id))
         page? (sqlite-util/page? block)
         get-children (fn [block children page?]
-                       (let [long-page? (and (> (count children) 500) (not (contains? (:block/type block) "whiteboard")))]
+                       (let [long-page? (and (> (count children) 500) (not (sqlite-util/whiteboard? block)))]
                          (if long-page?
                            (->> (map (fn [e]
                                        (select-keys e [:db/id :block/uuid :block/page :block/order :block/parent :block/collapsed? :block/link]))
@@ -235,6 +238,14 @@
                         (d/datoms db :eavt (:db/id child)))
                       children)))))
 
+(defn get-views-data
+  [db]
+  (let [page-id (get-first-page-by-name db common-config/views-page-name)
+        children (when page-id (:block/_parent (d/entity db page-id)))]
+    (when (seq children)
+      (mapcat (fn [b] (d/datoms db :eavt (:db/id b)))
+              children))))
+
 (defn get-initial-data
   "Returns current database schema and initial data.
    NOTE: This fn is called by DB and file graphs"
@@ -248,6 +259,7 @@
                            (d/datoms db :eavt (:db/id e))))
                        [:logseq.kv/db-type :logseq.kv/graph-uuid :logseq.property/empty-placeholder])
         favorites (when db-graph? (get-favorites db))
+        views (when db-graph? (get-views-data db))
         latest-journals (get-latest-journals db 1)
         all-files (get-all-files db)
         all-pages (get-all-pages db)
@@ -257,6 +269,7 @@
                      all-pages
                      structured-datoms
                      favorites
+                     views
                      latest-journals
                      all-files)]
     {:schema schema

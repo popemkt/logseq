@@ -6,12 +6,11 @@
      * Some classes are renamed due to naming conflicts
    * All properties with their property type, url, description
      * Property type is determined by looking for the first range value that is
-       a subclass of https://schema.org/DataType and then falling back to :page.
+       a subclass of https://schema.org/DataType and then falling back to :node.
      * Some properties are skipped because they are superseded/deprecated or because they have a property
        type logseq doesnt' support yet
-     * schema.org assumes no cardinality. For now, only :page properties are given a :cardinality :many"
+     * schema.org assumes no cardinality. For now, only :node properties are given a :cardinality :many"
   (:require [logseq.outliner.cli :as outliner-cli]
-            [logseq.common.util :as common-util]
             [logseq.db.frontend.property :as db-property]
             [clojure.string :as string]
             [clojure.edn :as edn]
@@ -63,10 +62,10 @@
         inverted-renamed-classes (set/map-invert renamed-classes)
         class-name (strip-schema-prefix (class-m "@id"))
         url (str "https://schema.org/" (get inverted-renamed-classes class-name class-name))]
-    (cond-> {:block/original-name class-name
+    (cond-> {:block/title class-name
              :build/properties (cond-> {:url url}
                                  (class-m "rdfs:comment")
-                                 (assoc :description (get-comment-string (class-m "rdfs:comment") renamed-pages)))}
+                                 (assoc :logseq.property/description (get-comment-string (class-m "rdfs:comment") renamed-pages)))}
       parent-class'
       (assoc :build/class-parent (keyword (strip-schema-prefix parent-class')))
       (seq properties)
@@ -77,8 +76,8 @@
   {"schema:Integer" :number
    "schema:Float" :number
    "schema:Number" :number
-   "schema:Text_Class" :default
-   "schema:URL_Class" :url
+   "schema:Text" :default
+   "schema:URL" :url
    "schema:Boolean" :checkbox
    "schema:Date" :date})
 
@@ -95,7 +94,7 @@
 
 (defn- get-schema-type [range-includes class-map]
   (some #(or (schema->logseq-data-types %)
-             (when (class-map %) :page))
+             (when (class-map %) :node))
         range-includes))
 
 (defn- ->property-page [property-m class-map {:keys [verbose renamed-pages renamed-properties]}]
@@ -106,25 +105,25 @@
             (println "Picked property type:"
                      {:property (property-m "@id") :type schema-type :range-includes (vec range-includes)}))
         _ (assert schema-type (str "No schema found for property " (property-m "@id")))
-        _ (when (= schema-type :page)
+        _ (when (= schema-type :node)
             (when-let [datatype-classes (not-empty (set/intersection (set range-includes)
                                                                      (set (keys schema->logseq-data-types))))]
               (throw (ex-info (str "property " (pr-str (property-m "@id"))
-                                   " with type :page has DataType class values which aren't supported: " datatype-classes) {}))))
+                                   " with type :node has DataType class values which aren't supported: " datatype-classes) {}))))
 
         inverted-renamed-properties (set/map-invert renamed-properties)
         class-name (strip-schema-prefix (property-m "@id"))
         url (str "https://schema.org/" (get inverted-renamed-properties class-name class-name))
         schema (cond-> {:type schema-type}
                  ;; This cardinality rule should be adjusted as we use schema.org more
-                 (= schema-type :page)
-                 (assoc :cardinality :many)
-                 (property-m "rdfs:comment")
-                 (assoc :description (get-comment-string (property-m "rdfs:comment") renamed-pages)))]
+                 (= schema-type :node)
+                 (assoc :cardinality :many))]
     {(keyword (strip-schema-prefix (property-m "@id")))
      (cond-> {:block/schema schema
-              :build/properties {:url url}}
-       (= schema-type :page)
+              :build/properties (cond-> {:url url}
+                                  (property-m "rdfs:comment")
+                                  (assoc :logseq.property/description (get-comment-string (property-m "rdfs:comment") renamed-pages)))}
+       (= schema-type :node)
        (assoc :build/schema-classes (mapv (comp keyword strip-schema-prefix) range-includes)))}))
 
 (defn- get-class-to-properties
@@ -158,11 +157,11 @@
 
 (defn- get-vector-conflicts
   "Given a seq of tuples returns a seq of tuples that conflict i.e. their first element
-   has a case insensitive conflict/duplicate with another. An example conflict:
-   [[\"schema:businessFunction\" :property] [\"schema:BusinessFunction\" :class]]"
+   has a case sensitive conflict/duplicate with another. An example conflict:
+   [[\"schema:status\" :property] [\"schema:status\" :node]]"
   [tuples-seq]
   (->> tuples-seq
-       (group-by (comp common-util/page-name-sanity-lc first))
+       (group-by first)
        (filter #(> (count (val %)) 1))
        vals))
 
@@ -190,7 +189,8 @@
     (if verbose
       (println "Renaming the following properties because they have names that conflict with Logseq's built in pages"
                (keys renamed-properties) "\n")
-      (println "Renaming" (count renamed-properties) "properties due to page name conflicts"))
+      (when (pos? (count renamed-properties))
+        (println "Renaming" (count renamed-properties) "properties due to page name conflicts")))
     renamed-properties))
 
 (defn- detect-id-conflicts-and-get-renamed-classes
@@ -219,7 +219,8 @@
     (if verbose
       (println "Renaming the following classes because they have property names that conflict with Logseq's case insensitive :block/name:"
                (keys renamed-classes) "\n")
-      (println "Renaming" (count renamed-classes) "classes due to page name conflicts"))
+      (when (pos? (count renamed-classes))
+        (println "Renaming" (count renamed-classes) "classes due to page name conflicts")))
     renamed-classes))
 
 (defn- get-all-properties [schema-data {:keys [verbose]}]
@@ -241,7 +242,7 @@
                                    (->class-page % class-to-properties options)))
                      (into {}))]
     (assert (= ["Thing"] (keep #(when-not (:build/class-parent %)
-                                  (:block/original-name %))
+                                  (:block/title %))
                                (vals classes)))
             "Thing is the only class that doesn't have a schema.org parent class")
     classes))
@@ -255,8 +256,13 @@
                           (get-schema-type (get-range-includes property-m) class-map)))
                   frequencies)
              "\n"))
-  (apply merge
-         (mapv #(->property-page % class-map options) select-properties)))
+  (assoc
+   (apply merge
+          (mapv #(->property-page % class-map options) select-properties))
+   ;; Have to update schema for now as validation doesn't take into account existing properties
+   :logseq.property/description {:block/schema {:public? true :type :default}
+                                 :build/properties {:url "https://schema.org/description"
+                                                    :logseq.property/description "A description of the item."}}))
 
 (defn- get-all-classes-and-properties
   "Get all classes and properties from raw json file"
@@ -266,15 +272,17 @@
                                                 (if (string? type') [type'] type')))
                                          "rdfs:Class")
                              schema-data)
-        all-properties* (get-all-properties schema-data options)
+        ;; Use built-in description
+        all-properties* (remove #(= "schema:description" (% "@id")) (get-all-properties schema-data options))
         property-tuples (map #(vector (% "@id") :property) all-properties*)
         class-tuples (map #(vector (% "@id") :class) all-classes*)
-        page-tuples (map #(vector (str "schema:" %) :page) existing-pages)
+        page-tuples (map #(vector (str "schema:" %) :node) existing-pages)
         renamed-classes (detect-id-conflicts-and-get-renamed-classes
                          property-tuples class-tuples page-tuples options)
         renamed-properties (detect-property-conflicts-and-get-renamed-properties
                             property-tuples page-tuples options)
         renamed-pages (merge renamed-classes renamed-properties)
+        ;; Note: schema:description refs don't get renamed but they aren't used
         ;; Updates keys like @id, @subClassOf
         rename-page-ids (fn [m]
                           (w/postwalk (fn [x]
@@ -308,7 +316,7 @@
         select-class-ids
         (if (:subset options)
           ["schema:Person" "schema:CreativeWorkSeries" "schema:Organization"
-           "schema:Movie" "schema:CreativeWork" "schema:Thing"]
+           "schema:Movie" "schema:CreativeWork" "schema:Thing" "schema:Comment"]
           (keys class-map))
         class-to-properties (get-class-to-properties select-class-ids all-properties)
         select-properties (set (mapcat val class-to-properties))
@@ -355,10 +363,10 @@
 (defn- write-debug-file [db]
   (let [ents (remove #(db-malli-schema/internal-ident? (:db/ident %))
                      (d/q '[:find [(pull ?b [*
-                                             {:class/schema.properties [:block/original-name]}
-                                             {:property/schema.classes [:block/original-name]}
-                                             {:class/parent [:block/original-name]}
-                                             {:block/refs [:block/original-name]}]) ...]
+                                             {:class/schema.properties [:block/title]}
+                                             {:property/schema.classes [:block/title]}
+                                             {:class/parent [:block/title]}
+                                             {:block/refs [:block/title]}]) ...]
                             :in $
                             :where [?b :db/ident ?ident]]
                           db))]
@@ -367,7 +375,7 @@
                        (->> ents
                             (map (fn [m]
                                    (let [props (db-property/properties m)]
-                                     (cond-> (select-keys m [:block/name :block/type :block/original-name :block/schema :db/ident
+                                     (cond-> (select-keys m [:block/name :block/type :block/title :block/schema :db/ident
                                                              :class/schema.properties :class/parent
                                                              :db/cardinality :property/schema.classes :block/refs])
                                        (seq props)
@@ -377,13 +385,13 @@
                                                                                      (db-property/property-value-content (d/entity db (:db/id v)))
                                                                                      v)))))
                                        (seq (:class/schema.properties m))
-                                       (update :class/schema.properties #(set (map :block/original-name %)))
+                                       (update :class/schema.properties #(set (map :block/title %)))
                                        (some? (:class/parent m))
-                                       (update :class/parent :block/original-name)
+                                       (update :class/parent :block/title)
                                        (seq (:property/schema.classes m))
-                                       (update :property/schema.classes #(set (map :block/original-name %)))
+                                       (update :property/schema.classes #(set (map :block/title %)))
                                        (seq (:block/refs m))
-                                       (update :block/refs #(set (map :block/original-name %)))))))
+                                       (update :block/refs #(set (map :block/title %)))))))
                             set)))))
 
 (defn -main [args]
@@ -402,7 +410,7 @@
                                     options)
         {:keys [init-tx block-props-tx]} (outliner-cli/build-blocks-tx init-data)]
     (println "Generating" (str (count (filter :block/name init-tx)) " pages with "
-                               (count (:classes init-data)) " classes and "
+                               (count (:classes init-data)) " tags and "
                                (count (:properties init-data)) " properties ..."))
     (d/transact! conn init-tx)
     (d/transact! conn block-props-tx)

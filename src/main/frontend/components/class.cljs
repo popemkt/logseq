@@ -17,16 +17,16 @@
         exclude-ids (-> (set (map (fn [id] (:block/uuid (db/entity id))) children-pages))
                         (conj (:block/uuid page))) ; break cycle
         classes (->> (model/get-all-classes repo)
-                     (remove (fn [[_name id]] (contains? exclude-ids id))))
+                     (remove (fn [e] (contains? exclude-ids (:block/uuid e)))))
         options (sort-by :label
-                         (map (fn [[name id]] {:label name
-                                               :value id
-                                               :selected (= class id)})
+                         (map (fn [entity] {:label (:block/title entity)
+                                            :value (:block/uuid entity)
+                                            :selected (= class (:block/uuid entity))})
                               classes))
         options (cons (if class
-                        {:label "Choose parent class"
+                        {:label "Choose parent tag"
                          :value "Choose"}
-                        {:label "Choose parent class"
+                        {:label "Choose parent tag"
                          :disabled true
                          :selected true
                          :value "Choose"})
@@ -65,19 +65,21 @@
                :or {show-title? true}}]
   (let [page-id (:db/id page)
         page (when page-id (db/sub-block page-id))]
+    (prn :debug :page-id page-id
+         :page page)
     (when page
       [:div.property-configure.grid.gap-2
-       (when show-title? [:h1.title.mb-4 "Configure class"])
+       (when show-title? [:h1.title.mb-4 "Configure tag"])
 
        (when-not (= (:db/ident page) :logseq.class/Root)
          [:div.grid.grid-cols-5.gap-1.items-center.class-parent
-          [:div.col-span-2 "Parent class:"]
+          [:div.col-span-2 "Parent tag:"]
           (if config/publishing?
             [:div.col-span-3
              (if-let [parent-class (some-> (:db/id (:class/parent page))
                                            db/entity)]
                [:a {:on-click #(route-handler/redirect-to-page! (:block/uuid parent-class))}
-                (:block/original-name parent-class)]
+                (:block/title parent-class)]
                "None")]
             [:div.col-span-3
              (let [parent (some-> (:db/id (:class/parent page))
@@ -92,11 +94,11 @@
                class-ancestors (reverse ancestor-pages)]
            (when (> (count class-ancestors) 2)
              [:div.grid.grid-cols-5.gap-1.items-center.class-ancestors
-              [:div.col-span-2 "Ancestor classes:"]
+              [:div.col-span-2 "Ancestor tags:"]
               [:div.col-span-3
                (interpose [:span.opacity-50.text-sm " > "]
-                          (map (fn [{class-name :block/original-name :as ancestor}]
-                                 (if (= class-name (:block/original-name page))
+                          (map (fn [{class-name :block/title :as ancestor}]
+                                 (if (= class-name (:block/title page))
                                    [:span class-name]
                                    [:a {:on-click #(route-handler/redirect-to-page! (:block/uuid ancestor))} class-name]))
                                class-ancestors))]])))])))
@@ -106,8 +108,8 @@
   (let [children (:class/_parent class)]
     (when (seq children)
       [:ul
-       (for [child (sort-by :block/original-name children)]
-         (let [title [:li.ml-2 (block/page-reference false (:block/original-name child) {:show-brackets? false} nil)]]
+       (for [child (sort-by :block/title children)]
+         (let [title [:li.ml-2 (block/page-reference false (:block/title child) {:show-brackets? false} nil)]]
            (if (seq (:class/_parent child))
              (ui/foldable
               title
@@ -123,7 +125,7 @@
           default-collapsed? (> (count children-pages) 30)]
       [:div.mt-4
        (ui/foldable
-        [:h2.font-medium "Child classes (" (count children-pages) ")"]
+        [:h2.font-medium "Child tags (" (count children-pages) ")"]
         [:div.mt-2.ml-1 (class-children-aux class {:default-collapsed? default-collapsed?})]
         {:default-collapsed? false
          :title-trigger? true})])))

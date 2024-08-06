@@ -1,7 +1,17 @@
 (ns logseq.shui.table.core
   "Table"
   (:require [logseq.shui.table.impl :as impl]
+            [dommy.core :refer-macros [sel1]]
+            [cljs-bean.core :as bean]
             [rum.core :as rum]))
+
+(defn- get-head-container
+  []
+  (sel1 "#head"))
+
+(defn- get-main-scroll-container
+  []
+  (sel1 "#main-content-container"))
 
 (defn- row-selected?
   [row row-selection]
@@ -102,40 +112,152 @@
 (rum/defc table < rum/static
   [& prop-and-children]
   (let [[prop children] (get-prop-and-children prop-and-children)]
-    [:table (merge {:class "w-full caption-bottom text-sm"}
+    [:div (merge {:class "ls-table w-full caption-bottom text-sm table-fixed"}
                    prop)
      children]))
 
+;; FIXME: ux
+(defn- use-sticky-element!
+  [^js/HTMLElement container target-ref]
+  (rum/use-effect!
+    (fn []
+      (let [^js el (rum/deref target-ref)
+            ^js cls (.-classList el)
+            *ticking? (volatile! false)
+            el-top (-> el (.getBoundingClientRect) (.-top))
+            head-top (-> (get-head-container) (js/getComputedStyle) (.-height) (js/parseInt))
+            translate (fn [offset]
+                        (set! (. (.-style el) -transform) (str "translate3d(0, " offset "px , 0)"))
+                        (if (zero? offset)
+                          (.remove cls "translated")
+                          (.add cls "translated")))
+            *last-offset (volatile! 0)
+            handle (fn []
+                     (let [scroll-top (js/parseInt (.-scrollTop container))
+                           offset (if (> (+ scroll-top head-top) el-top)
+                                    (+ (- scroll-top el-top) head-top 1) 0)
+                           offset (js/parseInt offset)
+                           last-offset @*last-offset]
+                       (if (and (not (zero? last-offset))
+                             (not= offset last-offset))
+                         (let [dir (if (neg? (- offset last-offset)) -1 1)]
+                           (loop [offset' (+ last-offset dir)]
+                             (translate offset')
+                             (if (and (not= offset offset')
+                                   (< (abs (- offset offset')) 100))
+                               (recur (+ offset' dir))
+                               (translate offset))))
+                         (translate offset))
+                       (vreset! *last-offset offset)))
+            handler (fn [^js e]
+                      (when (not @*ticking?)
+                        (js/window.requestAnimationFrame
+                          #(do (handle) (vreset! *ticking? false)))
+                        (vreset! *ticking? true)))]
+        (.addEventListener container "scroll" handler)
+        #(.removeEventListener container "scroll" handler)))
+    []))
+
+;; FIXME: another solution for the sticky header
+(defn- use-sticky-element2!
+  [^js/HTMLDivElement container target-ref]
+  (rum/use-effect!
+    (fn []
+      (let [^js target (rum/deref target-ref)
+            ^js target-cls (.-classList target)
+            ^js table (.closest target ".ls-table-rows")
+            ^js table-footer (some-> table (.querySelector ".ls-table-footer"))
+            *ticking? (volatile! false)
+            el-top (-> target (.getBoundingClientRect) (.-top))
+            head-top (-> (get-head-container) (js/getComputedStyle) (.-height) (js/parseInt))
+            update-footer! (fn []
+                             (when table-footer
+                               (set! (. (.-style table-footer) -width) (str (.-scrollWidth table) "px"))))
+            update-target! (fn []
+                             (if (.contains target-cls "ls-fixed")
+                               (let [^js rect (-> table (.getBoundingClientRect))
+                                     width (.-clientWidth table)
+                                     left (.-left rect)]
+                                 (set! (. (.-style target) -width) (str width "px"))
+                                 (set! (. (.-style target) -left) (str left "px")))
+                               (do
+                                 (set! (. (.-style target) -width) "auto")
+                                 (set! (. (.-style target) -left) "0px")))
+                             ;; update scroll
+                             (set! (. target -scrollLeft) (.-scrollLeft table)))
+            ;; target observer
+            target-observe! (fn []
+                              (let [scroll-top (js/parseInt (.-scrollTop container))
+                                    fixed? (> (+ scroll-top head-top) el-top)]
+                                (if fixed?
+                                  (.add target-cls "ls-fixed")
+                                  (.remove target-cls "ls-fixed"))
+                                (update-target!)))
+            target-observe! (fn [^js _e]
+                              (when (not @*ticking?)
+                                (js/window.requestAnimationFrame
+                                  #(do (target-observe!) (vreset! *ticking? false)))
+                                (vreset! *ticking? true)))
+            resize-observer (js/ResizeObserver. update-target!)]
+        ;; events
+        (.observe resize-observer container)
+        (.observe resize-observer table)
+        (.addEventListener container "scroll" target-observe!)
+        (.addEventListener table "scroll" update-target!)
+        (.addEventListener table "resize" update-target!)
+        (update-footer!)
+
+        ;; teardown
+        #(do (.removeEventListener container "scroll" target-observe!)
+           (.disconnect resize-observer))))
+    []))
+
 (rum/defc table-header < rum/static
   [& prop-and-children]
-  (let [[prop children] (get-prop-and-children prop-and-children)]
-    [:thead prop
+  (let [[prop children] (get-prop-and-children prop-and-children)
+        el-ref (rum/use-ref nil)
+        _ (use-sticky-element2! (get-main-scroll-container) el-ref)]
+    [:div.ls-table-header
+     (merge {:class "border-y transition-colors bg-gray-01"
+             :ref el-ref
+             :style {:z-index 9}}
+            prop)
      children]))
+
+(rum/defc table-footer
+  [children]
+  [:div.ls-table-footer
+   children])
 
 (rum/defc table-row < rum/static
   [& prop-and-children]
   (let [[prop children] (get-prop-and-children prop-and-children)]
-    [:tr (merge {:class "border-b transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted"}
-                prop)
-     children]))
-
-(rum/defc table-head < rum/static
-  [& prop-and-children]
-  (let [[prop children] (get-prop-and-children prop-and-children)]
-    [:th (merge {:class "h-12 px-4 text-left align-middle font-medium text-muted-foreground [&:has([role=checkbox])]:pr-0"}
-                prop)
-     children]))
-
-(rum/defc table-body < rum/static
-  [& prop-and-children]
-  (let [[prop children] (get-prop-and-children prop-and-children)]
-    [:tbody (merge {:class "[&_tr:last-child]:border-0"}
-                   prop)
+    [:div.ls-table-row.flex.flex-row.items-center (merge {:class "border-b transition-colors hover:bg-muted/50 data-[state=selected]:bg-muted bg-gray-01 items-stretch"}
+                               prop)
      children]))
 
 (rum/defc table-cell < rum/static
   [& prop-and-children]
   (let [[prop children] (get-prop-and-children prop-and-children)]
-    [:td (merge {:class "p-4 align-middle [&:has([role=checkbox])]:pr-0"}
-                   prop)
+    [:div.flex.relative prop
+     [:div {:class (str "flex align-middle w-full overflow-x-clip items-center"
+                        (cond
+                          (:select? prop)
+                          " px-0"
+                          (:add-property? prop)
+                          ""
+                          :else
+                          " border-r px-2"))}
+      children]]))
+
+(rum/defc table-actions < rum/static
+  [& prop-and-children]
+  (let [[prop children] (get-prop-and-children prop-and-children)
+        el-ref (rum/use-ref nil)
+        ;; _ (use-sticky-element2! (get-main-scroll-container) el-ref)
+        ]
+    [:div.ls-table-actions.flex.flex-row.items-center.gap-1.bg-gray-01
+     (merge {:ref el-ref
+             :style {:z-index 101}}
+            prop)
      children]))

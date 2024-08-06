@@ -95,6 +95,7 @@
       :ui/custom-theme                       (or (storage/get :ui/custom-theme) {:light {:mode "light"} :dark {:mode "dark"}})
       :ui/wide-mode?                         (storage/get :ui/wide-mode)
       :ui/radix-color                        (storage/get :ui/radix-color)
+      :ui/editor-font                        (storage/get :ui/editor-font)
 
       ;; ui/collapsed-blocks is to separate the collapse/expand state from db for:
       ;; 1. right sidebar
@@ -142,6 +143,7 @@
       :editor/last-key-code                  (atom nil)
       :ui/global-last-key-code               (atom nil)
       :editor/block-op-type                  nil             ;; :cut, :copy
+      :editor/block-refs                     (atom #{})
 
       ;; Stores deleted refed blocks, indexed by repo
       :editor/last-replace-ref-content-tx    nil
@@ -161,9 +163,9 @@
       ;; Warning: blocks order is determined when setting this attribute
       :selection/blocks                      (atom [])
       :selection/start-block                 (atom nil)
-      ;; either :up or :down, defaults to down
+      ;; nil, :up or :down
       ;; used to determine selection direction when two or more blocks are selected
-      :selection/direction                   (atom :down)
+      :selection/direction                   (atom nil)
       :selection/selected-all?               (atom false)
       :custom-context-menu/show?             false
       :custom-context-menu/links             nil
@@ -423,7 +425,8 @@
                       [(< ?d ?next)]]
              :inputs [:today :7d-after]
              :group-by-page? false
-             :collapsed? false}]}}))
+             :collapsed? false}]}
+          :ui/hide-empty-properties? false}))
 
 ;; State that most user config is dependent on
 (declare get-current-repo sub set-state!)
@@ -772,7 +775,10 @@ Similar to re-frame subscriptions"
 
 (defn block-content-max-length
   [repo]
-  (or (:block/content-max-length (sub-config repo)) 10000))
+  (or (:block/title-max-length (sub-config repo))
+      ;; backward compatible
+      (:block/content-max-length (sub-config repo))
+      10000))
 
 (defn mobile?
   []
@@ -1137,9 +1143,21 @@ Similar to re-frame subscriptions"
   [start-block]
   (set-state! :selection/start-block start-block))
 
+(defn get-selection-direction
+  []
+  @(:selection/direction @state))
+
+(defn get-unsorted-selection-blocks
+  []
+  @(:selection/blocks @state))
+
 (defn get-selection-blocks
   []
-  (util/sort-by-height @(:selection/blocks @state)))
+  (let [result (get-unsorted-selection-blocks)
+        direction (get-selection-direction)]
+    (if (= direction :up)
+      (vec (reverse result))
+      result)))
 
 (defn get-selection-block-ids
   []
@@ -1172,13 +1190,13 @@ Similar to re-frame subscriptions"
 
 (defn set-selection-blocks!
   ([blocks]
-   (set-selection-blocks! blocks :down))
+   (set-selection-blocks! blocks nil))
   ([blocks direction]
    (when (seq blocks)
-     (let [blocks (vec (util/sort-by-height (remove nil? blocks)))]
+     (let [blocks (vec (remove nil? blocks))]
        (set-state! :selection/mode true)
        (set-selection-blocks-aux! blocks)
-       (set-state! :selection/direction direction)))))
+       (when direction (set-state! :selection/direction direction))))))
 
 (defn into-selection-mode!
   []
@@ -1188,7 +1206,7 @@ Similar to re-frame subscriptions"
   []
   (set-state! :selection/mode false)
   (set-state! :selection/blocks nil)
-  (set-state! :selection/direction :down)
+  (set-state! :selection/direction nil)
   (set-state! :selection/start-block nil)
   (set-state! :selection/selected-all? false))
 
@@ -1214,40 +1232,34 @@ Similar to re-frame subscriptions"
 
 (defn conj-selection-block!
   [block-or-blocks direction]
-  (let [selection-blocks (get-selection-blocks)
-        blocks (-> (if (sequential? block-or-blocks)
-                     (apply conj selection-blocks block-or-blocks)
-                     (conj selection-blocks block-or-blocks))
+  (let [selection-blocks (get-unsorted-selection-blocks)
+        block-or-blocks (if (sequential? block-or-blocks) block-or-blocks [block-or-blocks])
+        blocks (-> (concat selection-blocks block-or-blocks)
                    distinct)]
     (set-selection-blocks! blocks direction)))
 
 (defn drop-selection-block!
   [block]
   (set-state! :selection/mode true)
-  (set-selection-blocks-aux! (-> (remove #(= block %) (get-selection-blocks))
-                                 util/sort-by-height
+  (set-selection-blocks-aux! (-> (remove #(= block %) (get-unsorted-selection-blocks))
                                  vec)))
+
+(defn drop-selection-blocks-starts-with!
+  [block]
+  (set-state! :selection/mode true)
+  (let [blocks (get-unsorted-selection-blocks)
+        blocks' (-> (take-while (fn [b] (not= (.-id b) (.-id block))) blocks)
+                    vec
+                    (conj block))]
+    (set-selection-blocks-aux! blocks')))
 
 (defn drop-last-selection-block!
   []
-  (let [direction @(:selection/direction @state)
-        up? (= direction :up)
-        blocks @(:selection/blocks @state)
-        last-block (if up?
-                     (first blocks)
-                     (peek (vec blocks)))
-        blocks' (-> (if up?
-                      (rest blocks)
-                      (pop (vec blocks)))
-                    util/sort-by-height
-                    vec)]
+  (let [blocks @(:selection/blocks @state)
+        blocks' (vec (butlast blocks))]
     (set-state! :selection/mode true)
     (set-selection-blocks-aux! blocks')
-    last-block))
-
-(defn get-selection-direction
-  []
-  @(:selection/direction @state))
+    (last blocks)))
 
 (defn hide-custom-context-menu!
   []
@@ -1361,7 +1373,8 @@ Similar to re-frame subscriptions"
   (clear-editor-last-pos!)
   (clear-cursor-range!)
   (set-state! :editor/content {})
-  (set-state! :ui/select-query-cache {}))
+  (set-state! :ui/select-query-cache {})
+  (set-state! :editor/block-refs #{}))
 
 (defn into-code-editor-mode!
   []
@@ -2010,7 +2023,7 @@ Similar to re-frame subscriptions"
 
 (defn exit-editing-and-set-selected-blocks!
   ([blocks]
-   (exit-editing-and-set-selected-blocks! blocks :down))
+   (exit-editing-and-set-selected-blocks! blocks nil))
   ([blocks direction]
    (clear-edit!)
    (set-selection-blocks! blocks direction)))
@@ -2038,6 +2051,7 @@ Similar to re-frame subscriptions"
                 content (string/trim (or content ""))]
             (assert (and container-id (:block/uuid block))
                     "container-id or block uuid is missing")
+            (set-state! :editor/block-refs #{})
             (if property-block
               (set-editing-block-id! [container-id (:block/uuid property-block) (:block/uuid block)])
               (set-editing-block-id! [container-id (:block/uuid block)]))
@@ -2372,6 +2386,11 @@ Similar to re-frame subscriptions"
   (storage/remove :ui/radix-color)
   (util/set-android-theme))
 
+(defn set-editor-font! [font]
+  (let [font (if (keyword? font) (name font) (str font))]
+    (swap! state assoc :ui/editor-font font)
+    (storage/set :ui/editor-font font)))
+
 (defn handbook-open?
   []
   (:ui/handbooks-open? @state))
@@ -2424,3 +2443,8 @@ Similar to re-frame subscriptions"
      :container-id (or @(:editor/container-id @state) :unknown-container)
      :start-pos @(:editor/start-pos @state)
      :end-pos (get-edit-pos)}))
+
+(defn conj-block-ref!
+  [ref-entity]
+  (let [refs! (:editor/block-refs @state)]
+    (swap! refs! conj ref-entity)))

@@ -23,43 +23,43 @@
   ([^Entity e k default-value]
    (when k
      (case k
-      :block/raw-content
-      (lookup-entity e :block/content default-value)
+       :block/raw-title
+       (lookup-entity e :block/title default-value)
 
-      :block/properties
-      (let [db (.-db e)]
-        (if (db-based-graph? db)
-          (lookup-entity e :block/properties
-                         (->> (into {} e)
-                              (filter (fn [[k _]] (db-property/property? k)))
-                              (into {})))
-          (lookup-entity e :block/properties nil)))
+       :block/properties
+       (let [db (.-db e)]
+         (if (db-based-graph? db)
+           (lookup-entity e :block/properties
+                          (->> (into {} e)
+                               (filter (fn [[k _]] (db-property/property? k)))
+                               (into {})))
+           (lookup-entity e :block/properties nil)))
 
-      :block/content
-      (or
-       (get (.-kv e) k)
-       (let [result (lookup-entity e k default-value)]
-         (or
-          (if (string? result)
-            (db-content/special-id-ref->page-ref result (:block/refs e))
-            result)
-          default-value)))
+       :block/title
+       (or
+        (get (.-kv e) k)
+        (let [result (lookup-entity e k default-value)]
+          (or
+           (if (string? result)
+             (db-content/special-id-ref->page-ref result (:block/refs e))
+             result)
+           default-value)))
 
-      :block/_parent
-      (->> (lookup-entity e k default-value)
-           (remove (fn [e] (or (:logseq.property/created-from-property e)
-                               (:block/closed-value-property e))))
-           seq)
+       :block/_parent
+       (->> (lookup-entity e k default-value)
+            (remove (fn [e] (or (:logseq.property/created-from-property e)
+                                (:block/closed-value-property e))))
+            seq)
 
-      :block/_raw-parent
-      (lookup-entity e :block/_parent default-value)
+       :block/_raw-parent
+       (lookup-entity e :block/_parent default-value)
 
-      :property/closed-values
-      (->> (lookup-entity e :block/_closed-value-property default-value)
-           (sort-by :block/order))
+       :property/closed-values
+       (->> (lookup-entity e :block/_closed-value-property default-value)
+            (sort-by :block/order))
 
-      (or (get (.-kv e) k)
-          (lookup-entity e k default-value))))))
+       (or (get (.-kv e) k)
+           (lookup-entity e k default-value))))))
 
 #?(:org.babashka/nbb
    nil

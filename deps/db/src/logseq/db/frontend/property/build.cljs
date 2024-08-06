@@ -8,7 +8,7 @@
 (defn- closed-value-new-block
   [block-id value property]
   (let [property-id (:db/ident property)]
-    (merge {:block/type #{"closed value"}
+    (merge {:block/type "closed value"
             :block/format :markdown
             :block/uuid block-id
             :block/page property-id
@@ -17,11 +17,11 @@
             :block/parent property-id}
            (if (db-property-type/original-value-ref-property-types (get-in property [:block/schema :type]))
              {:property.value/content value}
-             {:block/content value}))))
+             {:block/title value}))))
 
 (defn build-closed-value-block
   "Builds a closed value block to be transacted"
-  [block-uuid block-value property {:keys [db-ident icon description]}]
+  [block-uuid block-value property {:keys [db-ident icon]}]
   (assert block-uuid (uuid? block-uuid))
   (cond->
    (closed-value-new-block block-uuid block-value property)
@@ -31,9 +31,6 @@
     icon
     (assoc :logseq.property/icon icon)
 
-    description
-    (update :block/schema assoc :description description)
-
     true
     sqlite-util/block-with-timestamps))
 
@@ -42,17 +39,17 @@
    the hidden page and closed value blocks as needed"
   [db-ident prop-name property {:keys [property-attributes]}]
   (let [property-schema (:block/schema property)
-        property-tx (merge (sqlite-util/build-new-property db-ident property-schema {:original-name prop-name
+        property-tx (merge (sqlite-util/build-new-property db-ident property-schema {:title prop-name
                                                                                      :ref-type? true})
                            property-attributes)]
     (into [property-tx]
-          (map (fn [{:keys [db-ident value icon description uuid]}]
+          (map (fn [{:keys [db-ident value icon uuid]}]
                  (cond->
                   (build-closed-value-block
                    uuid
                    value
                    property
-                   {:db-ident db-ident :icon icon :description description})
+                   {:db-ident db-ident :icon icon})
                    true
                    (assoc :block/order (db-order/gen-key))))
                (:closed-values property)))))
@@ -73,7 +70,7 @@
         :block/order (db-order/gen-key)}
        (if (db-property-type/original-value-ref-property-types (get-in property [:block/schema :type]))
          {:property.value/content value}
-         {:block/content value}))
+         {:block/title value}))
       sqlite-util/block-with-timestamps))
 
 (defn build-property-values-tx-m

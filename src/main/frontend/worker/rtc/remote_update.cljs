@@ -6,9 +6,9 @@
             [datascript.core :as d]
             [frontend.schema-register :as sr]
             [frontend.worker.handler.page :as worker-page]
+            [frontend.worker.rtc.client-op :as client-op]
             [frontend.worker.rtc.const :as rtc-const]
             [frontend.worker.rtc.log-and-state :as rtc-log-and-state]
-            [frontend.worker.rtc.op-mem-layer :as op-mem-layer]
             [frontend.worker.state :as worker-state]
             [frontend.worker.util :as worker-util]
             [logseq.clj-fractional-indexing :as index]
@@ -129,17 +129,13 @@
   (ldb/transact! conn blocks {:persist-op? false
                               :gen-undo-ops? false}))
 
-(defn- whiteboard-page-block?
-  [block]
-  (contains? (set (:block/type block)) "whiteboard"))
-
 (defn- group-remote-remove-ops-by-whiteboard-block
   "return {true [<whiteboard-block-ops>], false [<other-ops>]}"
   [db remote-remove-ops]
   (group-by (fn [{:keys [block-uuid]}]
               (boolean
                (when-let [block (d/entity db [:block/uuid block-uuid])]
-                 (whiteboard-page-block? (:block/parent block)))))
+                 (ldb/whiteboard? (:block/parent block)))))
             remote-remove-ops))
 
 (defn- apply-remote-remove-ops-helper
@@ -186,7 +182,7 @@
   (when (seq remote-parents)
     (let [first-remote-parent (first remote-parents)
           local-parent (d/entity @conn [:block/uuid first-remote-parent])
-          whiteboard-page-block? (whiteboard-page-block? local-parent)
+          whiteboard-page-block? (ldb/whiteboard? local-parent)
           b (d/entity @conn [:block/uuid block-uuid])]
       (case [whiteboard-page-block? (some? local-parent) (some? remote-block-order)]
         [false true true]
@@ -194,7 +190,7 @@
               (transact-db! :move-blocks repo conn [b] local-parent false)
               (transact-db! :insert-blocks repo conn
                             [{:block/uuid block-uuid
-                              :block/content ""
+                              :block/title ""
                               :block/format :markdown}]
                             local-parent {:sibling? false :keep-uuid? true}))
             (transact-db! :update-block-order-directly repo conn block-uuid first-remote-parent remote-block-order))
@@ -252,7 +248,7 @@
   these updates maybe not needed or need to update, because this client just updated some of these blocks,
   so we need to update these remote-data by local-ops"
   [affected-blocks-map local-unpushed-ops]
-  (assert (op-mem-layer/ops-coercer local-unpushed-ops) local-unpushed-ops)
+  (assert (client-op/ops-coercer local-unpushed-ops) local-unpushed-ops)
   (reduce
    (fn [affected-blocks-map local-op]
      (let [local-op-value (last local-op)]
@@ -283,7 +279,7 @@
 
 (defn- affected-blocks->diff-type-ops
   [repo affected-blocks]
-  (let [unpushed-ops (op-mem-layer/get-all-ops repo)
+  (let [unpushed-ops (client-op/get-all-ops repo)
         affected-blocks-map* (if unpushed-ops
                                (update-remote-data-by-local-unpushed-ops
                                 affected-blocks unpushed-ops)
@@ -330,7 +326,7 @@
         (transact-db! :upsert-whiteboard-block conn [(gp-whiteboard/shape->block repo shape page-id)])))))
 
 (def ^:private update-op-watched-attrs
-  #{:block/content
+  #{:block/title
     :block/updated-at
     :block/created-at
     :block/alias
@@ -459,7 +455,7 @@
       (let [{update-block-order-tx-data :tx-data op-value :op-value} (update-block-order (:db/id ent) op-value)
             first-remote-parent (first parents)
             local-parent (d/entity @conn [:block/uuid first-remote-parent])
-            whiteboard-page-block? (whiteboard-page-block? local-parent)]
+            whiteboard-page-block? (ldb/whiteboard? local-parent)]
         (if whiteboard-page-block?
           (upsert-whiteboard-block repo conn op-value)
           (do (when-let [schema-tx-data (remote-op-value->schema-tx-data block-uuid op-value)]
@@ -497,10 +493,10 @@
   [repo conn update-page-ops]
   (let [config (worker-state/get-config repo)]
     (doseq [{:keys [self _page-name]
-             original-name :block/original-name
+             title :block/title
              :as op-value} update-page-ops]
       (let [create-opts {:uuid self}
-            [_ page-name page-uuid] (worker-page/rtc-create-page! conn config (ldb/read-transit-str original-name) create-opts)]
+            [_ page-name page-uuid] (worker-page/rtc-create-page! conn config (ldb/read-transit-str title) create-opts)]
         ;; TODO: current page-create fn is buggy, even provide :uuid option, it will create-page with different uuid,
         ;; if there's already existing same name page
         (assert (= page-uuid self) {:page-name page-name :page-uuid page-uuid :should-be self})
@@ -530,7 +526,7 @@
     (assert (rtc-const/data-from-ws-validator remote-update-data) remote-update-data)
     (let [remote-t (:t remote-update-data)
           remote-t-before (:t-before remote-update-data)
-          local-tx (op-mem-layer/get-local-tx repo)]
+          local-tx (client-op/get-local-tx repo)]
       (rtc-log-and-state/update-remote-t graph-uuid remote-t)
       (cond
         (not (and (pos? remote-t)
@@ -569,7 +565,7 @@
           (worker-util/profile :apply-remote-remove-ops (apply-remote-remove-ops repo conn date-formatter remove-ops))
           (js/console.groupEnd)
 
-          (op-mem-layer/update-local-tx! repo remote-t)
+          (client-op/update-local-tx repo remote-t)
           (rtc-log-and-state/update-local-t graph-uuid remote-t))
         :else (throw (ex-info "unreachable" {:remote-t remote-t
                                              :remote-t-before remote-t-before

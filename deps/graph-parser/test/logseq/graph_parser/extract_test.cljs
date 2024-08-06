@@ -2,7 +2,8 @@
   (:require [cljs.test :refer [deftest is are]]
             [logseq.graph-parser.extract :as extract]
             [datascript.core :as d]
-            [logseq.db.frontend.schema :as db-schema]))
+            [logseq.db.frontend.schema :as db-schema]
+            [logseq.db :as ldb]))
 
 ;; This is a copy of frontend.util.fs/multiplatform-reserved-chars for reserved chars testing
 (def multiplatform-reserved-chars ":\\*\\?\"<>|\\#\\\\")
@@ -45,13 +46,14 @@
 (defn- extract [file content & [options]]
   (extract/extract file
                    content
-                   (merge {:block-pattern "-" :db (d/empty-db db-schema/schema)}
+                   (merge {:block-pattern "-" :db (d/empty-db db-schema/schema)
+                           :verbose false}
                           options)))
 
 (defn- extract-block-content
   [text]
   (let [{:keys [blocks]} (extract "a.md" text)]
-    (mapv :block/content blocks)))
+    (mapv :block/title blocks)))
 
 (defn- extract-title [file text]
   (-> (extract file text) :pages first :block/properties :title))
@@ -128,13 +130,13 @@
 (def foo-edn
   "Example exported whiteboard page as an edn exportable."
   '{:blocks
-    ({:block/content "foo content a",
+    ({:block/title "foo content a",
       :block/format :markdown},
-     {:block/content "foo content b",
+     {:block/title "foo content b",
       :block/format :markdown}),
     :pages
     ({:block/format :markdown,
-      :block/original-name "Foo"
+      :block/title "Foo"
       :block/uuid #uuid "a846e3b4-c41d-4251-80e1-be6978c36d8c"
       :block/properties {:title "my whiteboard foo"}})})
 
@@ -143,6 +145,6 @@
         page (first pages)]
     (is (= (get-in page [:block/file :file/path]) "/whiteboards/foo.edn"))
     (is (= (:block/name page) "foo"))
-    (is (= (:block/type page) "whiteboard"))
-    (is (= (:block/original-name page) "Foo"))
+    (is (ldb/whiteboard? page))
+    (is (= (:block/title page) "Foo"))
     (is (every? #(= (:block/parent %) [:block/uuid #uuid "a846e3b4-c41d-4251-80e1-be6978c36d8c"]) blocks))))

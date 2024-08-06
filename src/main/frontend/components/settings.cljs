@@ -220,6 +220,39 @@
      [:div {:style {:text-align "right"}}
       (ui/render-keyboard-shortcut (shortcut-helper/gen-shortcut-seq :ui/toggle-brackets))])])
 
+(defn toggle-wide-mode-row [t wide-mode?]
+  [:div.it.sm:grid.sm:grid-cols-3.sm:gap-4.sm:items-center
+   [:label.block.text-sm.font-medium.leading-5.opacity-70
+    {:for "wide_mode"}
+    (t :settings-page/wide-mode)]
+   [:div
+    [:div.rounded-md.sm:max-w-xs
+     (ui/toggle wide-mode?
+       state/toggle-wide-mode!
+       true)]]
+   (when (not (or (util/mobile?) (mobile-util/native-platform?)))
+     [:div {:style {:text-align "right"}}
+      (ui/render-keyboard-shortcut (shortcut-helper/gen-shortcut-seq :ui/toggle-wide-mode))])])
+
+(defn editor-font-family-row [t font]
+  [:div.it.sm:grid.sm:grid-cols-3.sm:gap-4.sm:items-center
+   [:label.block.text-sm.font-medium.leading-5.opacity-70
+    {:for "font_family"}
+    (t :settings-page/editor-font)]
+   [:div.rounded-md.sm:max-w-xs.flex.gap-2
+    (for [t [:default :serif :mono]
+          :let [t (name t)
+                tt (string/capitalize t)
+                active? (= font t)]]
+      (shui/button
+        {:variant :secondary
+         :class (when active? "border-primary border-[2px]")
+         :on-click #(state/set-editor-font! t)}
+        [:span.flex.flex-col
+         {:class (str "ls-font-" t)}
+         [:strong "Ag"]
+         [:small tt]]))]])
+
 (rum/defcs switch-spell-check-row < rum/reactive
   [state t]
   (let [enabled? (state/sub [:electron/user-cfgs :spell-check])]
@@ -318,9 +351,14 @@
                              :-for       "preferred_language"
                              :action     action})))
 
-(defn theme-modes-row [t switch-theme system-theme? dark?]
-  (let [color-accent (state/sub :ui/radix-color)
-        pick-theme [:ul.theme-modes-options
+(rum/defc theme-modes-row < rum/reactive
+  [t]
+  (let [theme (state/sub :ui/theme)
+        dark? (= "dark" theme)
+        system-theme? (state/sub :ui/system-theme?)
+        switch-theme (if dark? "light" "dark")
+        color-accent (state/sub :ui/radix-color)
+        pick-theme [:ul.cp__theme-modes-options
                     [:li {:on-click (partial state/use-theme-mode! "light")
                           :class    (classnames [{:active (and (not system-theme?) (not dark?))}])} [:i.mode-light {:class (when color-accent "radix")}] [:strong (t :settings-page/theme-light)]]
                     [:li {:on-click (partial state/use-theme-mode! "dark")
@@ -332,8 +370,7 @@
                              :action     pick-theme
                              :desc       (ui/render-keyboard-shortcut (shortcut-helper/gen-shortcut-seq :ui/toggle-theme))})))
 
-(rum/defc accent-color-row
-  < rum/reactive
+(rum/defc accent-color-row < rum/reactive
   [_in-modal?]
   (let [color-accent (state/sub :ui/radix-color)
         pick-theme [:div.cp__accent-colors-list-wrap
@@ -367,18 +404,24 @@
                        ])]]
 
     [:<>
-     (row-with-button-action {:left-label "Accent color"
-                              :description "Choosing an accent color may override any theme you have selected."
-                              :-for "toggle_radix_theme"
-                              :desc (when-not _in-modal?
-                                      [:span.pl-6 (ui/render-keyboard-shortcut
-                                                    (shortcut-helper/gen-shortcut-seq :ui/accent-colors-picker))])
-                              :stretch (boolean _in-modal?)
-                              :action pick-theme})]))
+     (row-with-button-action
+       {:left-label "Accent color"
+        :description "Choosing an accent color may override any theme you have selected."
+        :-for "toggle_radix_theme"
+        :desc (when-not _in-modal?
+                [:span.pl-6 (ui/render-keyboard-shortcut
+                              (shortcut-helper/gen-shortcut-seq :ui/customize-appearance))])
+        :stretch (boolean _in-modal?)
+        :action pick-theme})]))
 
-(rum/defc modal-accent-colors-inner
+(rum/defc modal-appearance-inner < rum/reactive
   []
-  [:div.cp__settings-accent-colors-modal-inner
+  [:div.cp__settings-appearance-modal-inner
+   [:h1.text-2xl.font-bold.pb-2.pt-1 "Appearance"]
+   (theme-modes-row t)
+   (editor-font-family-row t (state/sub :ui/editor-font))
+   (toggle-wide-mode-row t (state/sub :ui/wide-mode?))
+   (show-brackets-row t (state/show-brackets?))
    (accent-color-row true)])
 
 (defn date-format-row [t preferred-date-format]
@@ -672,15 +715,11 @@
 (rum/defcs settings-general < rum/reactive
   [_state current-repo]
   (let [preferred-language (state/sub [:preferred-language])
-        theme (state/sub :ui/theme)
-        dark? (= "dark" theme)
-        show-radix-themes? true
-        system-theme? (state/sub :ui/system-theme?)
-        switch-theme (if dark? "light" "dark")]
+        show-radix-themes? true]
     [:div.panel-wrap.is-general
      (version-row t version)
      (language-row t preferred-language)
-     (theme-modes-row t switch-theme system-theme? dark?)
+     (theme-modes-row t)
      (when (and (util/electron?) (not util/mac?)) (native-titlebar-row t))
      (when show-radix-themes? (accent-color-row false))
      (when (config/global-config-enabled?) (edit-global-config-edn))
@@ -719,6 +758,8 @@
         enable-tooltip? (state/enable-tooltip?)
         enable-shortcut-tooltip? (state/sub :ui/shortcut-tooltip?)
         show-brackets? (state/show-brackets?)
+        wide-mode? (state/sub :ui/wide-mode?)
+        editor-font (state/sub :ui/editor-font)
         enable-git-auto-push? (state/enable-git-auto-push? current-repo)
         db-graph? (config/db-based-graph? (state/get-current-repo))]
 
@@ -728,7 +769,9 @@
      (date-format-row t preferred-date-format)
      (when-not db-graph?
        (workflow-row t preferred-workflow))
+     (editor-font-family-row t editor-font)
      (show-brackets-row t show-brackets?)
+     (toggle-wide-mode-row t wide-mode?)
 
      (when (util/electron?) (switch-spell-check-row t))
      (outdenting-row t logical-outdenting?)
@@ -1037,6 +1080,7 @@
         enable-flashcards? (state/enable-flashcards? current-repo)
         enable-sync? (state/enable-sync?)
         enable-sync-diff-merge? (state/enable-sync-diff-merge?)
+        db-based? (config/db-based-graph? current-repo)
         enable-whiteboards? (state/enable-whiteboards? current-repo)
         logged-in? (user-handler/logged-in?)]
     [:div.panel-wrap.is-features.mb-8
@@ -1054,13 +1098,13 @@
             :on-key-press  (fn [e]
                              (when (= "Enter" (util/ekey e))
                                (update-home-page e)))}]]]])
-     (whiteboards-switcher-row enable-whiteboards?)
+     (when-not db-based? (whiteboards-switcher-row enable-whiteboards?))
      (when (and (util/electron?) config/feature-plugin-system-on?)
        (plugin-system-switcher-row))
      (when (util/electron?)
        (http-server-switcher-row))
-     (flashcards-switcher-row enable-flashcards?)
-     (zotero-settings-row)
+     (when-not db-based? (flashcards-switcher-row enable-flashcards?))
+     (when-not db-based? (zotero-settings-row))
      (when (config/db-based-graph? current-repo)
        ;; FIXME: Wire this up again to RTC init calls
        (rtc-switcher-row (state/enable-rtc? current-repo)))
@@ -1146,7 +1190,7 @@
          [:div.flex.flex-row.items-center.gap-2 {:key (str "user-" user-name)}
           [:div user-name]
           (when user-email [:div.opacity-50.text-sm user-email])
-          (when graph<->user-user-type [:div.opacity-50.text-sm graph<->user-user-type])])]
+          (when graph<->user-user-type [:div.opacity-50.text-sm (name graph<->user-user-type)])])]
       [:div.flex.flex-col.gap-4.mt-4
        (shui/input
         {:placeholder   "Email address"

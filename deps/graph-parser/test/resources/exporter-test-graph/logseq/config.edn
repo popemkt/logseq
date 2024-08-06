@@ -16,8 +16,7 @@
  ;; Exclude directories/files.
  ;; Example usage:
  ;; :hidden ["/archived" "/test.md" "../assets/archived"]
- ;; TODO: test
- ;;  :hidden ["test"]
+ :hidden ["ignored"]
 
  ;; Define the default journal page template.
  ;; Enter the template name between the quotes.
@@ -177,10 +176,10 @@
  ;; Default value: false
  :shortcut/doc-mode-enter-for-new-block? false
 
- ;; Block content larger than `block/content-max-length` will not be searchable
+ ;; Block content larger than `block/title-max-length` will not be searchable
  ;; or editable for performance.
  ;; Default value: 10000
- :block/content-max-length 10000
+ :block/title-max-length 10000
 
  ;; Display command documentation on hover.
  ;; Default value: true
@@ -263,9 +262,8 @@
  ;; input "{{poem red,blue}}"
  ;; becomes
  ;; Rose is red, violet's blue. Life's ordered: Org assists you.
- ;; TODO: test
-;;  :macros
-;;  {"docs-base-url" "https://docs.logseq.com/#/page/$1"}
+ :macros
+ {"docs-base-url" "https://docs.logseq.com/#/page/$1"}
 
  ;; Configure the default expansion level for linked references.
  ;; For example, consider the following block hierarchy:
@@ -292,8 +290,7 @@
  ;;  :journal?        false} ; Default value: false
 
  ;; Favorites to list on the left sidebar
- ;; TODO: test
- ;;   :favorites ["Property" "some page"]
+   :favorites ["Interstellar" "some page"]
 
  ;; Set flashcards interval.
  ;; Expected value:

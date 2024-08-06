@@ -1,21 +1,23 @@
 (ns logseq.db.sqlite.create-graph
   "Helper fns for creating a DB graph"
-  (:require [logseq.db.sqlite.util :as sqlite-util]
-            [logseq.db.frontend.schema :as db-schema]
-            [logseq.db.frontend.property :as db-property]
-            [logseq.db.frontend.class :as db-class]
-            [logseq.db.frontend.property.build :as db-property-build]
+  (:require [clojure.string :as string]
+            [datascript.core :as d]
             [logseq.common.util :as common-util]
-            [datascript.core :as d]))
+            [logseq.common.uuid :as common-uuid]
+            [logseq.db.frontend.class :as db-class]
+            [logseq.db.frontend.property :as db-property]
+            [logseq.db.frontend.property.build :as db-property-build]
+            [logseq.db.frontend.schema :as db-schema]
+            [logseq.db.sqlite.util :as sqlite-util]))
 
-(defn- mark-block-as-built-in [block built-in-prop-value]
-  (assoc block :logseq.property/built-in? [:block/uuid (:block/uuid built-in-prop-value)]))
+(defn- mark-block-as-built-in [block]
+  (assoc block :logseq.property/built-in? true))
 
-(defn- build-initial-properties*
-  []
+(defn build-initial-properties*
+  [built-in-properties]
   (mapcat
-   (fn [[db-ident {:keys [schema original-name closed-values] :as m}]]
-     (let [prop-name (or original-name (name (:name m)))
+   (fn [[db-ident {:keys [schema title closed-values] :as m}]]
+     (let [prop-name (or title (name (:name m)))
            blocks (if closed-values
                     (db-property-build/build-closed-values
                      db-ident
@@ -25,9 +27,9 @@
                     [(sqlite-util/build-new-property
                       db-ident
                       schema
-                      {:original-name prop-name})])]
+                      {:title prop-name})])]
        blocks))
-   (dissoc db-property/built-in-properties :logseq.property/built-in?)))
+   (dissoc built-in-properties :logseq.property/built-in?)))
 
 (defn- build-initial-properties
   "Builds initial properties and their closed values and marks them
@@ -37,28 +39,24 @@
         built-in-property (sqlite-util/build-new-property
                            :logseq.property/built-in?
                            built-in-property-schema
-                           {:original-name (name :logseq.property/built-in?)})
-        built-in-prop-value (db-property-build/build-property-value-block
-                             {:db/id [:block/uuid (:block/uuid built-in-property)]}
-                             {:db/ident :logseq.property/built-in?
-                              :block/schema built-in-property-schema}
-                             true)
+                           {:title (name :logseq.property/built-in?)})
         mark-block-as-built-in' (fn [block]
-                                  (mark-block-as-built-in {:block/uuid (:block/uuid block)} built-in-prop-value))
-        properties (build-initial-properties*)
+                                  (mark-block-as-built-in {:block/uuid (:block/uuid block)}))
+        properties (build-initial-properties* db-property/built-in-properties)
         ;; Tx order matters. built-in-property must come first as all properties depend on it.
         tx (concat [built-in-property]
                    properties
-                   [built-in-prop-value]
-                   ;; Adding built-ins must come after initial properties and built-in-prop-value
+                   ;; Adding built-ins must come after initial properties
                    [(mark-block-as-built-in' built-in-property)]
                    (map mark-block-as-built-in' properties)
-                   (keep #(when (= #{"closed value"} (:block/type %)) (mark-block-as-built-in' %))
+                   (keep #(when (= "closed value" (:block/type %)) (mark-block-as-built-in' %))
                          properties))]
-    {:tx tx
-     :properties (filter #(= "property" (:block/type %)) properties)
-     :built-in-prop-value built-in-prop-value}))
+    (doseq [m tx]
+      (when-let [block-uuid (and (:db/ident m) (:block/uuid m))]
+        (assert (string/starts-with? (str block-uuid) "00000002") m)))
 
+    {:tx tx
+     :properties (filter #(= (:block/type %) "property") properties)}))
 
 (defn kv
   "Creates a key-value pair tx with the key and value respectively stored under
@@ -82,10 +80,10 @@
                          (vec conflicting-idents))
                     {:idents conflicting-idents}))))
 
-(defn- build-initial-classes [db-ident->properties built-in-prop-value]
+(defn- build-initial-classes [db-ident->properties]
   (map
-   (fn [[db-ident {:keys [schema original-name]}]]
-     (let [original-name' (or original-name (name db-ident))]
+   (fn [[db-ident {:keys [schema title]}]]
+     (let [title' (or title (name db-ident))]
        (mark-block-as-built-in
         (sqlite-util/build-new-class
          (let [properties (mapv
@@ -95,13 +93,12 @@
                                db-ident))
                            (:properties schema))]
            (cond->
-            {:block/original-name original-name'
-             :block/name (common-util/page-name-sanity-lc original-name')
+            {:block/title title'
+             :block/name (common-util/page-name-sanity-lc title')
              :db/ident db-ident
-             :block/uuid (d/squuid)}
+             :block/uuid (common-uuid/gen-uuid :db-ident-block-uuid db-ident)}
              (seq properties)
-             (assoc :class/schema.properties properties))))
-        built-in-prop-value)))
+             (assoc :class/schema.properties properties)))))))
    db-class/built-in-classes))
 
 (defn build-db-initial-data
@@ -128,11 +125,11 @@
                         :file/content ""
                         :file/created-at (js/Date.)
                         :file/last-modified-at (js/Date.)}]
-        {properties-tx :tx :keys [built-in-prop-value properties]} (build-initial-properties)
+        {properties-tx :tx :keys [properties]} (build-initial-properties)
         db-ident->properties (zipmap (map :db/ident properties) properties)
-        default-classes (build-initial-classes db-ident->properties built-in-prop-value)
+        default-classes (build-initial-classes db-ident->properties)
         default-pages (->> (map sqlite-util/build-new-page built-in-pages-names)
-                           (map #(mark-block-as-built-in % built-in-prop-value)))
+                           (map mark-block-as-built-in))
         tx (vec (concat initial-data properties-tx default-classes
                         initial-files default-pages))]
     (validate-tx-for-duplicate-idents tx)

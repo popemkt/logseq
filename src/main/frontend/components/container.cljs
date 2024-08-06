@@ -17,6 +17,7 @@
             [frontend.components.handbooks :as handbooks]
             [dommy.core :as d]
             [frontend.components.content :as cp-content]
+            [frontend.components.title :as title]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
             [frontend.db :as db]
@@ -34,8 +35,6 @@
             [frontend.handler.user :as user-handler]
             [frontend.handler.whiteboard :as whiteboard-handler]
             [frontend.handler.recent :as recent-handler]
-            [frontend.handler.db-based.property :as db-property-handler]
-            [frontend.handler.jump :as jump-handler]
             [frontend.mixins :as mixins]
             [frontend.mobile.action-bar :as action-bar]
             [frontend.mobile.footer :as footer]
@@ -78,9 +77,9 @@
   [page icon recent?]
   (let [repo (state/get-current-repo)
         page (or (db/get-alias-source-page repo (:db/id page)) page)
-        original-name (:block/original-name page)
+        title (:block/title page)
         whiteboard-page? (db-model/whiteboard-page? page)
-        untitled? (db-model/untitled-page? original-name)
+        untitled? (db-model/untitled-page? title)
         name (:block/name page)
         file-rpath (when (util/electron?) (page-util/get-page-file-rpath name))
         ctx-icon #(shui/tabler-icon %1 {:class "scale-90 pr-1 opacity-80"})
@@ -94,7 +93,7 @@
                            [:<>
                             (when-not recent?
                               (x-menu-item
-                               {:on-click #(page-handler/<unfavorite-page! original-name)}
+                               {:on-click #(page-handler/<unfavorite-page! title)}
                                (ctx-icon "star-off")
                                (t :page/unfavorite)
                                (x-menu-shortcut (when-let [binding (shortcut-dh/shortcut-binding :command/toggle-favorite)]
@@ -121,7 +120,8 @@
 
     ;; TODO: move to standalone component
     [:a.flex.items-center.justify-between.relative.group
-     {:on-click
+     {:title (title/block-unique-title page)
+      :on-click
       (fn [e]
         (if (gobj/get e "shiftKey")
           (open-in-sidebar)
@@ -135,7 +135,7 @@
      [:span.page-icon.ml-3.justify-center (if whiteboard-page? (ui/icon "whiteboard" {:extension? true}) icon)]
      [:span.page-title {:class (when untitled? "opacity-50")}
       (if untitled? (t :untitled)
-          (pdf-utils/fix-local-asset-pagename original-name))]
+          (pdf-utils/fix-local-asset-pagename title))]
 
      ;; dots trigger
      (shui/button
@@ -170,7 +170,7 @@
      (when (seq favorite-entities)
        (let [favorites (map
                         (fn [e]
-                          (let [icon (icon/get-page-icon e {})]
+                          (let [icon (icon/get-node-icon e {})]
                             {:id (str (:db/id e))
                              :value (:block/uuid e)
                              :content [:li.favorite-item (page-name e icon false)]}))
@@ -196,11 +196,11 @@
       (for [page pages]
         [:li.recent-item.select-none
          {:key (str "recent-" (:db/id page))
-          :title (:block/original-name page)
+          :title (title/block-unique-title page)
           :draggable true
           :on-drag-start (fn [event] (editor-handler/block->data-transfer! (:block/name page) event true))
           :data-ref name}
-         (page-name page (icon/get-page-icon page {}) true)])])))
+         (page-name page (icon/get-node-icon page {}) true)])])))
 
 (rum/defcs flashcards < db-mixins/query rum/reactive
   {:did-mount (fn [state]
@@ -381,15 +381,16 @@
                :shortcut :go/journals})))
 
          (when enable-whiteboards?
-           (sidebar-item
-            {:class "whiteboard"
-             :title (t :right-side-bar/whiteboards)
-             :href (rfe/href :whiteboards)
-             :on-click-handler (fn [_e] (whiteboard-handler/onboarding-show))
-             :active (and (not srs-open?) (#{:whiteboard :whiteboards} route-name))
-             :icon "whiteboard"
-             :icon-extension? true
-             :shortcut :go/whiteboards}))
+           (when (or config/dev? (not db-based?))
+             (sidebar-item
+              {:class "whiteboard"
+               :title (t :right-side-bar/whiteboards)
+               :href (rfe/href :whiteboards)
+               :on-click-handler (fn [_e] (whiteboard-handler/onboarding-show))
+               :active (and (not srs-open?) (#{:whiteboard :whiteboards} route-name))
+               :icon "whiteboard"
+               :icon-extension? true
+               :shortcut :go/whiteboards})))
 
          (when (and (state/enable-flashcards? (state/get-current-repo)) (not db-based?))
            [:div.flashcards-nav
@@ -544,7 +545,7 @@
                    {:drop (fn [_e files]
                             (when-let [id (state/get-edit-input-id)]
                               (let [format (:block/format (state/get-edit-block))]
-                                (editor-handler/upload-asset id files format editor-handler/*asset-uploading? true))))})
+                                (editor-handler/upload-asset! id files format editor-handler/*asset-uploading? true))))})
                   (common-handler/listen-to-scroll! element)
                   (when (:margin-less-pages? (first (:rum/args state))) ;; makes sure full screen pages displaying without scrollbar
                     (set! (.. element -scrollTop) 0)))
@@ -554,10 +555,10 @@
                      (dnd/unsubscribe! el :upload-files))
                    state)}
   [{:keys [route-match margin-less-pages? route-name indexeddb-support? db-restoring? main-content show-action-bar? show-recording-bar?]}]
-  (let [left-sidebar-open?   (state/sub :ui/left-sidebar-open?)
+  (let [left-sidebar-open? (state/sub :ui/left-sidebar-open?)
         onboarding-and-home? (and (or (nil? (state/get-current-repo)) (config/demo-graph?))
-                                  (not config/publishing?)
-                                  (= :home route-name))
+                               (not config/publishing?)
+                               (= :home route-name))
         margin-less-pages?   (or (and (mobile-util/native-platform?) onboarding-and-home?) margin-less-pages?)]
     [:div#main-container.cp__sidebar-main-layout.flex-1.flex
      {:class (util/classnames [{:is-left-sidebar-open left-sidebar-open?}])}
@@ -888,18 +889,7 @@
                                    util/node-test?
                                    (state/editing?))))
                           (state/close-modal!)
-                          (hide-context-menu-and-clear-selection e))
-
-                        (and
-                         (not (or (.-ctrlKey e) (.-metaKey e) (.-altKey e)))
-                         (not (util/input? (.-target e)))
-                         (not (seq @jump-handler/*jump-data))
-                         (not @(:editor/latest-shortcut @state/state))
-                         (not (state/editing?))
-                         (seq (state/get-selection-blocks)))
-                        (let [shift? (.-shiftKey e)
-                              shortcut (if shift? (str "shift+" (.-key e)) (.-key e))]
-                          (db-property-handler/set-property-by-shortcut! shortcut)))
+                          (hide-context-menu-and-clear-selection e)))
                       (state/set-ui-last-key-code! (.-key e))))
      (mixins/listen state js/window "keyup"
                     (fn [_e]
@@ -910,6 +900,7 @@
         granted? (state/sub [:nfs/user-granted? (state/get-current-repo)])
         theme (state/sub :ui/theme)
         accent-color (some-> (state/sub :ui/radix-color) (name))
+        editor-font (some-> (state/sub :ui/editor-font) (name))
         system-theme? (state/sub :ui/system-theme?)
         light? (= "light" (state/sub :ui/theme))
         sidebar-open?  (state/sub :ui/sidebar-open?)
@@ -939,6 +930,7 @@
      {:t             t
       :theme         theme
       :accent-color  accent-color
+      :editor-font   editor-font
       :route         route-match
       :current-repo  current-repo
       :edit?         edit?
@@ -954,13 +946,19 @@
                        (editor-handler/unhighlight-blocks!)
                        (util/fix-open-external-with-shift! e))}
 
-     [:main.theme-inner
-      {:class (util/classnames [{:ls-left-sidebar-open    left-sidebar-open?
-                                 :ls-right-sidebar-open   sidebar-open?
-                                 :ls-wide-mode            wide-mode?
-                                 :ls-window-controls      window-controls?
-                                 :ls-fold-button-on-right fold-button-on-right?
-                                 :ls-hl-colored           ls-block-hl-colored?}])}
+     [:main.theme-container-inner#app-container-wrapper
+      {:class (util/classnames
+                [{:ls-left-sidebar-open left-sidebar-open?
+                  :ls-right-sidebar-open sidebar-open?
+                  :ls-wide-mode wide-mode?
+                  :ls-window-controls window-controls?
+                  :ls-fold-button-on-right fold-button-on-right?
+                  :ls-hl-colored ls-block-hl-colored?}])
+       :on-pointer-up (fn []
+                        (when-let [container (gdom/getElement "app-container-wrapper")]
+                          (d/remove-class! container "blocks-selection-mode")
+                          (when (> (count (state/get-selection-blocks)) 1)
+                            (util/clear-selection!))))}
 
       [:button#skip-to-main
        {:on-click #(ui/focus-element (ui/main-node))
@@ -968,11 +966,7 @@
                      (when (= "Enter" (.-key e))
                        (ui/focus-element (ui/main-node))))}
        (t :accessibility/skip-to-main-content)]
-      [:div.#app-container {:on-pointer-up (fn []
-                                             (when-let [container (gdom/getElement "app-container")]
-                                               (d/remove-class! container "blocks-selection-mode")
-                                               (when (> (count (state/get-selection-blocks)) 1)
-                                                 (util/clear-selection!))))}
+      [:div.#app-container
        [:div#left-container
         {:class (if (state/sub :ui/sidebar-open?) "overflow-hidden" "w-full")}
         (header/header {:open-fn        open-fn

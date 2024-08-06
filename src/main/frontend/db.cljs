@@ -9,7 +9,8 @@
             [frontend.modules.outliner.ui :as ui-outliner-tx]
             [frontend.modules.outliner.op :as outliner-op]
             [frontend.state :as state]
-            [frontend.config :as config]))
+            [frontend.config :as config]
+            [logseq.outliner.op]))
 
 (import-vars
  [frontend.db.conn
@@ -34,7 +35,7 @@
   get-files-blocks get-files-full get-journals-length
   get-latest-journals get-page get-case-page get-page-alias get-page-alias-names
   get-page-blocks-count get-page-blocks-no-cache get-page-file get-page-format
-  get-page-referenced-blocks get-page-referenced-blocks-full get-page-referenced-pages
+  get-referenced-blocks get-page-referenced-blocks-full get-page-referenced-pages
   get-all-pages get-pages-relation get-pages-that-mentioned-page
   journal-page? page? page-alias-set sub-block
   page-empty? page-exists? get-alias-source-page

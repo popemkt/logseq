@@ -124,7 +124,7 @@
 
 (defn db-based-statuses
   []
-  (map (fn [e] (:block/content e))
+  (map (fn [e] (:block/title e))
        (db-pu/get-closed-property-values :logseq.task/status)))
 
 (defn db-based-embed-page
@@ -149,8 +149,14 @@
                 (mapv (fn [m]
                         (let [command (if db-based?
                                         [:div.flex.flex-row.items-center.gap-2 m [:div.text-xs.opacity-50 "Status"]]
-                                        m)]
-                          [command (->marker m) (str "Set status to " m)]))))]
+                                        m)
+                              icon (if db-based?
+                                     (case m
+                                       "Canceled" "Cancelled"
+                                       "Doing" "InProgress50"
+                                       m)
+                                     "square-asterisk")]
+                          [command (->marker m) (str "Set status to " m) icon]))))]
     (when (seq result)
       (update result 0 (fn [v] (conj v "TASK"))))))
 
@@ -160,12 +166,13 @@
 
 (defn db-based-priorities
   []
-  (map (fn [e] (:block/content e))
+  (map (fn [e] (:block/title e))
     (db-pu/get-closed-property-values :logseq.task/priority)))
 
 (defn get-priorities
   []
   (let [db-based? (config/db-based-graph? (state/get-current-repo))
+        with-no-priority #(if db-based? (cons ["No priority" (->priority nil) "" :icon/priorityLvlNone] %) %)
         result (->>
                 (if db-based?
                   (db-based-priorities)
@@ -174,7 +181,12 @@
                         (let [command (if db-based?
                                         [:div.flex.flex-row.items-center.gap-2 item [:div.text-xs.opacity-50 "Priority"]]
                                         item)]
-                          [command (->priority item) (str "Set priority to " item)]))))]
+                          [command (->priority item) (str "Set priority to " item)
+                           (if db-based?
+                             (str "priorityLvl" item)
+                             (str "circle-letter-" (util/safe-lower-case item)))])))
+                 (with-no-priority)
+                 (vec))]
     (when (seq result)
       (update result 0 (fn [v] (conj v "PRIORITY"))))))
 
@@ -190,7 +202,7 @@
   []
   (mapv (fn [level]
           (let [heading (str "Heading " level)]
-            [heading (->heading level)])) (range 1 7)))
+            [heading (->heading level) heading (str "h-" level)])) (range 1 7)))
 
 (defonce *matched-commands (atom nil))
 (defonce *initial-commands (atom nil))
@@ -268,37 +280,46 @@
     (->>
      (concat
         ;; basic
-      [["Page reference"
+      [[(if db? "Node reference" "Page reference")
         [[:editor/input page-ref/left-and-right-brackets {:backward-pos 2}]
          [:editor/search-page]]
-        "Create a backlink to a page"
+        (if db? "Create a backlink to a node (a page or a block)"
+            "Create a backlink to a BLOCK")
+        :icon/pageRef
         "BASIC"]
-       ["Page embed" (embed-page) "Embed a page here"]
-       ["Block reference" [[:editor/input block-ref/left-and-right-parens {:backward-pos 2}]
-                           [:editor/search-block :reference]] "Create a backlink to a block"]
-       ["Block embed" (embed-block) "Embed a block here"]]
+       (when-not db? ["Page embed" (embed-page) "Embed a page here" :icon/pageEmbed])
+       (when-not db?
+         ["Block reference" [[:editor/input block-ref/left-and-right-parens {:backward-pos 2}]
+                             [:editor/search-block :reference]]
+          "Create a backlink to a block" :icon/blockRef])
+       [(if db? "Node embed" "Block embed")
+        (embed-block)
+        (if db? "Embed a node here" "Embed a block here")
+        :icon/blockEmbed]]
 
         ;; format
-      [["Link" (link-steps) "Create a HTTP link" "FORMAT"]
-       ["Image link" (image-link-steps) "Create a HTTP link to a image"]
+      [["Link" (link-steps) "Create a HTTP link" :icon/link "FORMAT"]
+       ["Image link" (image-link-steps) "Create a HTTP link to a image" :icon/photoLink]
        (when (state/markdown?)
          ["Underline" [[:editor/input "<ins></ins>"
                         {:last-pattern command-trigger
-                         :backward-pos 6}]] "Create a underline text decoration"])
+                         :backward-pos 6}]] "Create a underline text decoration"
+          :icon/underline])
        ["Code block" [[:editor/input "```\n```\n" {:type "block"
                                                    :backward-pos 5
                                                    :only-breakline? true}]
-                      [:editor/select-code-block-mode]] "Insert code block"]]
+                      [:editor/select-code-block-mode]] "Insert code block"
+        :icon/code]]
 
       (headings)
 
       ;; task management
       (get-statuses)
       [["Deadline" [[:editor/clear-current-slash]
-                    [:editor/set-deadline]]]
+                    [:editor/set-deadline]] "" :icon/calendar-stats]
        (when-not db?
          ["Scheduled" [[:editor/clear-current-slash]
-                       [:editor/set-scheduled]]])]
+                       [:editor/set-scheduled]] "" :icon/calendar-month])]
 
       ;; priority
       (get-priorities)
@@ -307,33 +328,38 @@
       [["Tomorrow"
         #(get-page-ref-text (date/tomorrow))
         "Insert the date of tomorrow"
+        :icon/tomorrow
         "TIME & DATE"]
-       ["Yesterday" #(get-page-ref-text (date/yesterday)) "Insert the date of yesterday"]
-       ["Today" #(get-page-ref-text (date/today)) "Insert the date of today"]
-       ["Current time" #(date/get-current-time) "Insert current time"]
-       ["Date picker" [[:editor/show-date-picker]] "Pick a date and insert here"]]
+       ["Yesterday" #(get-page-ref-text (date/yesterday)) "Insert the date of yesterday" :icon/yesterday]
+       ["Today" #(get-page-ref-text (date/today)) "Insert the date of today" :icon/calendar]
+       ["Current time" #(date/get-current-time) "Insert current time" :icon/clock]
+       ["Date picker" [[:editor/show-date-picker]] "Pick a date and insert here" :icon/calendar-dots]]
 
       ;; order list
       [["Number list"
         [[:editor/clear-current-slash]
          [:editor/toggle-own-number-list]]
         "Number list"
+        :icon/numberedParents
         "LIST TYPE"]
        ["Number children" [[:editor/clear-current-slash]
-                           [:editor/toggle-children-number-list]] "Number children"]]
+                           [:editor/toggle-children-number-list]]
+        "Number children"
+        :icon/numberedChildren]]
 
       ;; advanced
       [["Query"
         [[:editor/input "{{query }}" {:backward-pos 2}]
          [:editor/exit]]
         query-doc
+        :icon/query
         "ADVANCED"]
        (when-not db?
-         ["Zotero" (zotero-steps) "Import Zotero journal article"])
-       ["Query function" [[:editor/input "{{function }}" {:backward-pos 2}]] "Create a query function"]
+         ["Zotero" (zotero-steps) "Import Zotero journal article" :icon/circle-letter-z])
+       ["Query function" [[:editor/input "{{function }}" {:backward-pos 2}]] "Create a query function" :icon/queryCode]
        ["Calculator" [[:editor/input "```calc\n\n```" {:type "block"
                                                        :backward-pos 4}]
-                      [:codemirror/focus]] "Insert a calculator"]
+                      [:codemirror/focus]] "Insert a calculator" :icon/calculator]
        (when-not db?
          ["Draw" (fn []
                    (let [file (draw/file-name)
@@ -343,27 +369,33 @@
                        (println "draw file created, " path))
                      text)) "Draw a graph with Excalidraw"])
 
-       (cond
-         (and (util/electron?) (config/local-file-based-graph? (state/get-current-repo)))
-
-         ["Upload an asset" [[:editor/click-hidden-file-input :id]] "Upload file types like image, pdf, docx, etc.)"])
+       (when (util/electron?)
+         ["Upload an asset"
+          [[:editor/click-hidden-file-input :id]]
+          "Upload file types like image, pdf, docx, etc.)"
+          :icon/upload])
 
        (when-not db?
          ["Template" [[:editor/input command-trigger nil]
-                      [:editor/search-template]] "Insert a created template here"])
+                      [:editor/search-template]] "Insert a created template here"
+          :icon/template])
 
-       ["Embed HTML " (->inline "html")]
+       ["Embed HTML " (->inline "html") "" :icon/htmlEmbed]
 
        ["Embed Video URL" [[:editor/input "{{video }}" {:last-pattern command-trigger
-                                                        :backward-pos 2}]]]
+                                                        :backward-pos 2}]] ""
+        :icon/videoEmbed]
 
-       ["Embed Youtube timestamp" [[:youtube/insert-timestamp]]]
+       ["Embed Youtube timestamp" [[:youtube/insert-timestamp]] "" :icon/videoEmbed]
 
        ["Embed Twitter tweet" [[:editor/input "{{tweet }}" {:last-pattern command-trigger
-                                                            :backward-pos 2}]]]
+                                                            :backward-pos 2}]] ""
+        :icon/xEmbed]
+
        (when db?
          ["Add new property" [[:editor/clear-current-slash]
-                              [:editor/new-property]]])]
+                              [:editor/new-property]] ""
+          :icon/cube-plus])]
 
       (let [commands (cond->> @*extend-slash-commands
                        db?
@@ -374,7 +406,9 @@
 ;; Allow user to modify or extend, should specify how to extend.
 
       (state/get-commands)
-      (state/get-plugins-slash-commands))
+      (when-let [plugin-commands (seq (some->> (state/get-plugins-slash-commands)
+                                               (mapv #(vec (concat % [nil :icon/puzzle])))))]
+        (-> plugin-commands (vec) (update 0 (fn [v] (conj v "PLUGINS"))))))
      (remove nil?)
      (util/distinct-by-last-wins first))))
 
@@ -688,7 +722,9 @@
 (defn- db-based-set-priority
   [priority]
   (when-let [block (state/get-edit-block)]
-    (db-property-handler/batch-set-property-closed-value! [(:block/uuid block)] :logseq.task/priority priority)))
+    (if (nil? priority)
+      (db-property-handler/remove-block-property! (:block/uuid block) :logseq.task/priority)
+      (db-property-handler/batch-set-property-closed-value! [(:block/uuid block)] :logseq.task/priority priority))))
 
 (defmethod handle-step :editor/set-priority [[_ priority] _format]
   (if (config/db-based-graph? (state/get-current-repo))
@@ -754,7 +790,9 @@
 (defmethod handle-step :editor/search-page-hashtag [[_]]
   (state/set-editor-action! :page-search-hashtag))
 
-(defmethod handle-step :editor/search-block [[_ _type]]
+(defmethod handle-step :editor/search-block [[_ type]]
+  (when (and (= type :embed) (config/db-based-graph? (state/get-current-repo)))
+    (reset! *current-command "Block embed"))
   (state/set-editor-action! :block-search))
 
 (defmethod handle-step :editor/search-template [[_]]

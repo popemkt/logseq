@@ -1,19 +1,24 @@
 .cp__emoji-icon-picker {
-  @apply w-[380px] max-h-[396px] relative;
-  @apply pt-14 pb-16;
+  --ls-color-icon-preset: "inherit";
+
+  @apply w-[380px] max-h-[396px] relative flex flex-col overflow-hidden;
+  @apply pt-14 pb-[40px];
 
   > .hd {
     @apply absolute w-full pt-3 pb-1 px-3 top-0 left-0;
   }
 
   > .bd {
-    @apply pb-28 max-h-96 px-2 py-2;
-    @apply overflow-y-scroll;
+    @apply py-1;
+
+    &.all {
+      @apply overflow-y-scroll;
+    }
   }
 
   > .ft {
     @apply absolute w-full py-3 px-3 bg-gray-02 bottom-0 left-0;
-    @apply flex items-center border-t h-[50px] overflow-hidden;
+    @apply flex items-center border-t h-[40px] overflow-hidden;
 
     .tab-item {
       @apply opacity-50 hover:opacity-100;
@@ -48,15 +53,27 @@
     }
   }
 
-  .pane-block {
-    > .its {
-      @apply flex gap-1 py-1 mb-1 flex-wrap;
+  .pane-section {
+    @apply pl-2 overflow-y-scroll h-full;
+
+    color: var(--ls-color-icon-preset);
+
+    > .its, .icons-row {
+      @apply flex gap-1 py-1 flex-wrap;
 
       > button {
         @apply flex items-center justify-center rounded-full hover:bg-gray-03 active:opacity-70;
 
         @apply focus:outline-accent-09;
       }
+    }
+
+    &.has-virtual-list {
+      @apply h-[285px] overflow-y-visible;
+    }
+
+    .virtuoso-item-list {
+      @apply pb-4;
     }
   }
 
@@ -72,10 +89,36 @@
       overflow-ellipsis overflow-hidden mr-2;
     }
   }
+
+  .color-picker {
+    @apply rounded-full w-[24px] h-[24px] overflow-hidden flex relative p-0;
+
+    > strong {
+      @apply w-[18px] h-[18px] rounded-full absolute opacity-90
+      hover:opacity-100 font-normal text-sm;
+
+      .ui__icon {
+        @apply opacity-90 scale-90;
+      }
+    }
+  }
+}
+
+.color-picker-presets {
+  @apply flex flex-row gap-[2px];
+
+  .it {
+    @apply w-[18px] h-[18px] overflow-hidden p-0
+    opacity-90 hover:opacity-100 active:opacity-80;
+  }
 }
 
 .dropdown-wrapper .cp__emoji-icon-picker {
   @apply -m-4;
+}
+
+.ui__dropdown-menu-content:has(> .cp__emoji-icon-picker) {
+  @apply flex;
 }
 
 .ui__dropdown-menu-content .cp__emoji-icon-picker {
@@ -88,7 +131,7 @@
   }
 
   &-Todo {
-    @apply text-gray-11;
+    @apply text-gray-10;
   }
 
   &-InProgress50 {
@@ -106,5 +149,9 @@
   &-Cancelled {
     @apply text-red-rx-08;
   }
+}
+
+.ls-icon-picker {
+  @apply w-auto overflow-hidden;
 }
 

@@ -48,13 +48,13 @@
     content))
 
 (defn- transform-content
-  [repo db {:block/keys [collapsed? format pre-block? content page properties] :as b} level {:keys [heading-to-list?]} context]
+  [repo db {:block/keys [collapsed? format pre-block? title page properties] :as b} level {:keys [heading-to-list?]} context]
   (let [block-ref-not-saved? (and (seq (:block/_refs (d/entity db (:db/id b))))
-                                  (not (string/includes? content (str (:block/uuid b))))
+                                  (not (string/includes? title (str (:block/uuid b))))
                                   (not (sqlite-util/db-based-graph? repo)))
         heading (:heading properties)
         markdown? (= :markdown format)
-        content (or content "")
+        content (or title "")
         page-first-child? (= (:db/id b) (ldb/get-first-child db (:db/id page)))
         pre-block? (or pre-block?
                        (and page-first-child?
@@ -134,14 +134,14 @@
     (let [format (name (get page-block :block/format (:preferred-format context)))
           date-formatter (:date-formatter context)
           title (string/capitalize (:block/name page-block))
-          whiteboard-page? (ldb/whiteboard-page? page-block)
+          whiteboard-page? (ldb/whiteboard? page-block)
           format (if whiteboard-page? "edn" format)
           journal-page? (worker-date/valid-journal-title? title date-formatter)
           journal-title (worker-date/normalize-journal-title title date-formatter)
           journal-page? (and journal-page? (not (string/blank? journal-title)))
           filename (if journal-page?
                      (worker-date/date->file-name journal-title (:journal-file-name-format context))
-                     (-> (or (:block/original-name page-block) (:block/name page-block))
+                     (-> (or (:block/title page-block) (:block/name page-block))
                          wfu/file-name-sanity))
           sub-dir (cond
                     journal-page?    (:journals-directory context)
@@ -164,7 +164,7 @@
         file-db-id (-> page-block :block/file :db/id)
         file-path (-> (d/entity db file-db-id) :file/path)
         result (if (and (string? file-path) (not-empty file-path))
-                 (let [new-content (if (contains? (set (:block/type page-block)) "whiteboard")
+                 (let [new-content (if (ldb/whiteboard? page-block)
                                      (->
                                       (wfu/ugly-pr-str {:blocks tree
                                                         :pages (list (remove-transit-ids page-block))})

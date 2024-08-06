@@ -29,7 +29,7 @@
 (def internal-property-ident
   [:or logseq-property-ident db-attribute-ident])
 
-(defn- user-property?
+(defn user-property?
   "Determines if keyword/ident is a user property"
   [kw]
   (db-property/user-property-namespace? (namespace kw)))
@@ -79,7 +79,7 @@
   validate-fn varies by property type"
   [db validate-fn [{:block/keys [schema] :as property} property-val] & {:keys [new-closed-value?]}]
   ;; For debugging
-  ;; (when (not= "logseq.property" (namespace (:db/ident property))) (prn :validate-val (dissoc property :property/closed-values) property-val))
+  ;; (when (not (string/starts-with? (namespace (:db/ident property)) "logseq.")) (prn :validate-val (dissoc property :property/closed-values) property-val))
   (let [validate-fn' (if (db-property-type/property-types-with-db (:type schema))
                        (fn [value]
                          (validate-fn db value {:new-closed-value? new-closed-value?}))
@@ -213,9 +213,8 @@
 (def page-attrs
   "Common attributes for pages"
   [[:block/name :string]
-   [:block/original-name :string]
-   ;; FIXME: a class can also be a property?
-   [:block/type {:optional true} [:enum #{"class"} #{"property"} #{"whiteboard"} #{"journal"} #{"hidden"}]]
+   [:block/title :string]
+   [:block/type [:enum "page" "class" "property" "whiteboard" "journal" "hidden"]]
    [:block/alias {:optional true} [:set :int]]
     ;; TODO: Should this be here or in common?
    [:block/path-refs {:optional true} [:set :int]]
@@ -265,8 +264,7 @@
 
 (def property-common-schema-attrs
   "Property :schema attributes common to all properties"
-  [[:hide? {:optional true} :boolean]
-   [:description {:optional true} :string]])
+  [[:hide? {:optional true} :boolean]])
 
 (def internal-property
   (vec
@@ -332,7 +330,7 @@
 
 (def block-attrs
   "Common attributes for normal blocks"
-  [[:block/content :string]
+  [[:block/title :string]
    [:block/parent :int]
    [:block/order block-order]
    ;; refs
@@ -347,7 +345,7 @@
   (vec
    (concat
     [:map]
-    [[:block/content :string]
+    [[:block/title :string]
      [:block/parent :int]
      ;; These blocks only associate with pages of type "whiteboard"
      [:block/page :int]
@@ -360,32 +358,29 @@
    (concat
     [:map]
     [[:property.value/content [:or :string :double :boolean]]]
-    (remove #(#{:block/content} (first %)) block-attrs)
+    (remove #(#{:block/title} (first %)) block-attrs)
     page-or-block-attrs)))
 
 (def closed-value-block*
   (vec
    (concat
     [:map]
-    [[:block/type [:= #{"closed value"}]]
+    [[:block/type [:= "closed value"]]
      ;; for built-in properties
      [:db/ident {:optional true} logseq-property-ident]
-     [:block/content {:optional true} :string]
+     [:block/title {:optional true} :string]
      [:property.value/content {:optional true} [:or :string :double]]
-     [:block/closed-value-property {:optional true} [:set :int]]
-     [:block/schema {:optional true}
-      [:map
-       [:description {:optional true} :string]]]]
-    (remove #(#{:block/content} (first %)) block-attrs)
+     [:block/closed-value-property {:optional true} [:set :int]] ]
+    (remove #(#{:block/title} (first %)) block-attrs)
     page-or-block-attrs)))
 
 (def closed-value-block
   "A closed value for a property with closed/allowed values"
   [:and closed-value-block*
-   [:fn {:error/message ":block/content or :property.value/content required"
+   [:fn {:error/message ":block/title or :property.value/content required"
          :error/path [:property.value/content]}
     (fn [m]
-      (or (:block/content m) (:property.value/content m)))]])
+      (or (:block/title m) (:property.value/content m)))]])
 
 (def normal-block
   "A block with content and no special type or tag behavior"
@@ -430,24 +425,17 @@
    [:db/ident [:= :logseq.property/empty-placeholder]]
    [:block/tx-id {:optional true} :int]])
 
-(defn- type-set
-  [d]
-  (when-let [type (:block/type d)]
-    (if (coll? type)
-      (set type)
-      #{type})))
-
 (def Data
   (into
    [:multi {:dispatch (fn [d]
                         (cond
-                          (contains? (type-set d) "property")
+                          (sqlite-util/property? d)
                           :property
-                          (contains? (type-set d) "class")
+                          (sqlite-util/class? d)
                           :class
-                          (contains? (type-set d) "hidden")
+                          (sqlite-util/hidden? d)
                           :hidden
-                          (contains? (type-set d) "whiteboard")
+                          (sqlite-util/whiteboard? d)
                           :normal-page
                           (sqlite-util/page? d)
                           :normal-page

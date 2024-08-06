@@ -42,18 +42,19 @@
 
 (defn- notify-user [m]
   (println (:msg m))
-  (println "Ex-data:" (pr-str (dissoc (:ex-data m) :error)))
-  (println "Stacktrace:")
-  (if-let [stack (some-> (get-in m [:ex-data :error]) ex-data :sci.impl/callstack deref)]
-    (println (string/join
-              "\n"
-              (map
-               #(str (:file %)
-                     (when (:line %) (str ":" (:line %)))
-                     (when (:sci.impl/f-meta %)
-                       (str " calls #'" (get-in % [:sci.impl/f-meta :ns]) "/" (get-in % [:sci.impl/f-meta :name]))))
-               (reverse stack))))
-    (println (some-> (get-in m [:ex-data :error]) .-stack)))
+  (when (:ex-data m)
+    (println "Ex-data:" (pr-str (dissoc (:ex-data m) :error)))
+    (println "Stacktrace:")
+    (if-let [stack (some-> (get-in m [:ex-data :error]) ex-data :sci.impl/callstack deref)]
+      (println (string/join
+                "\n"
+                (map
+                 #(str (:file %)
+                       (when (:line %) (str ":" (:line %)))
+                       (when (:sci.impl/f-meta %)
+                         (str " calls #'" (get-in % [:sci.impl/f-meta :ns]) "/" (get-in % [:sci.impl/f-meta :name]))))
+                 (reverse stack))))
+      (println (some-> (get-in m [:ex-data :error]) .-stack))))
   (when (= :error (:level m))
     (js/process.exit 1)))
 
@@ -130,12 +131,14 @@
                         [(node-path/join (os/homedir) "logseq" "graphs") db-graph-dir])
         file-graph' (resolve-path file-graph)
         conn (outliner-cli/init-conn dir db-name {:classpath (cp/get-classpath)})
-        directory? (.isDirectory (fs/statSync file-graph'))]
+        directory? (.isDirectory (fs/statSync file-graph'))
+        ;; coerce option collection into strings
+        options' (if (:tag-classes options) (update options :tag-classes (partial mapv str)) options)]
     (p/do!
      (if directory?
-       (import-file-graph-to-db file-graph' (node-path/join dir db-name) conn (merge options {:graph-name db-name}))
-       (import-files-to-db file-graph' conn (merge options {:graph-name db-name})))
-     (when (:verbose options) (println "Transacted" (count (d/datoms @conn :eavt)) "datoms"))
+       (import-file-graph-to-db file-graph' (node-path/join dir db-name) conn (merge options' {:graph-name db-name}))
+       (import-files-to-db file-graph' conn (merge options' {:graph-name db-name})))
+     (when (:verbose options') (println "Transacted" (count (d/datoms @conn :eavt)) "datoms"))
      (println "Created graph" (str db-name "!")))))
 
 (when (= nbb/*file* (:file (meta #'-main)))

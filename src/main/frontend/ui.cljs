@@ -6,7 +6,7 @@
             ["react-textarea-autosize" :as TextareaAutosize]
             ["react-tippy" :as react-tippy]
             ["react-transition-group" :refer [CSSTransition TransitionGroup]]
-            ["react-virtuoso" :refer [Virtuoso TableVirtuoso]]
+            ["react-virtuoso" :refer [Virtuoso]]
             ["@emoji-mart/data" :as emoji-data]
             ["emoji-mart" :as emoji-mart]
             [cljs-bean.core :as bean]
@@ -32,6 +32,7 @@
             [goog.object :as gobj]
             [lambdaisland.glogi :as log]
             [logseq.shui.icon.v2 :as shui.icon.v2]
+            [logseq.shui.popup.core :as shui-popup]
             [medley.core :as medley]
             [promesa.core :as p]
             [rum.core :as rum]
@@ -43,7 +44,6 @@
 (defonce css-transition (r/adapt-class CSSTransition))
 (defonce textarea (r/adapt-class (gobj/get TextareaAutosize "default")))
 (defonce virtualized-list (r/adapt-class Virtuoso))
-(defonce virtualized-table (r/adapt-class TableVirtuoso))
 
 (def resize-provider (r/adapt-class (gobj/get Resize "ResizeProvider")))
 (def resize-consumer (r/adapt-class (gobj/get Resize "ResizeConsumer")))
@@ -54,6 +54,17 @@
 ;; (def EmojiPicker (r/adapt-class (gobj/get Picker "default")))
 
 (defonce icon-size (if (mobile-util/native-platform?) 26 20))
+
+(defn shui-popups? [] (some-> (shui-popup/get-popups) (count) (> 0)))
+(defn last-shui-preview-popup?
+  []
+  (= "ls-preview-popup"
+    (some-> (shui-popup/get-last-popup) :content-props :class)))
+(defn hide-popups-until-preview-popup!
+  []
+  (while (and (shui-popups?)
+           (not (last-shui-preview-popup?)))
+    (shui/popup-hide!)))
 
 (def built-in-colors
   ["yellow"
@@ -520,7 +531,8 @@
                       {:id (str "ac-" idx)
                        :tab-index "0"
                        :class (when chosen? "chosen")
-                       :on-pointer-down #(util/stop %)
+                       ;; TODO: should have more tests on touch devices
+                       ;:on-pointer-down #(util/stop %)
                        :on-click (fn [e]
                                    (util/stop e)
                                    (if (and (gobj/get e "shiftKey") on-shift-chosen)
@@ -1110,6 +1122,15 @@
       :on-click rm-heading-fn
       :intent "link"
       :small? true)]]))
+
+(rum/defc tooltip
+  [trigger tooltip-content]
+  (shui/tooltip-provider
+   (shui/tooltip
+    (shui/tooltip-trigger
+     trigger)
+    (shui/tooltip-content
+     tooltip-content))))
 
 (comment
   (rum/defc emoji-picker
