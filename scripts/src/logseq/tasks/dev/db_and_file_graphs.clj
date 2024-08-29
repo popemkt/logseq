@@ -16,8 +16,8 @@
          "electron.db"
          "frontend.handler.db-based."
          "frontend.worker.handler.page.db-based"
-         "frontend.components.property" "frontend.components.class" "frontend.components.db-based"
-         "frontend.components.objects"]))
+         "frontend.components.property" "frontend.components.class"
+         "frontend.components.db-based" "frontend.components.objects"]))
 
 (def file-graph-ns
   "Namespaces or parent namespaces _only_ for file graphs"

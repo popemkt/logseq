@@ -45,9 +45,9 @@
 (defn update-block-content
   "Replace `[[internal-id]]` with `[[page name]]`"
   [item eid]
-  (let [repo (state/get-current-repo)
-        db (conn/get-db repo)]
-    (db-content/update-block-content repo db item eid)))
+  (if-let [db (conn/get-db)]
+    (db-content/update-block-content db item eid)
+    item))
 
 (defn pull
   ([eid]

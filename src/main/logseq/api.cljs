@@ -736,11 +736,13 @@
                                        (when (and uuid (db-model/query-block-by-uuid (sdk-utils/uuid-or-throw-error uuid)))
                                          (throw (js/Error.
                                                  (util/format "Custom block UUID already exists (%s)." uuid)))))))
-                block (if (and before sibling)
-                        (db/pull (:db/id (ldb/get-left-sibling (db/entity (:db/id block))))) block)
-                _ (editor-handler/insert-block-tree-after-target
-                   (:db/id block) sibling bb (:block/format block) keep-uuid?)]
-            nil))))))
+                block (if before
+                        (db/pull (:db/id (ldb/get-left-sibling (db/entity (:db/id block))))) block)]
+            (some-> (editor-handler/insert-block-tree-after-target
+                      (:db/id block) sibling bb (:block/format block) keep-uuid?)
+              (p/then (fn [results]
+                        (some-> results (ldb/read-transit-str)
+                          :blocks (sdk-utils/normalize-keyword-for-json) (bean/->js)))))))))))
 
 (def ^:export remove_block
   (fn [block-uuid ^js _opts]
@@ -1077,17 +1079,17 @@
 (defn ^:export exper_load_scripts
   [pid & scripts]
   (when-let [^js _pl (plugin-handler/get-plugin-inst pid)]
-    (doseq [s scripts
-            :let [upt-status #(state/upt-plugin-resource pid :scripts s :status %)
-                  init?      (plugin-handler/register-plugin-resources pid :scripts {:key s :src s})]]
-      (when init?
-        (p/catch
-          (p/then
-            (do
-              (upt-status :pending)
-              (loader/load s nil {:attributes {:data-ref (name pid)}}))
-            #(upt-status :done))
-          #(upt-status :error))))))
+    (some-> (for [s scripts
+                  :let [upt-status #(state/upt-plugin-resource pid :scripts s :status %)
+                        init? (contains? #{:error nil} (:status (state/get-plugin-resource pid :scripts s)))]]
+              (when init?
+                (plugin-handler/register-plugin-resources pid :scripts {:key s :src s})
+                (upt-status :pending)
+                (-> (loader/load s nil {:attributes {:data-ref (name pid)}})
+                  (p/then (fn [] (upt-status :done)))
+                  (p/catch (fn [] (upt-status :error))))))
+      (vec)
+      (p/all))))
 
 ;; http request
 (defonce *request-k (volatile! 0))

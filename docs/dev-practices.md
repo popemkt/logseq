@@ -7,17 +7,19 @@ This page describes development practices for this codebase.
 Most of our linters require babashka. Before running them, please [install babashka](https://github.com/babashka/babashka#installation). To invoke all the linters in this section, run
 
 ```sh
-bb dev:lint
+bb lint:dev
 ```
 
 ### Clojure code
 
 To lint:
 ```sh
-clojure -M:clj-kondo --parallel --lint src --cache false
+clojure -M:clj-kondo --parallel --lint src
 ```
 
 We lint our Clojure(Script) code with https://github.com/clj-kondo/clj-kondo/. If you need to configure specific linters, see [this documentation](https://github.com/clj-kondo/clj-kondo/blob/master/doc/linters.md). Where possible, a global linting configuration is used and namespace specific configuration is avoided.
+
+For engineers, there is a faster version of this command that only checks files that you have changed: `bb lint:kondo-git-changes`.
 
 There are outstanding linting items that are currently ignored to allow linting the rest of the codebase in CI. These outstanding linting items should be addressed at some point:
 
@@ -119,6 +121,16 @@ $ bb lint:db-and-file-graphs-separate
 ```
 
 The main convention is that file and db specific files go under directories named `file_based` and `db_based` respectively. To see the full list of file and db specific namespaces and files see the top of [the script](/scripts/src/logseq/tasks/dev/db_and_file_graphs.clj).
+
+### Separate Worker from Frontend
+
+The worker and frontend code share common code from deps/ and `frontend.common.*`. However, the worker should never depend on other frontend namespaces as it could pull in libraries like React which cause it to fail hard. Likewise the frontend should never depend on worker namespaces. Run this linter to ensure worker and frontend namespaces don't require each other:
+
+```
+$ bb lint:worker-and-frontend-separate
+Valid worker namespaces!
+Valid frontend namespaces!
+```
 
 ## Testing
 
@@ -303,7 +315,7 @@ We strive to use explicit names that are self explanatory so that our codebase i
 
 ### Babashka tasks
 
-There are a number of bb tasks under `dev:` for developers. Some useful ones to
+There are a number of bb tasks under `dev:` for development. Some useful ones to
 point out:
 
 * `dev:validate-repo-config-edn` - Validate a repo config.edn

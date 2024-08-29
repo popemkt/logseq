@@ -7,6 +7,7 @@
             [frontend.handler.notification :as notification]
             [frontend.handler.page :as page-handler]
             [frontend.handler.common.developer :as dev-common-handler]
+            [frontend.handler.route :as route-handler]
             [frontend.state :as state]
             [logseq.shui.ui :as shui]
             [promesa.core :as p]
@@ -49,13 +50,14 @@
   [page]
   (when-let [page-name (and page (db/page? page) (:block/name page))]
     (let [repo (state/sub :git/current-repo)
-          page-title (:block/title page)
+          db-based? (config/db-based-graph? repo)
+          page-title (if db-based? (str (:block/uuid page)) (:block/title page))
           whiteboard? (ldb/whiteboard? page)
           block? (and page (util/uuid-string? page-name) (not whiteboard?))
           contents? (= page-name "contents")
           public? (pu/get-block-property-value page :logseq.property/public)
           _favorites-updated? (state/sub :favorites/updated?)
-          favorited? (page-handler/favorited? page-name)
+          favorited? (page-handler/favorited? page-title)
           developer-mode? (state/sub [:ui/developer-mode?])
           file-rpath (when (util/electron?) (page-util/get-page-file-rpath page-name))
           _ (state/sub :auth/id-token)
@@ -63,11 +65,16 @@
                                     (file-sync-handler/enable-sync?)
                                     ;; FIXME: Sync state is not cleared when switching to a new graph
                                     (file-sync-handler/current-graph-sync-on?)
-                                    (file-sync-handler/get-current-graph-uuid))
-          db-based? (config/db-based-graph? repo)]
+                                    (file-sync-handler/get-current-graph-uuid))]
       (when (not block?)
         (->>
-         [(when-not config/publishing?
+         [(when (not= (state/get-current-page) (str (:block/uuid page)))
+            {:title   (t :page/go-to-page)
+             :options {:on-click
+                       (fn []
+                         (route-handler/redirect-to-page! (:block/uuid page)))}})
+
+          (when-not config/publishing?
             {:title   (if favorited?
                         (t :page/unfavorite)
                         (t :page/add-to-favorites))
@@ -126,7 +133,7 @@
                {:title   (t :page/open-with-default-app)
                 :options {:on-click #(js/window.apis.openPath file-fpath)}}]))
 
-          (when (or (state/get-current-page) whiteboard?)
+          (when page
             {:title   (t :export-page)
              :options {:on-click #(shui/dialog-open!
                                    (fn []
@@ -154,10 +161,10 @@
                :options {:on-click #(commands/exec-plugin-simple-command!
                                      pid (assoc cmd :page page-name) action)}}))
 
-          (when (and db-based? (not whiteboard?))
-            {:title (t :page/toggle-properties)
+          (when (and db-based? (= (:block/type page) "page"))
+            {:title (t :page/convert-to-tag)
              :options {:on-click (fn []
-                                   (page-handler/toggle-properties! page))}})
+                                   (page-handler/convert-to-tag! page))}})
 
           (when developer-mode?
             {:title   (t :dev/show-page-data)

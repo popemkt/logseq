@@ -7,7 +7,7 @@
             [logseq.common.util.date-time :as date-time-util]
             [logseq.common.util :as common-util]
             [logseq.common.config :as common-config]
-            [logseq.db.frontend.entity-plus :as entity-plus]
+            [logseq.db.frontend.entity-util :as entity-util]
             [clojure.set :as set]
             [logseq.db.frontend.order :as db-order]))
 
@@ -81,7 +81,7 @@
 
 (defn- property-with-values
   [db block]
-  (when (entity-plus/db-based-graph? db)
+  (when (entity-util/db-based-graph? db)
     (let [block (d/entity db (:db/id block))]
       (->> (:block/properties block)
            vals
@@ -142,32 +142,31 @@
                              [:block/uuid id]
                              id))
         page? (sqlite-util/page? block)
-        get-children (fn [block children page?]
+        get-children (fn [block children]
                        (let [long-page? (and (> (count children) 500) (not (sqlite-util/whiteboard? block)))]
                          (if long-page?
                            (->> (map (fn [e]
                                        (select-keys e [:db/id :block/uuid :block/page :block/order :block/parent :block/collapsed? :block/link]))
                                      children)
                                 (map #(with-block-link db %)))
-                           (cond->>
-                            (->> (d/pull-many db '[*] (map :db/id children))
-                                 (map #(with-block-refs db %))
-                                 (map #(with-block-link db %))
-                                 (mapcat (fn [block]
-                                           (let [e (d/entity db (:db/id block))]
-                                             (conj
-                                              (if (seq (:block/properties e))
-                                                (vec (property-with-values db e))
-                                                [])
-                                              block)))))
-                             page?
-                             (map mark-block-fully-loaded)))))]
+                           (->> (d/pull-many db '[*] (map :db/id children))
+                                (map #(with-block-refs db %))
+                                (map #(with-block-link db %))
+                                (mapcat (fn [block]
+                                          (let [e (d/entity db (:db/id block))]
+                                            (conj
+                                             (if (seq (:block/properties e))
+                                               (vec (property-with-values db e))
+                                               [])
+                                             block))))))))]
     (when block
       (let [block' (->> (d/pull db '[*] (:db/id block))
                         (with-parent db)
                         (with-block-refs db)
-                        (with-block-link db)
-                        mark-block-fully-loaded)]
+                        (with-block-link db))
+            block' (if (and page? (not (or children? nested-children?)))
+                     block'
+                     (mark-block-fully-loaded block'))]
         (cond->
          {:block block'
           :properties (property-with-values db block)}
@@ -177,8 +176,7 @@
                                            (get-block-children db (:block/uuid block))
                                            (if page?
                                              (:block/_page block)
-                                             (:block/_parent block)))
-                                         page?)))))))
+                                             (:block/_parent block))))))))))
 
 (defn get-latest-journals
   [db n]
@@ -215,8 +213,8 @@
 
 (defn get-structured-datoms
   [db]
-  (mapcat (fn [type]
-            (->> (d/datoms db :avet :block/type type)
+  (mapcat (fn [type']
+            (->> (d/datoms db :avet :block/type type')
                  (mapcat (fn [d]
                            (d/datoms db :eavt (:e d))))))
           [
@@ -250,7 +248,7 @@
   "Returns current database schema and initial data.
    NOTE: This fn is called by DB and file graphs"
   [db]
-  (let [db-graph? (entity-plus/db-based-graph? db)
+  (let [db-graph? (entity-util/db-based-graph? db)
         _ (when db-graph?
             (reset! db-order/*max-key (db-order/get-max-order db)))
         schema (:schema db)
@@ -265,13 +263,14 @@
         all-pages (get-all-pages db)
         structured-datoms (when db-graph?
                             (get-structured-datoms db))
-        data (concat idents
-                     all-pages
-                     structured-datoms
-                     favorites
-                     views
-                     latest-journals
-                     all-files)]
+        data (distinct
+              (concat idents
+                      all-pages
+                      structured-datoms
+                      favorites
+                      views
+                      latest-journals
+                      all-files))]
     {:schema schema
      :initial-data data}))
 
@@ -283,7 +282,7 @@
 (defn create-kvs-table!
   "Creates a sqlite table for use with datascript.storage if one doesn't exist"
   [sqlite-db]
-  (.exec sqlite-db "create table if not exists kvs (addr INTEGER primary key, content TEXT)"))
+  (.exec sqlite-db "create table if not exists kvs (addr INTEGER primary key, content TEXT, addresses JSON)"))
 
 (defn get-storage-conn
   "Given a datascript storage, returns a datascript connection for it"

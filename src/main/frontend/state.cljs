@@ -352,7 +352,6 @@
 (def common-default-config
   "Common default config for a user's repo config"
   {:feature/enable-search-remove-accents? true
-   :default-arweave-gateway "https://arweave.net"
    :ui/auto-expand-block-refs? true
 
    ;; For flushing the settings of old versions. Don't bump this value.
@@ -475,10 +474,6 @@ should be done through this fn in order to get global config and config defaults
 (defn enable-editing?
   []
   (or (not @publishing?) (:publishing/enable-editing? (get-config))))
-
-(defn get-arweave-gateway
-  []
-  (:arweave/gateway (get-config)))
 
 (defonce built-in-macros
          {"img" "[:img.$4 {:src \"$1\" :style {:width $2 :height $3}}]"})
@@ -895,10 +890,6 @@ Similar to re-frame subscriptions"
   []
   (= :whiteboards (get-current-route)))
 
-(defn setups-picker?
-  []
-  (= :repo-add (get-current-route)))
-
 (defn get-current-page
   []
   (when (= :page (get-current-route))
@@ -912,8 +903,7 @@ Similar to re-frame subscriptions"
 (defn get-current-repo
   "Returns the current repo URL, or else open demo graph"
   []
-  (or (:git/current-repo @state)
-      "Logseq demo"))
+  (:git/current-repo @state))
 
 (defn get-remote-file-graphs
   []
@@ -1121,10 +1111,6 @@ Similar to re-frame subscriptions"
 (defn set-editor-show-commands!
   []
   (when-not (get-editor-action) (set-editor-action! :commands)))
-
-(defn set-editor-show-block-commands!
-  []
-  (when-not (get-editor-action) (set-editor-action! :block-commands)))
 
 (defn clear-editor-action!
   []
@@ -1613,10 +1599,6 @@ Similar to re-frame subscriptions"
               :modal/close-backdrop? (if (boolean? close-backdrop?) close-backdrop? true)
               :modal/style style)))
    nil))
-
-(defn dropdown-opened?
-  []
-  (seq (:modal/dropdowns @state)))
 
 (defn close-dropdowns!
   []
@@ -2379,11 +2361,6 @@ Similar to re-frame subscriptions"
 (defn set-color-accent! [color]
   (swap! state assoc :ui/radix-color color)
   (storage/set :ui/radix-color color)
-  (util/set-android-theme))
-
-(defn unset-color-accent! []
-  (swap! state assoc :ui/radix-color :logseq)
-  (storage/remove :ui/radix-color)
   (util/set-android-theme))
 
 (defn set-editor-font! [font]

@@ -24,8 +24,8 @@
   (transit/write transit-w data))
 
 (defn transit-read
-  [str]
-  (transit/read transit-r str))
+  [s]
+  (transit/read transit-r s))
 
 (def write-transit-str
   (let [write-handlers (->> (assoc dt/write-handlers
@@ -50,7 +50,8 @@
 
 (defn db-based-graph?
   [graph-name]
-  (string/starts-with? graph-name db-version-prefix))
+  (when graph-name
+    (string/starts-with? graph-name db-version-prefix)))
 
 (defn local-file-based-graph?
   [s]

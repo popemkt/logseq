@@ -10,13 +10,11 @@
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
             [frontend.handler :as handler]
-            [frontend.handler.file-sync :as file-sync-handler]
             [frontend.components.file-sync :as fs-sync]
             [frontend.components.rtc.indicator :as rtc-indicator]
             [frontend.handler.plugin :as plugin-handler]
             [frontend.handler.route :as route-handler]
             [frontend.handler.user :as user-handler]
-            [frontend.handler.file-based.nfs :as nfs]
             [frontend.mobile.util :as mobile-util]
             [frontend.state :as state]
             [frontend.ui :as ui]
@@ -41,23 +39,6 @@
                      (state/set-left-sidebar-open! false))
                    (route-handler/redirect-to-home!))}
      (ui/icon "home" {:size ui/icon-size})]))
-
-(rum/defc login < rum/reactive
-  < {:key-fn #(identity "login-button")}
-  []
-  (let [_ (state/sub :auth/id-token)
-        loading? (state/sub [:ui/loading? :login])
-        sync-enabled? (file-sync-handler/enable-sync?)
-        logged? (user-handler/logged-in?)]
-    (when-not (or config/publishing?
-                  logged?
-                  (not sync-enabled?))
-      [:span.flex.space-x-2
-       [:a.button.text-sm.font-medium.block.text-gray-11
-        {:on-click #(state/pub-event! [:user/login])}
-        [:span (t :login)]
-        (when loading?
-          [:span.ml-2 (ui/loading "")])]])))
 
 (rum/defc rtc-collaborators < rum/reactive
   []
@@ -135,10 +116,9 @@
                       :options {:on-click #(plugin-handler/goto-plugins-dashboard!)}
                       :icon (ui/icon "apps")})
 
-                   (when config/lsp-enabled?
-                     {:title (t :themes)
-                      :options {:on-click #(plugin-handler/show-themes-modal!)}
-                      :icon (ui/icon "palette")})
+                   {:title (t :appearance)
+                    :options {:on-click #(state/pub-event! [:modal/toggle-appearance-modal])}
+                    :icon (ui/icon "color-swatch")}
 
                    (when current-repo
                      {:title (t :export-graph)
@@ -150,18 +130,15 @@
                       :options {:href (rfe/href :import)}
                       :icon (ui/icon "file-upload")})
 
-                   (when-not config/publishing?
-                     {:title [:div.flex-row.flex.justify-between.items-center
-                              [:span (t :join-community)]]
-                      :options {:href "https://discuss.logseq.com"
-                                :title (t :discourse-title)
-                                :target "_blank"}
-                      :icon (ui/icon "brand-discord")})
-
                    (when config/publishing?
                      {:title (t :toggle-theme)
                       :options {:on-click #(state/toggle-theme!)}
                       :icon (ui/icon "bulb")})
+
+                   (when (not login?)
+                     {:title (t :login)
+                      :options {:on-click #(state/pub-event! [:user/login])}
+                      :icon (ui/icon "user")})
 
                    (when login? {:hr true})
                    (when login?
@@ -246,22 +223,14 @@
 
 (rum/defc ^:large-vars/cleanup-todo header < rum/reactive
   [{:keys [open-fn current-repo default-home new-block-mode]}]
-  (let [repos (->> (state/sub [:me :repos])
-                   (remove #(= (:url %) config/demo-repo)))
-        _ (state/sub [:user/info :UserGroups])
+  (let [_ (state/sub [:user/info :UserGroups])
         electron-mac? (and util/mac? (util/electron?))
-        show-open-folder? (and (nfs/supported?)
-                               (or (empty? repos)
-                                   (nil? (state/sub :git/current-repo)))
-                               (not (mobile-util/native-platform?))
-                               (not config/publishing?))
         left-menu (left-menu-button {:on-click (fn []
                                                  (open-fn)
                                                  (state/set-left-sidebar-open!
                                                   (not (:ui/left-sidebar-open? @state/state))))})
         custom-home-page? (and (state/custom-home-page?)
-                               (= (state/sub-default-home-page) (state/get-current-page)))
-        sync-enabled? (file-sync-handler/enable-sync?)]
+                               (= (state/sub-default-home-page) (state/get-current-page)))]
     [:div.cp__header.drag-region#head
      {:class           (util/classnames [{:electron-mac   electron-mac?
                                           :native-ios     (mobile-util/native-ios?)
@@ -315,9 +284,6 @@
                  (not custom-home-page?))
         (home-button))
 
-      (when (and (or (util/electron?) (state/developer-mode?)) sync-enabled?)
-        (login))
-
       (when config/lsp-enabled?
         [:<>
          (plugins/hook-ui-items :toolbar)
@@ -331,14 +297,6 @@
 
       (when-not (mobile-util/native-platform?)
         (new-block-mode))
-
-      (when show-open-folder?
-        [:a.text-sm.font-medium.button.icon.add-graph-btn.flex.items-center
-         {:on-click #(route-handler/redirect! {:to :repo-add})}
-         (ui/icon "folder-plus")
-         (when-not config/mobile?
-           [:span.ml-1 {:style {:margin-top (if electron-mac? 0 2)}}
-            (t :on-boarding/add-graph)])])
 
       (when config/publishing?
         [:a.text-sm.font-medium.button {:href (rfe/href :graph)}

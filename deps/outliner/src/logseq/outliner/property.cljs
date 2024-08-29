@@ -71,12 +71,12 @@
     v-str))
 
 (defn- update-datascript-schema
-  [property {:keys [type cardinality]}]
+  [property {type' :type :keys [cardinality]}]
   (let [ident (:db/ident property)
         cardinality (if (= cardinality :many) :db.cardinality/many :db.cardinality/one)
         old-type (get-in property [:block/schema :type])
         old-ref-type? (db-property-type/ref-property-types old-type)
-        ref-type? (db-property-type/ref-property-types type)]
+        ref-type? (db-property-type/ref-property-types type')]
     [(cond->
       {:db/ident ident
        :db/cardinality cardinality}
@@ -93,7 +93,8 @@
           (not= schema (:block/schema property))
           (assoc :block/schema schema)
           (and (some? property-name) (not= property-name (:block/title property)))
-          (assoc :block/title property-name))
+          (assoc :block/title property-name
+                 :block/name (common-util/page-name-sanity-lc property-name)))
         property-tx-data
         (cond-> []
           (seq changed-property-attrs)
@@ -148,8 +149,12 @@
         (d/entity @conn db-ident')))))
 
 (defn- validate-property-value
-  [schema value]
-  (me/humanize (mu/explain-data schema value)))
+  [schema value {:keys [many?]}]
+  ;; normalize :many values since most components update them as a single value
+  (let [value' (if (and many? (not (coll? value)))
+                 #{value}
+                 value)]
+    (me/humanize (mu/explain-data schema value'))))
 
 (defn- ->eid
   [id]
@@ -163,11 +168,7 @@
         schema (get-property-value-schema @conn property-type property)]
     (if-let [msg (and
                   (not= new-value :logseq.property/empty-placeholder)
-                  (validate-property-value schema
-                                           ;; normalize :many values for components that only provide single value
-                                           (if (and (db-property/many? property) (not (coll? new-value)))
-                                             #{new-value}
-                                             new-value)))]
+                  (validate-property-value schema new-value {:many? (db-property/many? property)}))]
       (let [msg' (str "\"" k-name "\"" " " (if (coll? msg) (first msg) msg))]
         (throw (ex-info "Schema validation failed"
                         {:type :notification
@@ -334,13 +335,16 @@
                            {:outliner-op :save-block})))))))
 
 (defn ^:api get-class-parents
-  [tags]
-  (let [tags' (filter ldb/class? tags)]
-    (set (mapcat ldb/get-class-parents tags'))))
+  [db tags]
+  (let [tags' (filter ldb/class? tags)
+        result (map
+                (fn [id] (d/entity db id))
+                (set (mapcat ldb/get-class-parents tags')))]
+    (set result)))
 
 (defn ^:api get-class-properties
-  [class]
-  (let [class-parents (get-class-parents [class])]
+  [db class]
+  (let [class-parents (get-class-parents db [class])]
     (->> (mapcat (fn [class]
                    (:class/schema.properties class)) (concat [class] class-parents))
          (common-util/distinct-by :db/id)
@@ -352,7 +356,7 @@
         classes (->> (:block/tags block)
                      (sort-by :block/name)
                      (filter ldb/class?))
-        class-parents (get-class-parents classes)
+        class-parents (get-class-parents db classes)
         all-classes (->> (concat classes class-parents)
                          (filter (fn [class]
                                    (seq (:class/schema.properties class)))))
@@ -437,7 +441,8 @@
             resolved-value (convert-property-input-string (:type property-schema) value')
             validate-message (validate-property-value
                               (get-property-value-schema @conn property-type property {:new-closed-value? true})
-                              resolved-value)]
+                              resolved-value
+                              {:many? (db-property/many? property)})]
         (cond
           (some (fn [b]
                   (and (= (str resolved-value) (str (or (db-property/closed-value-content b)

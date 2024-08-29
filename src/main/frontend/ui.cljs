@@ -790,7 +790,7 @@
        (assoc state ::error error))}
   [{error ::error, c :rum/react-component} error-view view]
   (if (some? error)
-    error-view
+    (if (fn? error-view) (error-view error) error-view)
     view))
 
 (rum/defcs catch-error-and-notify
@@ -1008,12 +1008,6 @@
             :style (merge {:width size :height size} style)}
       (dissoc opts :style :class))]))
 
-(rum/defc type-icon
-  [{:keys [name class title extension?]}]
-  [:.type-icon {:class class
-                :title title}
-   (icon name {:extension? extension?})])
-
 (rum/defc with-shortcut < rum/reactive
   < {:key-fn (fn [key pos] (str "shortcut-" key pos))}
   [shortcut-key position content]
@@ -1131,6 +1125,37 @@
      trigger)
     (shui/tooltip-content
      tooltip-content))))
+
+(rum/defc DelDateButton
+  [on-delete]
+  (shui/button {:variant :outline :size :sm :class "del-date-btn" :on-click on-delete}
+    (shui/tabler-icon "trash")))
+
+(rum/defc DateNavSelect
+  [{:keys [name value onChange children]}]
+  [:div.months-years-nav
+   (if (= name "years")
+     [:label [:input.py-0.px-1.w-auto
+              {:type "number" :value value :on-change onChange :min 1 :max 9999}]]
+
+     ;; months
+     [:select {:on-change onChange :value value :data-month value} children])])
+
+(defn single-calendar
+  [{:keys [del-btn? on-delete on-select] :as opts}]
+  (shui/calendar
+    (merge
+      {:mode "single"
+       :caption-layout "dropdown-buttons"
+       :fromYear 1899
+       :toYear 2099
+       :components (cond-> {:Dropdown #(DateNavSelect (bean/bean %))}
+                     del-btn? (assoc :Head #(DelDateButton on-delete)))
+       :class-names {:months "" :root (when del-btn? "has-del-btn")}
+       :on-day-key-down (fn [^js d _ ^js e]
+                          (when (= "Enter" (.-key e))
+                            (on-select d)))}
+      opts)))
 
 (comment
   (rum/defc emoji-picker

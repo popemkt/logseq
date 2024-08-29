@@ -8,7 +8,6 @@
             [frontend.handler.repeated :as repeated]
             [frontend.state :as state]
             [frontend.ui :as ui]
-            [logseq.shui.ui :as shui]
             [frontend.util :as util]
             [frontend.mixins :as mixins]
             [rum.core :as rum]
@@ -167,7 +166,7 @@
     [:div#date-time-picker.flex.flex-col.sm:flex-row
      ;; inline container
      [:div.border-red-500
-      (shui/calendar
+      (ui/single-calendar
         {:mode "single"
          :initial-focus true
          :show-week-number false

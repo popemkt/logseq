@@ -11,9 +11,7 @@
    {:title "Task"
     :schema {:properties [:logseq.task/status :logseq.task/priority :logseq.task/deadline]}}
 
-   :logseq.class/Card {:title "Card"
-                       ;; :schema {:property []}
-                       }
+   :logseq.class/Card {:title "Card"}
    ;; TODO: Add more classes such as :book, :paper, :movie, :music, :project
    })
 
@@ -28,11 +26,6 @@
   facing messages when name is invalid"
   [db page-m]
   {:pre [(string? (:block/title page-m))]}
-  (let [db-ident (try (create-user-class-ident-from-name (:block/title page-m))
-                      (catch :default e
-                        (throw (ex-info (str e)
-                                        {:type :notification
-                                         :payload {:message "Failed to create class. Please try a different class name."
-                                                   :type :error}}))))
+  (let [db-ident (create-user-class-ident-from-name (:block/title page-m))
         db-ident' (db-ident/ensure-unique-db-ident db db-ident)]
     (sqlite-util/build-new-class (assoc page-m :db/ident db-ident'))))

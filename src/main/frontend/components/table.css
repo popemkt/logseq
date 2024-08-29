@@ -37,7 +37,7 @@
       @apply fixed overflow-hidden;
 
       min-width: unset;
-      top: 48px !important;
+      top: 40px !important;
     }
   }
 
@@ -55,8 +55,8 @@
   }
 }
 
-.query-table {
-  @apply my-2 rounded;
+.query-table, .classic-table {
+  @apply my-2 rounded overflow-hidden;
 
   table {
     @apply w-full border-none;
@@ -67,6 +67,8 @@
   }
 
   tr {
+    @apply hover:bg-gray-03;
+
     &:nth-child(even) {
       @apply bg-gray-02;
     }
@@ -74,5 +76,9 @@
 
   th, td {
     @apply p-1.5 border border-collapse;
+
+    &[data-key=":block"] {
+      @apply whitespace-normal;
+    }
   }
 }

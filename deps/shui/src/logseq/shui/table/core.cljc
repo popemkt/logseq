@@ -160,16 +160,22 @@
 
 ;; FIXME: another solution for the sticky header
 (defn- use-sticky-element2!
-  [^js/HTMLDivElement container target-ref]
+  [^js/HTMLDivElement target-ref]
   (rum/use-effect!
     (fn []
       (let [^js target (rum/deref target-ref)
+            ^js container (or (.closest target ".sidebar-item-list") (get-main-scroll-container))
             ^js target-cls (.-classList target)
             ^js table (.closest target ".ls-table-rows")
             ^js table-footer (some-> table (.querySelector ".ls-table-footer"))
+            ^js page-el (.closest target ".page-inner")
             *ticking? (volatile! false)
-            el-top (-> target (.getBoundingClientRect) (.-top))
+            *el-top (volatile! (-> target (.getBoundingClientRect) (.-top)))
             head-top (-> (get-head-container) (js/getComputedStyle) (.-height) (js/parseInt))
+            update-target-top! (fn []
+                                 (when (not (.contains target-cls "ls-fixed"))
+                                   (vreset! *el-top (+ (-> target (.getBoundingClientRect) (.-top))
+                                                      (.-scrollTop container)))))
             update-footer! (fn []
                              (when table-footer
                                (set! (. (.-style table-footer) -width) (str (.-scrollWidth table) "px"))))
@@ -188,35 +194,41 @@
             ;; target observer
             target-observe! (fn []
                               (let [scroll-top (js/parseInt (.-scrollTop container))
-                                    fixed? (> (+ scroll-top head-top) el-top)]
+                                    table-in-top (+ scroll-top head-top)
+                                    table-bottom (.-bottom (.getBoundingClientRect table))
+                                    fixed? (and (> table-bottom (+ head-top 90))
+                                             (> table-in-top @*el-top))]
                                 (if fixed?
                                   (.add target-cls "ls-fixed")
                                   (.remove target-cls "ls-fixed"))
                                 (update-target!)))
-            target-observe! (fn [^js _e]
-                              (when (not @*ticking?)
-                                (js/window.requestAnimationFrame
-                                  #(do (target-observe!) (vreset! *ticking? false)))
-                                (vreset! *ticking? true)))
-            resize-observer (js/ResizeObserver. update-target!)]
+            target-observe-handle! (fn [^js _e]
+                                     (when (not @*ticking?)
+                                       (js/window.requestAnimationFrame
+                                         #(do (target-observe!) (vreset! *ticking? false)))
+                                       (vreset! *ticking? true)))
+            resize-observer (js/ResizeObserver. update-target!)
+            page-resize-observer (js/ResizeObserver. (fn [] (update-target-top!)))]
         ;; events
         (.observe resize-observer container)
         (.observe resize-observer table)
-        (.addEventListener container "scroll" target-observe!)
+        (some->> page-el (.observe page-resize-observer))
+        (.addEventListener container "scroll" target-observe-handle!)
         (.addEventListener table "scroll" update-target!)
         (.addEventListener table "resize" update-target!)
         (update-footer!)
 
         ;; teardown
         #(do (.removeEventListener container "scroll" target-observe!)
-           (.disconnect resize-observer))))
+           (.disconnect resize-observer)
+           (.disconnect page-resize-observer))))
     []))
 
 (rum/defc table-header < rum/static
   [& prop-and-children]
   (let [[prop children] (get-prop-and-children prop-and-children)
         el-ref (rum/use-ref nil)
-        _ (use-sticky-element2! (get-main-scroll-container) el-ref)]
+        _ (use-sticky-element2! el-ref)]
     [:div.ls-table-header
      (merge {:class "border-y transition-colors bg-gray-01"
              :ref el-ref

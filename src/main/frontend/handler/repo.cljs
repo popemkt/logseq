@@ -45,13 +45,15 @@
        (state/delete-repo! repo)
        (when switch-graph?
          (if (= current-repo url)
-           (when-let [graph (:url (first (state/get-repos)))]
-             (notification/show! (str "Removed graph "
-                                      (pr-str (text-util/get-graph-name-from-path url))
-                                      ". Redirecting to graph "
-                                      (pr-str (text-util/get-graph-name-from-path graph)))
-                                 :success)
-             (state/pub-event! [:graph/switch graph {:persist? false}]))
+           (do
+             (state/set-current-repo! nil)
+             (when-let [graph (:url (first (state/get-repos)))]
+              (notification/show! (str "Removed graph "
+                                       (pr-str (text-util/get-graph-name-from-path url))
+                                       ". Redirecting to graph "
+                                       (pr-str (text-util/get-graph-name-from-path graph)))
+                                  :success)
+              (state/pub-event! [:graph/switch graph {:persist? false}])))
            (notification/show! (str "Removed graph " (pr-str (text-util/get-graph-name-from-path url))) :success)))))))
 
 (defn start-repo-db-if-not-exists!
@@ -120,15 +122,8 @@
                              (util-fs/inflate-graphs-info nfs-dbs)
 
                              :else
-                             nfs-dbs))
-          nfs-dbs (seq (bean/->clj nfs-dbs))]
-    (cond
-      (seq nfs-dbs)
-      nfs-dbs
-
-      :else
-      [{:url config/demo-repo
-        :example? true}])))
+                             nfs-dbs))]
+    (seq (bean/->clj nfs-dbs))))
 
 (defn combine-local-&-remote-graphs
   [local-repos remote-repos]
@@ -191,13 +186,14 @@
    (p/let [config (migrate-db-config config/config-default-content)
            _ (persist-db/<new full-graph-name {:config config})
            _ (start-repo-db-if-not-exists! full-graph-name)
-           _ (state/add-repo! {:url full-graph-name})
+           _ (state/add-repo! {:url full-graph-name :root (config/get-local-dir full-graph-name)})
            _ (restore-and-setup-repo! full-graph-name)
            _ (when-not file-graph-import? (route-handler/redirect-to-home!))
            _ (repo-config-handler/set-repo-config-state! full-graph-name config/config-default-content)
           ;; TODO: handle global graph
            _ (state/pub-event! [:init/commands])
            _ (when-not file-graph-import? (state/pub-event! [:page/create (date/today) {:redirect? false}]))]
+     (state/pub-event! [:shortcut/refresh])
      (route-handler/redirect-to-home!)
      (ui-handler/re-render-root!)
      (graph-handler/settle-metadata-to-local! {:created-at (js/Date.now)})

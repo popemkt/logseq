@@ -62,7 +62,8 @@
          ;; remove private built-in properties
          (remove #(and (:db/ident %)
                        (db-property/logseq-property? (:db/ident %))
-                       (not (get-in % [:block/schema :public?])))))))
+                       (not (ldb/public-built-in-property? %))
+                       (not= (:db/ident %) :logseq.property/icon))))))
 
 (defn <get-all-properties
   "Returns all public properties as property maps including their

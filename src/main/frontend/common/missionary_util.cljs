@@ -1,5 +1,5 @@
 (ns frontend.common.missionary-util
-  "Utils based on missionary."
+  "Utils based on missionary. Used by frontend and worker namespaces"
   (:require-macros [frontend.common.missionary-util])
   (:require [clojure.core.async :as a]
             [missionary.core :as m])
@@ -11,9 +11,9 @@
 (def ^:private retry-sentinel (js-obj))
 (defn backoff
   "Retry task when it throw exception `(get ex-data :missionary/retry)`"
-  [delays task]
+  [delays-seq task]
   (m/sp
-    (loop [[delay & delays] (seq delays)]
+    (loop [[delay & rest-delays] (seq delays-seq)]
       (let [r (try
                 (m/? task)
                 (catch :default e
@@ -24,7 +24,7 @@
                         retry-sentinel)
                     (throw e))))]
         (if (identical? r retry-sentinel)
-          (recur delays)
+          (recur rest-delays)
           r)))))
 
 (defn mix

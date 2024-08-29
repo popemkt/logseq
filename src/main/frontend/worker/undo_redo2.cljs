@@ -4,7 +4,7 @@
             [frontend.worker.db-listener :as db-listener]
             [frontend.worker.state :as worker-state]
             [clojure.set :as set]
-            [frontend.schema-register :include-macros true :as sr]
+            [frontend.common.schema-register :include-macros true :as sr]
             [malli.core :as m]
             [malli.util :as mu]
             [logseq.db :as ldb]))
@@ -333,7 +333,8 @@
 (defmethod db-listener/listen-db-changes :gen-undo-ops
   [_ {:keys [repo tx-data tx-meta db-after db-before]}]
   (let [{:keys [outliner-op]} tx-meta]
-    (when (and outliner-op (not (false? (:gen-undo-ops? tx-meta))))
+    (when (and outliner-op (not (false? (:gen-undo-ops? tx-meta)))
+               (not (:create-today-journal? tx-meta)))
       (let [editor-info (:editor-info tx-meta)
             all-ids (distinct (map :e tx-data))
             retracted-ids (set

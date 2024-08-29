@@ -1,7 +1,6 @@
 (ns frontend.components.editor
   (:require [clojure.string :as string]
-            [frontend.commands :as commands
-             :refer [*matched-block-commands *matched-commands]]
+            [frontend.commands :as commands :refer [*matched-commands]]
             [frontend.components.datetime :as datetime-comp]
             [frontend.components.svg :as svg]
             [frontend.components.search :as search]
@@ -101,19 +100,6 @@
        :class
        "cp__commands-slash"})))
 
-(rum/defc block-commands < rum/reactive
-  [id format]
-  (when (= :block-commands (state/get-editor-action))
-    (let [matched (util/react *matched-block-commands)]
-      (ui/auto-complete
-        (map first matched)
-        {:on-chosen (fn [chosen]
-                      (editor-handler/insert-command! id (get (into {} matched) chosen)
-                        format
-                        {:last-pattern commands/angle-bracket
-                         :command :block-commands}))
-         :class "black"}))))
-
 (defn- page-on-chosen-handler
   [embed? input id q pos format]
   (if embed?
@@ -137,7 +123,8 @@
 
 (rum/defc page-search-aux
   [id format embed? db-tag? q current-pos input pos]
-  (let [[matched-pages set-matched-pages!] (rum/use-state nil)]
+  (let [db? (config/db-based-graph? (state/get-current-repo))
+        [matched-pages set-matched-pages!] (rum/use-state nil)]
     (rum/use-effect! (fn []
                        (when-not (string/blank? q)
                          (p/let [result (if db-tag?
@@ -149,9 +136,7 @@
                           ;; reorder, shortest and starts-with first.
                           (let [matched-pages-with-new-page
                                 (fn [partial-matched-pages]
-                                  (if (or (db/page-exists? q)
-                                          (some (fn [p] (= (string/lower-case q)
-                                                           (string/lower-case (:block/title p)))) matched-pages))
+                                  (if (db/page-exists? q (if db-tag? "class" "page"))
                                     partial-matched-pages
                                     (if db-tag?
                                       (concat [{:block/title (str (t :new-tag) " " q)}]
@@ -163,37 +148,43 @@
                               (cons (first matched-pages)
                                     (matched-pages-with-new-page (rest matched-pages)))
                               (matched-pages-with-new-page matched-pages))))]
-      (ui/auto-complete
-       matched-pages
-       {:on-chosen   (page-on-chosen-handler embed? input id q pos format)
-        :on-enter    (fn []
-                       (page-handler/page-not-exists-handler input id q current-pos))
-        :item-render (fn [block _chosen?]
-                       [:div.flex.flex-row.items-center.gap-1
-                        (when-not db-tag?
-                          (cond
-                            (ldb/class? block)
-                            [:div (ui/icon "hash" {:size 14})]
-                            (ldb/property? block)
-                            [:div (ui/icon "letter-p" {:size 14})]
-                            (db-model/whiteboard-page? block)
-                            [:div (ui/icon "whiteboard" {:extension? true})]
-                            (db/page? block)
-                            [:div (ui/icon "page" {:extension? true})]
-                            (or (string/starts-with? (:block/title block) (t :new-tag))
-                                (string/starts-with? (:block/title block) (t :new-page)))
-                            nil
-                            :else
-                            [:div (ui/icon "letter-n" {:size 14})]))
+      [:<>
+       (ui/auto-complete
+        matched-pages
+        {:on-chosen   (page-on-chosen-handler embed? input id q pos format)
+         :on-enter    (fn []
+                        (page-handler/page-not-exists-handler input id q current-pos))
+         :item-render (fn [block _chosen?]
+                        [:div.flex.flex-row.items-center.gap-1
+                         (when-not db-tag?
+                           (cond
+                             (ldb/class? block)
+                             [:div (ui/icon "hash" {:size 14})]
+                             (ldb/property? block)
+                             [:div (ui/icon "letter-p" {:size 14})]
+                             (db-model/whiteboard-page? block)
+                             [:div (ui/icon "whiteboard" {:extension? true})]
+                             (db/page? block)
+                             [:div (ui/icon "page" {:extension? true})]
+                             (or (string/starts-with? (str (:block/title block)) (t :new-tag))
+                                 (string/starts-with? (str (:block/title block)) (t :new-page)))
+                             nil
+                             :else
+                             [:div (ui/icon "letter-n" {:size 14})]))
 
-                        (let [title (if db-tag?
-                                      (:block/title block)
-                                      (title/block-unique-title block))]
-                          (search-handler/highlight-exact-query title q))])
-        :empty-placeholder [:div.text-gray-500.text-sm.px-4.py-2 (if db-tag?
-                                                                   "Search for a tag"
-                                                                   "Search for a node")]
-        :class       "black"}))))
+                         (let [title (if db-tag?
+                                       (:block/title block)
+                                       (title/block-unique-title block))]
+                           (search-handler/highlight-exact-query title q))])
+         :empty-placeholder [:div.text-gray-500.text-sm.px-4.py-2 (if db-tag?
+                                                                    "Search for a tag"
+                                                                    "Search for a node")]
+         :class       "black"})
+
+       (when (and db? db-tag? (not (string/blank? q)))
+         [:p.px-1.opacity-50.text-sm
+          [:code (if util/mac? "Cmd+Enter" "Ctrl+Enter")]
+          [:span " to display this tag inline instead of at the end of this node."]])])))
 
 (rum/defc page-search < rum/reactive
   {:will-unmount (fn [state]
@@ -295,7 +286,7 @@
         selected-text (editor-handler/get-selected-text)
         q (or
             selected-text
-            (when (> (count edit-content) current-pos)
+            (when (>= (count edit-content) current-pos)
               (subs edit-content pos current-pos)))]
     (when input
       (block-search-auto-complete edit-block input id q format selected-text))))
@@ -431,24 +422,23 @@
                                            [:strong mode])
                             :class "code-block-mode-picker"})]))))
 
-(rum/defcs input < rum/reactive
-                   (rum/local {} ::input-value)
-                   (mixins/event-mixin
-                     (fn [state]
-                       (mixins/on-key-down
-                         state
-                         {;; enter
-                          13 (fn [state e]
-                               (let [input-value (get state ::input-value)
-                                     input-option (:options (state/get-editor-show-input))]
-                                 (when (seq @input-value)
+(rum/defcs editor-input < rum/reactive (rum/local {} ::input-value)
+  (mixins/event-mixin
+   (fn [state]
+     (mixins/on-key-down
+      state
+      {;; enter
+       13 (fn [state e]
+            (let [input-value (get state ::input-value)
+                  input-option (:options (state/get-editor-show-input))]
+              (when (seq @input-value)
                                    ;; no new line input
-                                   (util/stop e)
-                                   (let [[_id on-submit] (:rum/args state)
+                (util/stop e)
+                (let [[_id on-submit] (:rum/args state)
                       command (:command (first input-option))]
                   (on-submit command @input-value))
                 (reset! input-value nil))))
-       ;; escape
+                          ;; escape
        27 (fn [_state _e]
             (let [[id _on-submit on-cancel] (:rum/args state)]
               (on-cancel id)))})))
@@ -458,29 +448,35 @@
           input-value (get state ::input-value)]
       (when (seq options)
         (let [command (:command (first options))]
-          [:div.p-2.rounded-md
-           (for [{:keys [id placeholder type autoFocus] :as input-item} options]
-             [:div.my-3 {:key id}
-              [:input.form-input.block.w-full.pl-2.sm:text-sm.sm:leading-5
-               (merge
-                 (cond->
-                   {:key (str "modal-input-" (name id))
-                    :id (str "modal-input-" (name id))
-                    :type (or type "text")
-                    :on-change (fn [e]
-                                 (swap! input-value assoc id (util/evalue e)))
-                    :auto-complete (if (util/chrome?) "chrome-off" "off")}
-                   placeholder
-                   (assoc :placeholder placeholder)
-                   autoFocus
-                   (assoc :auto-focus true))
-                 (dissoc input-item :id))]])
+          [:div.p-2.rounded-md.flex.flex-col.gap-2
+           (for [{:keys [id placeholder type]} options]
+             (shui/input
+              (cond->
+               {:key (str "modal-input-" (name id))
+                :type (or type "text")
+                :auto-complete (if (util/chrome?) "chrome-off" "off")
+                :on-change (fn [e]
+                             (swap! input-value assoc id (util/evalue e)))}
+
+                placeholder
+                (assoc :placeholder placeholder))))
            (ui/button
-             "Submit"
-             :on-click
-             (fn [e]
-               (util/stop e)
-               (on-submit command @input-value pos)))])))))
+            "Submit"
+            :on-click
+            (fn [e]
+              (util/stop e)
+              (on-submit command @input-value pos)))])))))
+
+(rum/defc image-uploader < rum/reactive
+  [id format]
+  [:div.image-uploader
+   [:input
+    {:id "upload-file"
+     :type "file"
+     :on-change (fn [e]
+                  (let [files (.-files (.-target e))]
+                    (editor-handler/upload-asset! id files format editor-handler/*asset-uploading? false)))
+     :hidden true}]])
 
 (defn- set-up-key-down!
   [state format]
@@ -490,11 +486,11 @@
    {:not-matched-handler (editor-handler/keydown-not-matched-handler format)}))
 
 (defn- set-up-key-up!
-  [state input input-id]
+  [state input']
   (mixins/on-key-up
    state
    {}
-   (editor-handler/keyup-handler state input input-id)))
+   (editor-handler/keyup-handler state input')))
 
 (def search-timeout (atom nil))
 
@@ -502,9 +498,9 @@
   [state]
   (let [{:keys [id format]} (get-state)
         input-id id
-        input (gdom/getElement input-id)]
+        input' (gdom/getElement input-id)]
     (set-up-key-down! state format)
-    (set-up-key-up! state input input-id)))
+    (set-up-key-up! state input')))
 
 (defn get-editor-style-class
   "Get textarea css class according to it's content"
@@ -583,20 +579,26 @@
 
 (defn- open-editor-popup!
   [id content opts]
-  (let [{:keys [left top rect]} (cursor/get-caret-pos (state/get-input))
-        pos [(+ left (:left rect) -20) (+ top (:top rect) 20)]
+  (let [input (state/get-input)
+        line-height (or (when input
+                          (some-> (.-lineHeight (js/window.getComputedStyle input))
+                                  (js/parseFloat)
+                                  (- 4)))
+                        20)
+        {:keys [left top rect]} (cursor/get-caret-pos input)
+        pos [(+ left (:left rect) -20) (+ top (:top rect) line-height)]
         {:keys [root-props content-props]} opts]
     (shui/popup-show!
-      pos content
-      (merge
-        {:id (keyword :editor.commands id)
-         :align :start
-         :root-props (merge {:onOpenChange #(when-not % (state/clear-editor-action!))} root-props)
-         :content-props (merge {:onOpenAutoFocus #(.preventDefault %)
-                                :onCloseAutoFocus #(.preventDefault %)
-                                :data-editor-popup-ref (name id)} content-props)
-         :force-popover? true}
-        (dissoc opts :root-props :content-props)))))
+     pos content
+     (merge
+      {:id (keyword :editor.commands id)
+       :align :start
+       :root-props (merge {:onOpenChange #(when-not % (state/clear-editor-action!))} root-props)
+       :content-props (merge {:onOpenAutoFocus #(.preventDefault %)
+                              :onCloseAutoFocus #(.preventDefault %)
+                              :data-editor-popup-ref (name id)} content-props)
+       :force-popover? true}
+      (dissoc opts :root-props :content-props)))))
 
 (rum/defc shui-editor-popups
   [id format action _data]
@@ -607,11 +609,6 @@
                   (open-editor-popup! :commands
                     (commands id format)
                     {:content-props {:withoutAnimation false}})
-
-                  :block-commands
-                  (open-editor-popup! :block-commands
-                    (block-commands id format)
-                    {:content-props {:withoutAnimation true}})
 
                   (:block-search :page-search :page-search-hashtag)
                   (open-editor-popup! action
@@ -631,11 +628,12 @@
 
                   :input
                   (open-editor-popup! :input
-                    (input id
+                    (editor-input id
                       (fn [command m]
                         (editor-handler/handle-command-input command id format m))
                       (fn []
-                        (editor-handler/handle-command-input-close id))) {})
+                        (editor-handler/handle-command-input-close id)))
+                    {:content-props {:onOpenAutoFocus #()}})
 
                   :select-code-block-mode
                   (open-editor-popup! :code-block-mode-picker
@@ -681,10 +679,9 @@
       nil
 
       (or (contains?
-           #{:commands :block-commands
-             :page-search :page-search-hashtag :block-search :template-search
-             :property-search :property-value-search
-             :datepicker} action)
+           #{:commands :page-search :page-search-hashtag :block-search :template-search
+             :property-search :property-value-search :datepicker}
+           action)
           (and (keyword? action)
                (= (namespace action) "editor.action")))
       (when e (util/stop e))
@@ -751,4 +748,7 @@
 
      (ui/ls-textarea opts)
      (mock-textarea content)
-     (command-popups id format)]))
+     (command-popups id format)
+
+     (when format
+       (image-uploader id format))]))

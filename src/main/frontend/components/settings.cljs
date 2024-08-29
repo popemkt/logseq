@@ -29,7 +29,7 @@
             [frontend.storage :as storage]
             [frontend.ui :as ui]
             [frontend.util :refer [classnames web-platform?] :as util]
-            [frontend.version :refer [version]]
+            [frontend.version :as fv]
             [goog.object :as gobj]
             [goog.string :as gstring]
             [promesa.core :as p]
@@ -228,7 +228,7 @@
    [:div
     [:div.rounded-md.sm:max-w-xs
      (ui/toggle wide-mode?
-       state/toggle-wide-mode!
+       ui-handler/toggle-wide-mode!
        true)]]
    (when (not (or (util/mobile?) (mobile-util/native-platform?)))
      [:div {:style {:text-align "right"}}
@@ -405,8 +405,8 @@
 
     [:<>
      (row-with-button-action
-       {:left-label "Accent color"
-        :description "Choosing an accent color may override any theme you have selected."
+       {:left-label (t :settings-page/accent-color)
+        :description (t :settings-page/accent-color-alert)
         :-for "toggle_radix_theme"
         :desc (when-not _in-modal?
                 [:span.pl-6 (ui/render-keyboard-shortcut
@@ -417,7 +417,7 @@
 (rum/defc modal-appearance-inner < rum/reactive
   []
   [:div.cp__settings-appearance-modal-inner
-   [:h1.text-2xl.font-bold.pb-2.pt-1 "Appearance"]
+   [:h1.text-2xl.font-bold.pb-2.pt-1 (t :appearance)]
    (theme-modes-row t)
    (editor-font-family-row t (state/sub :ui/editor-font))
    (toggle-wide-mode-row t (state/sub :ui/wide-mode?))
@@ -446,7 +446,7 @@
                           [:div (t :settings-page/custom-date-format-notification)]
                           :warning false)
                         (state/close-modal!)
-                        (route-handler/redirect! {:to :repos}))))}
+                        (route-handler/redirect! {:to :graphs}))))}
       (for [format (sort (date/journal-title-formatters))]
         [:option {:key format} format])]]]])
 
@@ -539,7 +539,8 @@
         (config-handler/set-config! :default-home new-home)
         (notification/show! "Home default page updated successfully!" :success))
 
-      (db/page-exists? value)
+      ;; FIXME: home page should be db id instead of page name
+      (ldb/get-page (db/get-db) value)
       (let [home (get (state/get-config) :default-home {})
             new-home (assoc home :page value)]
         (config-handler/set-config! :default-home new-home)
@@ -717,7 +718,7 @@
   (let [preferred-language (state/sub [:preferred-language])
         show-radix-themes? true]
     [:div.panel-wrap.is-general
-     (version-row t version)
+     (version-row t fv/version)
      (language-row t preferred-language)
      (theme-modes-row t)
      (when (and (util/electron?) (not util/mac?)) (native-titlebar-row t))

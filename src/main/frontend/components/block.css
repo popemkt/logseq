@@ -200,10 +200,18 @@
 }
 
 .block-title-wrap {
-  @apply inline-flex items-center flex-wrap;
+  @apply inline;
+
+  > .ui__checkbox {
+    @apply relative top-[3px];
+  }
 
   &.as-heading {
-    @apply flex flex-1;
+    @apply flex flex-1 items-center;
+
+    > .ui__checkbox {
+      @apply top-0;
+    }
 
     h1& {
       .ui__icon.ti svg {
@@ -755,12 +763,6 @@ a.filter svg {
   height: 100%;
 }
 
-@media (min-width: 1024px) {
-  .ui__modal-panel .ls-card {
-    min-height: 24rem;
-  }
-}
-
 .ls-card a[data-ref="card"], .ls-card .page-reference[data-ref="card"] {
   display: none;
 }
@@ -838,5 +840,26 @@ html.is-mac {
 .cp__right-sidebar-inner {
   .references-blocks-item {
     @apply bg-gray-04;
+  }
+}
+
+.block-title-wrap a.tag, .block-body a.tag {
+  position: relative;
+  font-size: initial;
+  opacity: 1;
+
+  &:has(.ui__icon) {
+    top: 4px;
+  }
+}
+
+.positioned-properties.right-align  {
+  button {
+    white-space: nowrap;
+  }
+  .block-title-wrap {
+    @apply overflow-hidden h-6;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
 }

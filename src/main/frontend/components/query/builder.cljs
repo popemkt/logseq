@@ -21,7 +21,8 @@
             [promesa.core :as p]
             [frontend.config :as config]
             [logseq.db.frontend.property :as db-property]
-            [logseq.db.sqlite.util :as sqlite-util]))
+            [logseq.db.sqlite.util :as sqlite-util]
+            [frontend.db-mixins :as db-mixins]))
 
 (rum/defc page-block-selector
   [*find]
@@ -150,7 +151,7 @@
                                   db-ident
                                   (keyword value)))))))
 
-(rum/defc property-value-select
+(rum/defc property-value-select < rum/reactive db-mixins/query
   [repo *property *find *tree opts loc]
   (let [db-graph? (sqlite-util/db-based-graph? repo)
         [values set-values!] (rum/use-state nil)]
@@ -449,16 +450,16 @@
                   "origin-top-right.absolute.left-0.mt-2.ml-2.rounded-md.shadow-lg.w-64")}))
 
 (rum/defc clause
-  [*tree *find loc clause]
-  (when (seq clause)
+  [*tree *find loc clauses]
+  (when (seq clauses)
     [:div.query-builder-clause
-     (let [kind (keyword (first clause))]
+     (let [kind (keyword (first clauses))]
        (if (query-builder/operators-set kind)
          [:div.operator-clause.flex.flex-row.items-center {:data-level (count loc)}
           [:div.clause-bracket "("]
-          (clauses-group *tree *find (conj loc 0) kind (rest clause))
+          (clauses-group *tree *find (conj loc 0) kind (rest clauses))
           [:div.clause-bracket ")"]]
-         (clause-inner *tree loc clause)))]))
+         (clause-inner *tree loc clauses)))]))
 
 (rum/defc clauses-group
   [*tree *find loc kind clauses]

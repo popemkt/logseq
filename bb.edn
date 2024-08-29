@@ -2,6 +2,7 @@
  :deps
  {metosin/malli
   {:mvn/version "0.16.1"}
+  borkdude/rewrite-edn {:mvn/version "0.4.8"}
   logseq/bb-tasks
   #_{:local/root "../bb-tasks"}
   {:git/url "https://github.com/logseq/bb-tasks"
@@ -139,9 +140,6 @@
   dev:validate-ast
   logseq.tasks.malli/validate-ast
 
-  dev:lint
-  logseq.tasks.dev/lint
-
   dev:test
   logseq.tasks.dev/test
 
@@ -150,6 +148,12 @@
 
   dev:gen-malli-kondo-config
   logseq.tasks.dev/gen-malli-kondo-config
+
+  lint:dev
+  logseq.tasks.dev.lint/dev
+
+  lint:kondo-git-changes
+  logseq.tasks.dev.lint/kondo-git-changes
 
   lint:large-vars
   logseq.bb-tasks.lint.large-vars/-main
@@ -162,6 +166,9 @@
 
   lint:db-and-file-graphs-separate
   logseq.tasks.dev.db-and-file-graphs/-main
+
+  lint:worker-and-frontend-separate
+  logseq.tasks.dev.lint/worker-and-frontend-separate
 
   nbb:watch
   logseq.bb-tasks.nbb.watch/watch

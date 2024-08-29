@@ -147,10 +147,7 @@
 (defmethod handle :graph/added [[_ repo {:keys [empty-graph?]}]]
   (search-handler/rebuild-indices!)
   (plugin-handler/hook-plugin-app :graph-after-indexed {:repo repo :empty-graph? empty-graph?})
-  (when (state/setups-picker?)
-    (if empty-graph?
-      (route-handler/redirect! {:to :import :query-params {:from "picker"}})
-      (route-handler/redirect-to-home!)))
+  (route-handler/redirect-to-home!)
   (when-let [dir-name (and (not (config/db-based-graph? repo)) (config/get-repo-dir repo))]
     (fs/watch-dir! dir-name))
   (file-sync-restart!))
@@ -841,7 +838,7 @@
     repo/new-db-graph
     {:id :new-db-graph
      :title [:h2 "Create a new graph"]
-     :label "graph-setup"}))
+     :style {:max-width "500px"}}))
 
 (defmethod handle :graph/save-db-to-disk [[_ _opts]]
   (persist-db/export-current-graph! {:succ-notification? true}))

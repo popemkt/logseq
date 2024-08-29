@@ -1,7 +1,8 @@
 (ns logseq.db.frontend.db-ident
   "Helper fns for class and property :db/ident"
   (:require [datascript.core :as d]
-            [clojure.string :as string]))
+            [clojure.string :as string]
+            [clojure.edn :as edn]))
 
 (defn ensure-unique-db-ident
   "Ensures the given db-ident is unique. If a db-ident conflicts, it is made
@@ -25,6 +26,19 @@
       new-ident)
     db-ident))
 
+(def ^:private nano-char-range "-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+(def ^:private non-int-nano-char-range "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+
+(defn- nano-id-char []
+  (rand-nth nano-char-range))
+
+(defn- nano-id [length]
+  (assert (> length 1))
+  (str
+   (rand-nth non-int-nano-char-range)
+   (->> (repeatedly (dec length) nano-id-char)
+        (string/join))))
+
 ;; TODO: db ident should obey clojure's rules for keywords
 (defn create-db-ident-from-name
   "Creates a :db/ident for a class or property by sanitizing the given name.
@@ -38,9 +52,26 @@
               (string/replace #"\s*:\s*$" "")
               (string/replace-first #"^\d+" "")
               (string/replace " " "-")
-              (string/replace "#" "")
               ;; '/' cannot be in name - https://clojure.org/reference/reader
               (string/replace "/" "-")
-              (string/trim))]
-    (assert (seq n) "name is not empty")
-    (keyword user-namespace n)))
+              (string/replace #"[#()]" "")
+              (string/trim))
+        ;; Similar check to common-util/valid-edn-keyword?. Consider merging the two use cases
+        keyword-is-valid-edn! (fn keyword-is-valid-edn! [k]
+                                (when-not (= k (edn/read-string (str k)))
+                                  (throw (ex-info "Keyword is not valid edn" {:keyword k}))))
+        k (if (seq n)
+            (keyword user-namespace n)
+            (keyword user-namespace (nano-id 8)))]
+    (try
+      (keyword-is-valid-edn! k)
+      k
+      (catch :default _e
+        (js/console.error "Generating backup db-ident for keyword" (str k))
+        (let [n (->> (filter #(re-find #"[0-9a-zA-Z-]{1}" %) (seq n))
+                     (apply str))
+              k (if (seq n)
+                  (keyword user-namespace n)
+                  (keyword user-namespace (nano-id 8)))]
+          (keyword-is-valid-edn! k)
+          k)))))

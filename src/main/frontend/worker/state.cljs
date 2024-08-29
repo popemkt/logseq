@@ -2,7 +2,7 @@
   "State hub for worker"
   (:require [logseq.common.util :as common-util]
             [logseq.common.config :as common-config]
-            [frontend.schema-register :include-macros true :as sr]))
+            [frontend.common.schema-register :include-macros true :as sr]))
 
 (sr/defkeyword :undo/repo->page-block-uuid->undo-ops
   "{repo {<page-block-uuid> [op1 op2 ...]}}")
@@ -18,8 +18,6 @@
                        ;; FIXME: this name :config is too general
                        :config {}
                        :git/current-repo nil
-
-                       :rtc/downloading-graph? false
 
                        :undo/repo->page-block-uuid->undo-ops (atom {})
                        :undo/repo->page-block-uuid->redo-ops (atom {})
@@ -114,11 +112,3 @@
 (defn get-date-formatter
   [repo]
   (common-config/get-date-formatter (get-config repo)))
-
-(defn set-rtc-downloading-graph!
-  [value]
-  (swap! *state assoc :rtc/downloading-graph? value))
-
-(defn rtc-downloading-graph?
-  []
-  (:rtc/downloading-graph? @*state))

@@ -5,13 +5,11 @@
             [frontend.components.find-in-page :as find-in-page]
             [frontend.components.header :as header]
             [frontend.components.journal :as journal]
-            [frontend.components.onboarding :as onboarding]
             [frontend.components.plugins :as plugins]
             [frontend.components.repo :as repo]
             [frontend.components.right-sidebar :as right-sidebar]
             [frontend.components.select :as select]
             [frontend.components.theme :as theme]
-            [frontend.components.widgets :as widgets]
             [frontend.components.dnd :as dnd-component]
             [frontend.components.icon :as icon]
             [frontend.components.handbooks :as handbooks]
@@ -76,6 +74,7 @@
 (rum/defc page-name
   [page icon recent?]
   (let [repo (state/get-current-repo)
+        db-based? (config/db-based-graph? repo)
         page (or (db/get-alias-source-page repo (:db/id page)) page)
         title (:block/title page)
         whiteboard-page? (db-model/whiteboard-page? page)
@@ -93,7 +92,7 @@
                            [:<>
                             (when-not recent?
                               (x-menu-item
-                               {:on-click #(page-handler/<unfavorite-page! title)}
+                               {:on-click #(page-handler/<unfavorite-page! (if db-based? (str (:block/uuid page)) title))}
                                (ctx-icon "star-off")
                                (t :page/unfavorite)
                                (x-menu-shortcut (when-let [binding (shortcut-dh/shortcut-binding :command/toggle-favorite)]
@@ -168,16 +167,16 @@
         (rfe/push-state :page {:name "Favorites"})
         (util/stop e))}
      (when (seq favorite-entities)
-       (let [favorites (map
-                        (fn [e]
-                          (let [icon (icon/get-node-icon e {})]
-                            {:id (str (:db/id e))
-                             :value (:block/uuid e)
-                             :content [:li.favorite-item (page-name e icon false)]}))
-                        favorite-entities)]
-         (dnd-component/items favorites
-                              {:on-drag-end (fn [favorites]
-                                              (page-handler/<reorder-favorites! favorites))
+       (let [favorite-items (map
+                             (fn [e]
+                               (let [icon (icon/get-node-icon e {})]
+                                 {:id (str (:db/id e))
+                                  :value (:block/uuid e)
+                                  :content [:li.favorite-item (page-name e icon false)]}))
+                             favorite-entities)]
+         (dnd-component/items favorite-items
+                              {:on-drag-end (fn [favorites']
+                                              (page-handler/<reorder-favorites! favorites'))
                                :parent-node :ul.favorites.text-sm}))))))
 
 (rum/defc recent-pages < rum/reactive db-mixins/query
@@ -244,39 +243,6 @@
     [:span.flex-1 title]
     (when shortcut
       [:span.ml-1 (ui/render-keyboard-shortcut (ui/keyboard-shortcut-from-config shortcut))])]])
-
-(defn close-sidebar-on-mobile!
-  []
-  (and (util/sm-breakpoint?)
-       (state/toggle-left-sidebar!)))
-
-(defn create-dropdown
-  []
-  (ui/dropdown-with-links
-   (fn [{:keys [toggle-fn]}]
-     [:button#create-button
-      {:on-click toggle-fn}
-      [:<>
-       (ui/icon "plus" {:font? "true"})
-       [:span.mx-1 (t :left-side-bar/create)]]])
-   (->>
-    [{:title (t :left-side-bar/new-page)
-      :class "new-page-link"
-      :options {:on-click #(do (close-sidebar-on-mobile!)
-                               (state/pub-event! [:go/search]))
-                :shortcut (ui/keyboard-shortcut-from-config :go/search)}
-      :icon (ui/type-icon {:name "new-page"
-                           :class "highlight"
-                           :extension? true})}
-     {:title (t :left-side-bar/new-whiteboard)
-      :class "new-whiteboard-link"
-      :options {:on-click #(do (close-sidebar-on-mobile!)
-                               (whiteboard-handler/<create-new-whiteboard-and-redirect!))
-                :shortcut (ui/keyboard-shortcut-from-config :editor/new-whiteboard)}
-      :icon (ui/type-icon {:name "new-whiteboard"
-                           :class "highlight"
-                           :extension? true})}])
-   {}))
 
 (rum/defc ^:large-vars/cleanup-todo sidebar-nav
   [route-match close-modal-fn left-sidebar-open? enable-whiteboards? srs-open?
@@ -357,78 +323,66 @@
         (repo/repos-dropdown)
 
         [:div.nav-header.flex.flex-col.mt-1
-         (let [page (:page default-home)]
-           (if (and page (not (state/enable-journals? (state/get-current-repo))))
-             (sidebar-item
-              {:class "home-nav"
-               :title page
-               :on-click-handler route-handler/redirect-to-home!
-               :active (and (not srs-open?)
-                            (= route-name :page)
-                            (= page (get-in route-match [:path-params :name])))
-               :icon "home"
-               :shortcut :go/home})
-             (sidebar-item
-              {:class "journals-nav"
-               :active (and (not srs-open?)
-                            (or (= route-name :all-journals) (= route-name :home)))
-               :title (t :left-side-bar/journals)
-               :on-click-handler (fn [e]
-                                   (if (gobj/get e "shiftKey")
-                                     (route-handler/sidebar-journals!)
-                                     (route-handler/go-to-journals!)))
-               :icon "calendar"
-               :shortcut :go/journals})))
+           (let [page (:page default-home)]
+             (if (and page (not (state/enable-journals? (state/get-current-repo))))
+               (sidebar-item
+                {:class "home-nav"
+                 :title page
+                 :on-click-handler route-handler/redirect-to-home!
+                 :active (and (not srs-open?)
+                              (= route-name :page)
+                              (= page (get-in route-match [:path-params :name])))
+                 :icon "home"
+                 :shortcut :go/home})
+               (sidebar-item
+                {:class "journals-nav"
+                 :active (and (not srs-open?)
+                              (or (= route-name :all-journals) (= route-name :home)))
+                 :title (t :left-side-bar/journals)
+                 :on-click-handler (fn [e]
+                                     (if (gobj/get e "shiftKey")
+                                       (route-handler/sidebar-journals!)
+                                       (route-handler/go-to-journals!)))
+                 :icon "calendar"
+                 :shortcut :go/journals})))
 
-         (when enable-whiteboards?
-           (when (or config/dev? (not db-based?))
-             (sidebar-item
-              {:class "whiteboard"
-               :title (t :right-side-bar/whiteboards)
-               :href (rfe/href :whiteboards)
-               :on-click-handler (fn [_e] (whiteboard-handler/onboarding-show))
-               :active (and (not srs-open?) (#{:whiteboard :whiteboards} route-name))
-               :icon "whiteboard"
-               :icon-extension? true
-               :shortcut :go/whiteboards})))
+           (when enable-whiteboards?
+             (when (or config/dev? (not db-based?))
+               (sidebar-item
+                {:class "whiteboard"
+                 :title (t :right-side-bar/whiteboards)
+                 :href (rfe/href :whiteboards)
+                 :on-click-handler (fn [_e] (whiteboard-handler/onboarding-show))
+                 :active (and (not srs-open?) (#{:whiteboard :whiteboards} route-name))
+                 :icon "whiteboard"
+                 :icon-extension? true
+                 :shortcut :go/whiteboards})))
 
-         (when (and (state/enable-flashcards? (state/get-current-repo)) (not db-based?))
-           [:div.flashcards-nav
-            (flashcards srs-open?)])
+           (when (and (state/enable-flashcards? (state/get-current-repo)) (not db-based?))
+             [:div.flashcards-nav
+              (flashcards srs-open?)])
 
-         (sidebar-item
-          {:class "graph-view-nav"
-           :title (t :right-side-bar/graph-view)
-           :href (rfe/href :graph)
-           :active (and (not srs-open?) (= route-name :graph))
-           :icon "hierarchy"
-           :shortcut :go/graph-view})
+           (sidebar-item
+            {:class "graph-view-nav"
+             :title (t :right-side-bar/graph-view)
+             :href (rfe/href :graph)
+             :active (and (not srs-open?) (= route-name :graph))
+             :icon "hierarchy"
+             :shortcut :go/graph-view})
 
-         (sidebar-item
-          {:class "all-pages-nav"
-           :title (t :right-side-bar/all-pages)
-           :href (rfe/href :all-pages)
-           :active (and (not srs-open?) (= route-name :all-pages))
-           :icon "files"})]]
+           (sidebar-item
+            {:class "all-pages-nav"
+             :title (t :right-side-bar/all-pages)
+             :href (rfe/href :all-pages)
+             :active (and (not srs-open?) (= route-name :all-pages))
+             :icon "files"})]]
 
        [:div.nav-contents-container.flex.flex-col.gap-1.pt-1
         {:on-scroll on-contents-scroll}
         (favorites t)
 
         (when (not config/publishing?)
-          (recent-pages t))]
-
-       [:footer.px-2 {:class "create"}
-        (when-not config/publishing?
-          (if enable-whiteboards?
-            (create-dropdown)
-            [:a.item.group.flex.items-center.px-2.py-2.text-sm.font-medium.rounded-md.new-page-link
-             {:on-click (fn []
-                          (and (util/sm-breakpoint?)
-                               (state/toggle-left-sidebar!))
-                          (state/pub-event! [:go/search]))}
-             (ui/icon "circle-plus" {:style {:font-size 20}})
-             [:span.flex-1 (t :right-side-bar/new-page)]]))]]]
+          (recent-pages t))]]]
      [:span.shade-mask
       (cond-> {:on-click close-fn}
         (number? offset-ratio)
@@ -557,8 +511,8 @@
   [{:keys [route-match margin-less-pages? route-name indexeddb-support? db-restoring? main-content show-action-bar? show-recording-bar?]}]
   (let [left-sidebar-open? (state/sub :ui/left-sidebar-open?)
         onboarding-and-home? (and (or (nil? (state/get-current-repo)) (config/demo-graph?))
-                               (not config/publishing?)
-                               (= :home route-name))
+                                  (not config/publishing?)
+                                  (= :home route-name))
         margin-less-pages?   (or (and (mobile-util/native-platform?) onboarding-and-home?) margin-less-pages?)]
     [:div#main-container.cp__sidebar-main-layout.flex-1.flex
      {:class (util/classnames [{:is-left-sidebar-open left-sidebar-open?}])}
@@ -586,10 +540,6 @@
        (mobile-bar)
        (footer/footer)
 
-       (when (and (not (mobile-util/native-platform?))
-                  (contains? #{:page :home} route-name))
-         (widgets/demo-graph-alert))
-
        (cond
          (not indexeddb-support?)
          nil
@@ -614,8 +564,9 @@
                                      :else 120)}}
           main-content])
 
-       (when onboarding-and-home?
-         (onboarding/intro onboarding-and-home?))]]]))
+       (comment
+         (when onboarding-and-home?
+           (onboarding/intro onboarding-and-home?)))]]]))
 
 (defonce sidebar-inited? (atom false))
 ;; TODO: simplify logic
@@ -894,7 +845,7 @@
      (mixins/listen state js/window "keyup"
                     (fn [_e]
                       (state/set-state! :editor/latest-shortcut nil)))))
-  [state route-match main-content]
+  [state route-match main-content']
   (let [{:keys [open-fn]} state
         current-repo (state/sub :git/current-repo)
         granted? (state/sub [:nfs/user-granted? (state/get-current-repo)])
@@ -988,7 +939,7 @@
                :indexeddb-support?  indexeddb-support?
                :light?              light?
                :db-restoring?       db-restoring?
-               :main-content        main-content
+               :main-content        main-content'
                :show-action-bar?    show-action-bar?
                :show-recording-bar? show-recording-bar?})]
 

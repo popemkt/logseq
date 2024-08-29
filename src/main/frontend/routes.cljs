@@ -3,7 +3,6 @@
   (:require [frontend.components.file :as file]
             [frontend.components.home :as home]
             [frontend.components.journal :as journal]
-            [frontend.components.onboarding.setups :as setups]
             [frontend.components.page :as page]
             [frontend.components.all-pages :as all-pages]
             ;; [frontend.components.all-pages2 :as all-pages]
@@ -27,16 +26,12 @@
      :view home/home}]
 
    ["/graphs"
-    {:name :repos
-     :view repo/repos}]
+    {:name :graphs
+     :view repo/repos-cp}]
 
    ["/whiteboards"
     {:name :whiteboards
      :view whiteboard/whiteboard-dashboard}]
-
-   ["/repo/add"
-    {:name :repo-add
-     :view setups/picker}]
 
    ["/page/:name"
     {:name :page
@@ -45,11 +40,11 @@
                    whiteboard? (ldb/whiteboard? (db/get-page page-name))]
                (if whiteboard?
                  (whiteboard/whiteboard-route route-match)
-                 (page/page route-match))))}]
+                 (page/page-cp route-match))))}]
 
    ["/page/:name/block/:block-route-name"
     {:name :page-block
-     :view page/page}]
+     :view page/page-cp}]
 
    ["/all-pages"
     {:name :all-pages

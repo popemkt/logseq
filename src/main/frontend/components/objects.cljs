@@ -13,7 +13,8 @@
             [promesa.core :as p]
             [rum.core :as rum]
             [frontend.modules.outliner.ui :as ui-outliner-tx]
-            [frontend.modules.outliner.op :as outliner-op]))
+            [frontend.modules.outliner.op :as outliner-op]
+            [frontend.db.react :as react]))
 
 (defn- get-class-objects
   [class]
@@ -51,19 +52,23 @@
 
     (rum/use-effect!
      (fn []
-       (set-loading? true)
-       (p/let [_result (db-async/<get-views (state/get-current-repo) (:db/id class))
-               views (get-views class)]
-         (when-let [view (first views)]
-           (set-view-entity! view))
-         (p/let [_result (db-async/<get-tag-objects (state/get-current-repo) (:db/id class))]
-           (set-data! (get-class-objects class))
-           (set-loading? false))))
+       (when (nil? loading?)
+         (set-loading? true)
+         (p/let [_result (db-async/<get-views (state/get-current-repo) (:db/id class))
+                 views (get-views class)]
+           (when-let [view (first views)]
+             (set-view-entity! view))
+           (p/let [_result (db-async/<get-tag-objects (state/get-current-repo) (:db/id class))]
+             (react/refresh! (state/get-current-repo)
+                             [[:frontend.worker.react/objects (:db/id class)]])
+             (set-data! (get-class-objects class))
+             (set-loading? false)))))
      [])
 
     (when (false? loading?)
       (views/view view-entity {:data data
                                :set-data! set-data!
+                               :title-key :views.table/tagged-nodes
                                :columns columns
                                :add-new-object! #(add-new-class-object! class set-data!)
                                :create-view! (fn []
@@ -98,7 +103,7 @@
   (when class
     (let [class (db/sub-block (:db/id class))
           config {:container-id (:container-id state)}
-          properties (cond->> (outliner-property/get-class-properties class)
+          properties (cond->> (outliner-property/get-class-properties (db/get-db) class)
                        (= :logseq.class/Root (:db/ident class))
                        (concat [(db/entity :block/tags)]))
           repo (state/get-current-repo)
@@ -140,13 +145,16 @@
          (when-let [view (first views)]
            (set-view-entity! view))
          (p/let [result (db-async/<get-property-objects (state/get-current-repo) (:db/ident property))]
-           (set-data! (mapv #(assoc % :id (:db/id %)) result))
+           (set-data! (mapv (fn [m]
+                              (let [e (db/entity (:db/id m))]
+                                (assoc e :id (:db/id m)))) result))
            (set-loading? false))))
      [])
 
     (when (false? loading?)
       (views/view view-entity {:data data
                                :set-data! set-data!
+                               :title-key :views.table/property-nodes
                                :columns columns
                                :add-new-object! #(add-new-property-object! property set-data!)
                                :create-view! (fn []

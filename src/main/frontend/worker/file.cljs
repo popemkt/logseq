@@ -3,12 +3,13 @@
   (:require [clojure.core.async :as async]
             [clojure.string :as string]
             [clojure.set :as set]
-            [frontend.worker.file.core :as file]
+            [frontend.common.file.core :as common-file]
             [logseq.outliner.tree :as otree]
             [lambdaisland.glogi :as log]
             [cljs-time.core :as t]
             [cljs-time.coerce :as tc]
             [frontend.worker.util :as worker-util]
+            [frontend.common.async-util :as async-util]
             [datascript.core :as d]
             [logseq.db :as ldb]
             [malli.core :as m]
@@ -16,9 +17,9 @@
             [goog.object :as gobj]
             [logseq.common.util :as common-util]))
 
-(def *writes file/*writes)
-(def dissoc-request! file/dissoc-request!)
-(def conj-page-write! file/conj-page-write!)
+(def *writes common-file/*writes)
+(def dissoc-request! common-file/dissoc-request!)
+(def conj-page-write! common-file/conj-page-write!)
 
 (defonce file-writes-chan
   (let [coercer (m/coercer [:catn
@@ -80,7 +81,7 @@
             (let [tree-or-blocks (if whiteboard? blocks
                                      (otree/blocks->vec-tree repo @conn blocks (:db/id page-block)))]
               (if page-block
-                (file/save-tree! repo conn page-block tree-or-blocks blocks-just-deleted? context request-id)
+                (common-file/save-tree! repo conn page-block tree-or-blocks blocks-just-deleted? context request-id)
                 (do
                   (js/console.error (str "can't find page id: " page-db-id))
                   (dissoc-request! request-id)))))))
@@ -116,7 +117,7 @@
 
 (defn <ratelimit-file-writes!
   []
-  (worker-util/<ratelimit file-writes-chan batch-write-interval
+  (async-util/<ratelimit file-writes-chan batch-write-interval
                           :filter-fn (fn [_] true)
                           :flush-fn
                           (fn [col]

@@ -13,7 +13,7 @@
             [frontend.date :as date]
             [frontend.db :as db]
             [frontend.handler.property :as property-handler]
-            [frontend.search.fuzzy :as fuzzy-search]
+            [frontend.common.search-fuzzy :as fuzzy]
             [frontend.state :as state]
             [frontend.ui :as ui]
             [frontend.util :as util]
@@ -131,8 +131,7 @@
 (defn build-columns
   [config properties & {:keys [with-object-name?]
                         :or {with-object-name? true}}]
-  (let [container-id (state/get-next-container-id)]
-    (->> (concat
+  (->> (concat
           [{:id :select
             :name "Select"
             :header (fn [table _column] (header-checkbox table))
@@ -149,10 +148,27 @@
               :disable-hide? true})]
           (map
            (fn [property]
-             (let [ident (or (:id property) (:db/ident property))
+             (let [ident (or (:db/ident property) (:id property))
                    property (if (de/entity? property)
                               property
-                              (or (db/entity ident) property))]
+                              (or (db/entity ident) property))
+                   get-value (or (:get-value property)
+                                 (when (de/entity? property)
+                                   (fn [row] (get-property-value-for-search row property))))
+                   closed-values (seq (:property/closed-values property))
+                   closed-value->sort-number (when closed-values
+                                               (->> (zipmap (map :db/id closed-values) (range 0 (count closed-values)))
+                                                    (into {})))
+                   get-value-for-sort (fn [row]
+                                        (cond
+                                          (= (:db/ident property) :logseq.task/deadline)
+                                          (:block/journal-day (get row :logseq.task/deadline))
+                                          closed-values
+                                          (closed-value->sort-number (:db/id (get row (:db/ident property))))
+                                          :else
+                                          (if (fn? get-value)
+                                            (get-value row)
+                                            (get row ident))))]
                {:id ident
                 :name (or (:name property)
                           (:block/title property))
@@ -161,10 +177,9 @@
                 :cell (or (:cell property)
                           (when (de/entity? property)
                             (fn [_table row _column]
-                              (pv/property-value row property (get row (:db/ident property)) {:container-id container-id}))))
-                :get-value (or (:get-value property)
-                               (when (de/entity? property)
-                                 (fn [row] (get-property-value-for-search row property))))
+                              (pv/property-value row property (get row (:db/ident property)) {}))))
+                :get-value get-value
+                :get-value-for-sort get-value-for-sort
                 :type (:type property)}))
            properties)
 
@@ -178,7 +193,7 @@
             :type :date-time
             :header header-cp
             :cell timestamp-cell-cp}])
-         (remove nil?))))
+         (remove nil?)))
 
 (defn- sort-columns
   [columns ordered-column-ids]
@@ -366,7 +381,8 @@
   [rows property]
   (let [property-ident (:db/ident property)
         block-type? (= property-ident :block/type)
-        values (->> (mapcat (fn [e] (let [v (get e property-ident)]
+        values (->> (mapcat (fn [e] (let [e' (if (de/entity? e) e (db/entity (:db/id e)))
+                                          v (get e' property-ident)]
                                       (if (set? v) v #{v}))) rows)
                     (remove nil?)
                     (distinct))]
@@ -719,8 +735,8 @@
     (when (seq filters)
       [:div.filters-row.flex.flex-row.items-center.gap-4.flex-wrap.pb-2
        (map-indexed
-        (fn [idx filter]
-          (let [[property-ident operator value] filter
+        (fn [idx filter']
+          (let [[property-ident operator value] filter'
                 property (if (= property-ident :block/title)
                            {:db/ident property-ident
                             :block/title "Name"}
@@ -742,15 +758,15 @@
                :variant "ghost"
                :size :sm
                :on-click (fn [_e]
-                           (let [new-filters (vec (remove #{filter} filters))]
+                           (let [new-filters (vec (remove #{filter'} filters))]
                              (set-filters! new-filters)))}
               (ui/icon "x"))]))
         filters)])))
 
 (defn- fuzzy-matched?
   [input s]
-  (pos? (fuzzy-search/score (string/lower-case (str input))
-                            (string/lower-case (str s)))))
+  (pos? (fuzzy/score (string/lower-case (str input))
+                     (string/lower-case (str s)))))
 
 (defn- row-matched?
   [row input filters]
@@ -956,8 +972,9 @@
     [:div.flex.flex-col.gap-2.grid
      [:div.flex.items-center.justify-between
       [:div.flex.flex-row.items-center.gap-2
-       [:div.font-medium (t (or title-key :views.table/default-title)
-                            (count (:rows table)))]]
+       [:div.font-medium.opacity-50
+        (t (or title-key :views.table/default-title)
+           (count (:rows table)))]]
       [:div.flex.items-center.gap-1
 
        (filter-properties columns table)
@@ -980,7 +997,8 @@
 
           (ui/virtualized-list
            {:custom-scroll-parent (gdom/getElement "main-content-container")
-            :overscan 10
+            :increase-viewport-by 128
+            :overscan 128
             :compute-item-key (fn [idx]
                                 (let [block (nth rows idx)]
                                   (str "table-row-" (:db/id block))))

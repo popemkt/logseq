@@ -74,10 +74,10 @@
                (when-not (@*computed-ids (:block/uuid block))
                  (let [page? (ldb/page? block)
                        from-property (:logseq.property/created-from-property block)
-                       parents (when-not page?
+                       parents' (when-not page?
                                  (ldb/get-block-parents db-after (:block/uuid block) {}))
                        parents-refs (->> (cond->>
-                                          (mapcat :block/path-refs parents)
+                                          (mapcat :block/path-refs parents')
                                            from-property
                                            (remove (fn [parent] (and (ldb/property? parent) (not= (:db/id parent) (:db/id from-property))))))
                                          (map :db/id))
@@ -151,9 +151,14 @@
                         (into {}))
         property-key-refs (->> (keys properties)
                                (remove private-built-in-props))
-        page-or-object? (fn [block] (and (de/entity? block)
-                                         (or (ldb/page? block)
-                                             (seq (:block/tags block)))))
+        page-or-object? (fn [block]
+                          (and (de/entity? block)
+                               (or (ldb/page? block)
+                                   (seq (:block/tags block)))
+                               ;; Don't allow :default property value objects to reference their
+                               ;; parent block as they are dependent on their block for display
+                               ;; and look weirdly recursive - https://github.com/logseq/db-test/issues/36
+                               (not (:logseq.property/created-from-property block))))
         property-value-refs (->> (vals properties)
                                  (mapcat (fn [v]
                                            (cond
@@ -172,8 +177,7 @@
                    [id])
                  property-refs content-refs)
          ;; Remove self-ref to avoid recursive bugs
-         (remove #(and (:db/ident block)
-                       (= % (:db/ident block))))
+         (remove #(or (= (:db/id block) %) (= (:db/id block) (:db/id (d/entity db %)))))
          ;; Remove alias ref to avoid recursive display bugs
          (remove #(contains? (set (map :db/id (:block/alias block))) %))
          (remove nil?))))

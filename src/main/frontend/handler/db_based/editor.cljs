@@ -30,8 +30,13 @@
                    (nil? x))) refs))
 
 (defn- use-cached-refs!
-  [refs]
-  (let [cached-refs @(:editor/block-refs @state/state)
+  [refs block]
+  (let [refs (remove #(= (:block/uuid block) (:block/uuid %)) refs)
+        cached-refs (->> @(:editor/block-refs @state/state)
+                         (concat (map (fn [ref]
+                                        (select-keys ref [:db/id :block/uuid :block/title]))
+                                      (:block/refs (db/entity (:db/id block)))))
+                         (util/distinct-by-last-wins :block/uuid))
         title->ref (zipmap (map :block/title cached-refs) cached-refs)]
     (map (fn [x]
            (if-let [ref (and (map? x) (title->ref (:block/title x)))]
@@ -83,7 +88,7 @@
 
 (defn wrap-parse-block
   [{:block/keys [title level] :as block}]
-  (let [block (or (and (:db/id block) (db/pull (:db/id block))) block)
+  (let [block (or (and (:db/id block) (db/entity (:db/id block))) block)
         block (if (nil? title)
                 block
                 (let [ast (mldoc/->edn (string/trim title) :markdown)
@@ -91,33 +96,16 @@
                       block-with-title? (mldoc/block-with-title? first-elem-type)
                       content' (str (config/get-block-pattern :markdown) (if block-with-title? " " "\n") title)
                       parsed-block (block/parse-block (assoc block :block/title content'))
-                      parsed-block' (cond-> (dissoc parsed-block :block/properties)
-                                      (:block/properties parsed-block)
-                                      (merge (update-keys (:block/properties parsed-block)
-                                                          (fn [k]
-                                                            (or ({:heading :logseq.property/heading} k)
-                                                                (throw (ex-info (str "Don't know how to save graph-parser property " (pr-str k)) {})))))))
-                      block' (merge block parsed-block' {:block/title title})]
+                      block' (merge block parsed-block {:block/title title})]
                   (update block' :block/refs
                           (fn [refs]
                             (-> refs
                                 remove-non-existed-refs!
-                                use-cached-refs!)))))
+                                (use-cached-refs! block))))))
         result (-> block
                    (merge (if level {:block/level level} {}))
                    (replace-page-refs-with-ids))]
-    (-> result
-        ;; Remove tags from content
-        (assoc :block/title
-               (db-content/content-without-tags
-                (:block/title result)
-                (->>
-                 (map
-                  (fn [tag]
-                    (when (:block/uuid tag)
-                      (str db-content/page-ref-special-chars (:block/uuid tag))))
-                  (:block/tags (db/entity (:db/id block))))
-                 (remove nil?)))))))
+    result))
 
 (defn save-file!
   "This fn is the db version of file-handler/alter-file"

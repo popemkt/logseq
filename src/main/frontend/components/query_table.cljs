@@ -219,11 +219,11 @@
 (rum/defcs result-table-v1 < rum/reactive
   (rum/local false ::select?)
   (rum/local false ::mouse-down?)
-  [state config current-block sort-result sort-state columns {:keys [page?]} map-inline page-cp ->elem inline-text]
+  [state config current-block sort-result' sort-state columns {:keys [page?]} map-inline page-cp ->elem inline-text]
   (let [select? (get state ::select?)
         *mouse-down? (::mouse-down? state)
         clock-time-total (when-not page?
-                           (->> (map #(get-in % [:block/properties :clock-time] 0) sort-result)
+                           (->> (map #(get-in % [:block/properties :clock-time] 0) sort-result')
                                 (apply +)))
         property-separated-by-commas? (partial text/separated-by-commas? (state/get-config))
         db-graph? (config/db-based-graph? (state/get-current-repo))
@@ -243,7 +243,7 @@
                           (name column)))]
             (sortable-title title column sort-state (:block/uuid current-block) {:db-graph? db-graph?})))]]
       [:tbody
-       (for [row sort-result]
+       (for [row sort-result']
          (let [format (:block/format row)]
            [:tr.cursor
             (for [column columns]
@@ -256,25 +256,27 @@
                                                              :config config
                                                              :db-graph? db-graph?
                                                              :comma-separated-property? (property-separated-by-commas? column)})]
-                [:td.whitespace-nowrap {:on-pointer-down (fn []
-                                                           (reset! *mouse-down? true)
-                                                           (reset! select? false))
-                                        :on-mouse-move (fn [] (reset! select? true))
-                                        :on-pointer-up (fn []
-                                                         (when (and @*mouse-down? (not @select?))
-                                                           (state/sidebar-add-block!
-                                                            (state/get-current-repo)
-                                                            (:db/id row)
-                                                            :block-ref)
-                                                           (reset! *mouse-down? false)))}
+                [:td.whitespace-nowrap
+                 {:data-key (pr-str column)
+                  :on-pointer-down (fn []
+                                     (reset! *mouse-down? true)
+                                     (reset! select? false))
+                  :on-mouse-move (fn [] (reset! select? true))
+                  :on-pointer-up (fn []
+                                   (when (and @*mouse-down? (not @select?))
+                                     (state/sidebar-add-block!
+                                       (state/get-current-repo)
+                                       (:db/id row)
+                                       :block-ref)
+                                     (reset! *mouse-down? false)))}
                  (when (some? value)
                    (render-column-value {:row-block row
                                          :row-format format
                                          :cell-format cell-format
                                          :value value}
-                                        page-cp
-                                        inline-text
-                                        {:db-graph? db-graph?}))]))]))]]]))
+                     page-cp
+                     inline-text
+                     {:db-graph? db-graph?}))]))]))]]]))
 
 (rum/defc result-table < rum/reactive
   [config current-block result {:keys [page?] :as options} map-inline page-cp ->elem inline-text]
@@ -295,5 +297,5 @@
           ;; Sort state needs to be in sync between final result and sortable title
           ;; as user needs to know if there result is sorted
           sort-state (get-sort-state current-block {:db-graph? db-graph?})
-          sort-result (sort-result result' (assoc sort-state :page? page? :db-graph? db-graph?))]
-      (result-table-v1 config current-block sort-result sort-state columns options map-inline page-cp ->elem inline-text))))
+          sort-result' (sort-result result' (assoc sort-state :page? page? :db-graph? db-graph?))]
+      (result-table-v1 config current-block sort-result' sort-state columns options map-inline page-cp ->elem inline-text))))

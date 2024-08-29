@@ -1,14 +1,16 @@
-(ns frontend.worker.file.core
-  "Save file to disk. Used by both file and DB graphs"
+(ns frontend.common.file.core
+  "Save file to disk. Used by both file and DB graphs and shared
+   by worker and frontend namespaces"
   (:require [clojure.string :as string]
-            [frontend.worker.file.util :as wfu]
+            [frontend.common.file.util :as wfu]
             [logseq.graph-parser.property :as gp-property]
             [logseq.common.path :as path]
             [datascript.core :as d]
             [logseq.db :as ldb]
-            [frontend.worker.date :as worker-date]
-            [frontend.worker.util :as worker-util]
-            [logseq.db.sqlite.util :as sqlite-util]))
+            [frontend.common.date :as common-date]
+            [logseq.db.frontend.content :as db-content]
+            [logseq.db.sqlite.util :as sqlite-util]
+            [logseq.outliner.tree :as otree]))
 
 (defonce *writes (atom {}))
 (defonce *request-id (atom 0))
@@ -126,8 +128,6 @@
   [repo db tree opts context]
   (->> (tree->file-content-aux repo db tree opts context) (string/join "\n")))
 
-(def init-level 1)
-
 (defn- transact-file-tx-if-not-exists!
   [conn page-block ok-handler context]
   (when (:block/name page-block)
@@ -136,11 +136,11 @@
           title (string/capitalize (:block/name page-block))
           whiteboard-page? (ldb/whiteboard? page-block)
           format (if whiteboard-page? "edn" format)
-          journal-page? (worker-date/valid-journal-title? title date-formatter)
-          journal-title (worker-date/normalize-journal-title title date-formatter)
+          journal-page? (common-date/valid-journal-title? title date-formatter)
+          journal-title (common-date/normalize-journal-title title date-formatter)
           journal-page? (and journal-page? (not (string/blank? journal-title)))
           filename (if journal-page?
-                     (worker-date/date->file-name journal-title (:journal-file-name-format context))
+                     (common-date/date->file-name journal-title (:journal-file-name-format context))
                      (-> (or (:block/title page-block) (:block/name page-block))
                          wfu/file-name-sanity))
           sub-dir (cond
@@ -161,6 +161,7 @@
 (defn- save-tree-aux!
   [repo db page-block tree blocks-just-deleted? context request-id]
   (let [page-block (d/pull db '[*] (:db/id page-block))
+        init-level 1
         file-db-id (-> page-block :block/file :db/id)
         file-path (-> (d/entity db file-db-id) :file/path)
         result (if (and (string? file-path) (not-empty file-path))
@@ -174,10 +175,10 @@
                      (let [files [[file-path new-content]]]
                        (when (seq files)
                          (let [page-id (:db/id page-block)]
-                           (worker-util/post-message :write-files {:request-id request-id
-                                                                   :page-id page-id
-                                                                   :repo repo
-                                                                   :files files})
+                           (wfu/post-message :write-files {:request-id request-id
+                                                           :page-id page-id
+                                                           :repo repo
+                                                           :files files})
                            :sent)))))
                  ;; In e2e tests, "card" page in db has no :file/path
                  (js/console.error "File path from page-block is not valid" page-block tree))]
@@ -195,3 +196,18 @@
       (if file
         (ok-handler)
         (transact-file-tx-if-not-exists! conn page-block ok-handler context)))))
+
+(defn block->content
+  "Converts a block including its children (recursively) to plain-text."
+  [repo db root-block-uuid tree->file-opts context]
+  (assert (uuid? root-block-uuid))
+  (let [init-level (or (:init-level tree->file-opts)
+                       (if (ldb/page? (d/entity db [:block/uuid root-block-uuid]))
+                         0
+                         1))
+        blocks (->> (d/pull-many db '[*] (keep :db/id (ldb/get-block-and-children db root-block-uuid)))
+                    (map #(db-content/update-block-content db % (:db/id %))))
+        tree (otree/blocks->vec-tree repo db blocks (str root-block-uuid))]
+    (tree->file-content repo db tree
+                        (assoc tree->file-opts :init-level init-level)
+                        context)))

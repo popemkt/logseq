@@ -6,11 +6,11 @@
             ["fuse.js" :as fuse]
             [goog.object :as gobj]
             [datascript.core :as d]
-            [frontend.search.fuzzy :as fuzzy]
-            [frontend.worker.util :as worker-util]
+            [frontend.common.search-fuzzy :as fuzzy]
             [logseq.db.sqlite.util :as sqlite-util]
             [logseq.common.util :as common-util]
-            [logseq.db :as ldb]))
+            [logseq.db :as ldb]
+            [clojure.set :as set]))
 
 ;; TODO: use sqlite for fuzzy search
 ;; maybe https://github.com/nalgeon/sqlean/blob/main/docs/fuzzy.md?
@@ -172,8 +172,8 @@ DROP TRIGGER IF EXISTS blocks_au;
           (if (seq coll')
             (rest coll')
             (reduced false))))
-      (seq (worker-util/search-normalize match true))
-      (seq (worker-util/search-normalize q true))))))
+      (seq (fuzzy/search-normalize match true))
+      (seq (fuzzy/search-normalize q true))))))
 
 (defn- page-or-object?
   [entity]
@@ -194,7 +194,7 @@ DROP TRIGGER IF EXISTS blocks_au;
 (defn- sanitize
   [content]
   (some-> content
-          (worker-util/search-normalize true)))
+          (fuzzy/search-normalize true)))
 
 (defn block->index
   "Convert a block to the index for searching"
@@ -234,24 +234,18 @@ DROP TRIGGER IF EXISTS blocks_au;
 (defn fuzzy-search
   "Return a list of blocks (pages && tagged blocks) that match the query. Takes the following
   options:
-   * :limit - Number of result to limit search results. Defaults to 100
-   * :built-in?  - Whether to return built-in pages for db graphs. Defaults to true"
-  [repo db q {:keys [limit built-in?]
-              :or {limit 100
-                   built-in? true}}]
+   * :limit - Number of result to limit search results. Defaults to 100"
+  [repo db q {:keys [limit]
+              :or {limit 100}}]
   (when repo
-    (let [q (worker-util/search-normalize q true)
+    (let [q (fuzzy/search-normalize q true)
           q (fuzzy/clean-str q)
           q (if (= \# (first q)) (subs q 1) q)]
       (when-not (string/blank? q)
         (let [indice (or (get @fuzzy-search-indices repo)
                          (build-fuzzy-search-indice repo db))
-              result (cond->>
-                      (->> (.search indice q (clj->js {:limit limit}))
-                           (bean/->clj))
-
-                       (and (sqlite-util/db-based-graph? repo) (= false built-in?))
-                       (remove #(get-in % [:item :built-in?])))]
+              result (->> (.search indice q (clj->js {:limit limit}))
+                          (bean/->clj))]
           (->> (map :item result)
                (filter (fn [{:keys [title]}]
                          (exact-matched? q title)))))))))
@@ -260,9 +254,10 @@ DROP TRIGGER IF EXISTS blocks_au;
   "Options:
    * :page - the page to specifically search on
    * :limit - Number of result to limit search results. Defaults to 100
-   * :built-in?  - Whether to return built-in pages for db graphs. Defaults to true"
-  [repo conn search-db q {:keys [limit page enable-snippet?
-                                 built-in?] :as option
+   * :dev? - Allow all nodes to be seen for development. Defaults to false
+   * :built-in?  - Whether to return public built-in nodes for db graphs. Defaults to false"
+  [repo conn search-db q {:keys [limit page enable-snippet?  built-in? dev?]
+                          :as option
                           :or {enable-snippet? true}}]
   (when-not (string/blank? q)
     (p/let [match-input (get-match-input q)
@@ -287,7 +282,13 @@ DROP TRIGGER IF EXISTS blocks_au;
                                 (let [{:keys [id page title snippet]} result
                                       block-id (uuid id)]
                                   (when-let [block (d/entity @conn [:block/uuid block-id])]
-                                    (when-not (and (not built-in?) (ldb/built-in? block))
+                                    (when (if dev?
+                                            true
+                                            (if built-in?
+                                              (or (not (ldb/built-in? block))
+                                                 (ldb/class? block)
+                                                 (ldb/public-built-in-property? block))
+                                              (not (ldb/built-in? block))))
                                       {:db/id (:db/id block)
                                        :block/uuid block-id
                                        :block/title (or snippet title)
@@ -412,7 +413,12 @@ DROP TRIGGER IF EXISTS blocks_au;
 
     ;; update block indice
     (when (or (seq blocks-to-add) (seq blocks-to-remove))
-      (let [blocks-to-add (keep block->index blocks-to-add)
-            blocks-to-remove (set (map (comp str :block/uuid) blocks-to-remove))]
+      (let [blocks-to-add' (keep block->index blocks-to-add)
+            blocks-to-remove (set (concat (map (comp str :block/uuid) blocks-to-remove)
+                                          (->>
+                                           (set/difference
+                                            (set (map :block/uuid blocks-to-add))
+                                            (set (map :block/uuid blocks-to-add')))
+                                           (map str))))]
         {:blocks-to-remove-set blocks-to-remove
-         :blocks-to-add        blocks-to-add}))))
+         :blocks-to-add        blocks-to-add'}))))

@@ -112,14 +112,11 @@
        (when-not db-restoring?
          (let [repos (state/get-repos)]
            (if-not (or
-                    ;; demo graph only
-                    (and (= 1 (count repos)) (:example? (first repos))
-                         (not (util/mobile?)))
                     ;; not in publishing mode
                     config/publishing?
                     ;; other graphs exists
                     (seq repos))
-             (route-handler/redirect! {:to :repo-add})
+             (route-handler/redirect! {:to :graphs})
              (do
                (ui-handler/restore-right-sidebar-state!)
                (set-restored-sidebar? true))))))
@@ -131,14 +128,16 @@
      [system-theme?])
 
     (rum/use-effect!
-     #(if settings-open?
-        (shui/dialog-open!
-          (fn [] [:div.settings-modal (settings/settings settings-open?)])
-          {:label "app-settings"
-           :align :top
-           :id :app-settings})
-        (shui/dialog-close! :app-settings))
-     [settings-open?])
+      (fn []
+        (if settings-open?
+          (shui/dialog-open!
+            (fn [] [:div.settings-modal (settings/settings settings-open?)])
+            {:label "app-settings"
+             :align :top
+             :content-props {:onOpenAutoFocus #(.preventDefault %)}
+             :id :app-settings})
+          (shui/dialog-close! :app-settings)))
+      [settings-open?])
 
     (rum/use-effect!
      #(storage/set :file-sync/onboarding-state onboarding-state)

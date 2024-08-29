@@ -44,7 +44,8 @@
             [frontend.modules.outliner.ui :as ui-outliner-tx]
             [frontend.modules.outliner.op :as outliner-op]
             [frontend.handler.property.util :as pu]
-            [datascript.impl.entity :as de]))
+            [datascript.impl.entity :as de]
+            [logseq.db.frontend.class :as db-class]))
 
 (def <create! page-common-handler/<create!)
 (def <delete! page-common-handler/<delete!)
@@ -148,8 +149,6 @@
                     (outliner-op/rename-page! page-uuid new-name))
             result' (ldb/read-transit-str result)]
       (case (if (string? result') (keyword result') result')
-        :built-in-page
-        (notification/show! "Built-in page's name cannot be modified" :warning)
         :invalid-empty-name
         (notification/show! "Please use a valid name, empty name is not allowed!" :warning)
         :rename-page-exists
@@ -319,7 +318,9 @@
   (let [tx-data [[:db/add [:block/uuid block-id] :block/tags (:db/id tag-entity)]
                  ;; TODO: Move this to outliner.core to consistently add refs for tags
                  [:db/add [:block/uuid block-id] :block/refs (:db/id tag-entity)]]]
-    (db/transact! repo tx-data {:outliner-op :save-block})))
+    (ui-outliner-tx/transact! {:outliner-op :save-block}
+      (editor-handler/save-current-block!)
+      (db/transact! repo tx-data {:outliner-op :save-block}))))
 
 (defn on-chosen-handler
   [input id _q pos format]
@@ -335,13 +336,17 @@
              (common-util/safe-subs edit-content pos current-pos)))
         db-based? (config/db-based-graph? (state/get-current-repo))]
     (if hashtag?
-      (fn [chosen-result e]
+      (fn [chosen-result ^js e]
         (util/stop e)
         (state/clear-editor-action!)
-        (let [chosen (:block/title chosen-result)
+        (let [chosen-result (if (:block/uuid chosen-result)
+                              (db/entity [:block/uuid (:block/uuid chosen-result)])
+                              chosen-result)
+              chosen (:block/title chosen-result)
               class? (and db-based? hashtag?
                           (or (string/includes? chosen (str (t :new-tag) " "))
-                              (ldb/class? (db/get-page chosen))))
+                              (ldb/class? chosen-result)))
+              inline-tag? (and class? (= (.-identifier e) "auto-complete/meta-complete"))
               chosen (-> chosen
                          (string/replace-first (str (t :new-tag) " ") "")
                          (string/replace-first (str (t :new-page) " ") ""))
@@ -357,51 +362,57 @@
                                q))
               last-pattern (str "#" (when wrapped? page-ref/left-brackets) last-pattern)]
           (p/do!
-           (when db-based?
-             (let [tag (string/trim chosen)
-                   edit-block (state/get-edit-block)
-                   get-page-fn (if class? db/get-case-page db/get-page)]
-               (when (:block/uuid edit-block)
-                 (p/let [_ (when-not (de/entity? chosen-result) ; page not exists yet
-                             (if class?
-                               (<create-class! tag {:redirect? false
-                                                    :create-first-block? false})
-                               (<create! tag {:redirect? false
-                                              :create-first-block? false})))
-                         tag-entity (or (when (de/entity? chosen-result) chosen-result) (get-page-fn tag))]
-                   (when class?
-                     (add-tag (state/get-current-repo) (:block/uuid edit-block) tag-entity))))))
            (editor-handler/insert-command! id
-                                           (if class? "" (str "#" wrapped-tag))
+                                           (if (and class? (not inline-tag?)) "" (str "#" wrapped-tag))
                                            format
                                            {:last-pattern last-pattern
                                             :end-pattern (when wrapped? page-ref/right-brackets)
                                             :command :page-ref})
+           (when db-based?
+             (let [tag (string/trim chosen)
+                   edit-block (state/get-edit-block)]
+               (when (:block/uuid edit-block)
+                 (p/let [result (when-not (de/entity? chosen-result) ; page not exists yet
+                                  (if class?
+                                    (<create-class! tag {:redirect? false
+                                                         :create-first-block? false})
+                                    (<create! tag {:redirect? false
+                                                   :create-first-block? false})))]
+                   (when class?
+                     (let [tag-entity (or (when (de/entity? chosen-result) chosen-result) result)]
+                       (add-tag (state/get-current-repo) (:block/uuid edit-block) tag-entity)))))))
 
            (when input (.focus input)))))
       (fn [chosen-result e]
         (util/stop e)
         (state/clear-editor-action!)
-        (let [chosen (:block/title chosen-result)
+        (let [chosen-result (if (:block/uuid chosen-result)
+                              (db/entity [:block/uuid (:block/uuid chosen-result)])
+                              chosen-result)
+              chosen (:block/title chosen-result)
               chosen' (string/replace-first chosen (str (t :new-page) " ") "")
               ref-text (if (and (de/entity? chosen-result) (not (ldb/page? chosen-result)))
                          (cond
-                           (and db-based? (seq (:block/tags chosen-result)))
-                           (page-ref/->page-ref (:block/title chosen-result))
                            db-based?
                            (page-ref/->page-ref (:block/uuid chosen-result))
                            :else
                            (block-ref/->block-ref (:block/uuid chosen-result)))
                          (get-page-ref-text chosen'))]
-          (when (de/entity? chosen-result)
-            (state/conj-block-ref! chosen-result))
-          (editor-handler/insert-command! id
-                                          ref-text
-                                          format
-                                          {:last-pattern (str page-ref/left-brackets (if (editor-handler/get-selected-text) "" q))
-                                           :end-pattern page-ref/right-brackets
-                                           :postfix-fn   (fn [s] (util/replace-first page-ref/right-brackets s ""))
-                                           :command :page-ref}))))))
+          (p/do!
+           (editor-handler/insert-command! id
+                                           ref-text
+                                           format
+                                           {:last-pattern (str page-ref/left-brackets (if (editor-handler/get-selected-text) "" q))
+                                            :end-pattern page-ref/right-brackets
+                                            :postfix-fn   (fn [s] (util/replace-first page-ref/right-brackets s ""))
+                                            :command :page-ref})
+           (p/let [result (when-not (de/entity? chosen-result)
+                            (<create! chosen'
+                                      {:redirect? false
+                                       :create-first-block? false}))
+                   chosen-result (or result chosen-result)]
+             (when (de/entity? chosen-result)
+               (state/conj-block-ref! chosen-result)))))))))
 
 (defn create-today-journal!
   []
@@ -433,9 +444,8 @@
                           (plugin-handler/hook-plugin-app :today-journal-created {:title today-page})))]
           (when (db/page-empty? repo today-page)
             (if (config/db-based-graph? repo)
-              (let [page-exists (db/get-page today-page)]
-                (when-not page-exists
-                  (create-f)))
+              (when-not (model/get-journal-page title)
+                (create-f))
               (p/let [file-name (date/journal-title->default title)
                       file-rpath (str (config/get-journals-directory) "/" file-name "."
                                       (config/get-file-extension format))
@@ -490,9 +500,11 @@
       (url-util/get-logseq-graph-page-url nil (state/get-current-repo) (str page-uuid)))
      (notification/show! "No page found to copy" :warning))))
 
-(defn toggle-properties!
+(defn convert-to-tag!
   [page-entity]
-  (property-handler/set-block-property! (state/get-current-repo)
-                                        (:block/uuid page-entity)
-                                        :logseq.property/hide-properties?
-                                        (not (:logseq.property/hide-properties? page-entity))))
+  (let [class (db-class/build-new-class (db/get-db)
+                                        {:db/id (:db/id page-entity)
+                                         :block/title (:block/title page-entity)
+                                         :block/created-at (:block/created-at page-entity)})]
+
+    (db/transact! (state/get-current-repo) [class] {:outliner-op :save-block})))

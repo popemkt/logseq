@@ -52,11 +52,7 @@
    :logseq.property/heading {:schema {:type :any :hide? true}}
    :logseq.property/created-from-property {:schema {:type :entity
                                                     :hide? true}}
-   :logseq.property/source-page           {:schema {:type :entity
-                                                    :hide? true}}
    :logseq.property/built-in?             {:schema {:type :checkbox
-                                                    :hide? true}}
-   :logseq.property/hide-properties?      {:schema {:type :checkbox
                                                     :hide? true}}
    :logseq.property/query-table {:schema {:type :checkbox
                                           :hide? true}}
@@ -126,10 +122,10 @@
              :value value
              :uuid (common-uuid/gen-uuid :db-ident-block-uuid db-ident)
              :icon {:type :tabler-icon :id icon}})
-          [[:logseq.task/priority.urgent "Urgent" "priorityLvlUrgent"]
-           [:logseq.task/priority.high "High" "priorityLvlHigh"]
+          [[:logseq.task/priority.low "Low" "priorityLvlLow"]
            [:logseq.task/priority.medium "Medium" "priorityLvlMedium"]
-           [:logseq.task/priority.low "Low" "priorityLvlLow"]])}
+           [:logseq.task/priority.high "High" "priorityLvlHigh"]
+           [:logseq.task/priority.urgent "Urgent" "priorityLvlUrgent"]])}
    :logseq.task/deadline
    {:title "Deadline"
     :schema {:type :date
@@ -150,7 +146,8 @@
                                               :hide? true
                                               :view-context :page
                                               :public? true}}
-   :logseq.property/description {:schema
+   :logseq.property/description {:title "Description"
+                                 :schema
                                  {:type :default
                                   :public? true}}
 
@@ -320,3 +317,9 @@
               [(:block/title (d/entity db k))
                (ref->property-value-contents db v)]))
        (into {})))
+
+(defn public-built-in-property?
+  "Indicates whether built-in property can be seen and edited by users"
+  [entity]
+  ;; No need to do :built-in? check yet since user properties can't set this
+  (get-in entity [:block/schema :public?]))

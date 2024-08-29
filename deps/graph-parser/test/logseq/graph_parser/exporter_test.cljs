@@ -167,10 +167,10 @@
 
       ;; Counts
       ;; Includes journals as property values e.g. :logseq.task/deadline
-      (is (= 17 (count (d/q '[:find ?b :where [?b :block/type "journal"]] @conn))))
+      (is (= 18 (count (d/q '[:find ?b :where [?b :block/type "journal"]] @conn))))
 
       ;; Don't count pages like url.md that have properties but no content
-      (is (= 6
+      (is (= 7
              (count (->> (d/q '[:find [(pull ?b [:block/title :block/type]) ...]
                                 :where [?b :block/title] [_ :block/page ?b]] @conn)
                          (filter #(= "page" (:block/type %))))))
@@ -195,7 +195,7 @@
               set))))
 
     (testing "user properties"
-      (is (= 17
+      (is (= 18
              (->> @conn
                   (d/q '[:find [(pull ?b [:db/ident]) ...]
                          :where [?b :block/type "property"]])
@@ -346,6 +346,21 @@
                   count))
           "A block with different case of same ref names has 1 distinct ref"))
 
+    (testing "imported concepts can have names of new-built concepts"
+      (is (= #{:logseq.property/description :user.property/description}
+             (set (d/q '[:find [?ident ...] :where [?b :db/ident ?ident] [?b :block/name "description"]] @conn)))
+          "user description property is separate from built-in one")
+      (is (= #{"page" "class"}
+             (set (d/q '[:find [?type ...] :where [?b :block/type ?type] [?b :block/name "task"]] @conn)))
+          "user page is separate from built-in class"))
+
+    (testing "multiline blocks"
+      (is (= "|markdown| table|\n|some|thing|" (:block/title (find-block-by-content @conn #"markdown.*table"))))
+      (is (= "multiline block\na 2nd\nand a 3rd" (:block/title (find-block-by-content @conn #"multiline block"))))
+      (is (= "logbook block" (:block/title (find-block-by-content @conn #"logbook block"))))
+      (is (re-find #"(?s)^Text before\n#\+BEGIN_QUERY.*END_QUERY\nText after$"
+                   (:block/title (find-block-by-content @conn #":title \"tasks")))))
+
     (testing "block refs and path-refs"
       (let [block (find-block-by-content @conn "old todo block")]
         (is (set/subset?
@@ -414,22 +429,6 @@
       (is (= {:block/tags [:user.class/Movie]}
              (readable-properties @conn (find-page-by-name @conn "Interstellar")))
           "tagged page has configured tag imported as a class"))))
-
-(deftest-async export-files-with-invalid-class-and-property-display-notifications
-  (p/let [file-graph-dir "test/resources/exporter-test-graph"
-          files (mapv #(node-path/join file-graph-dir %) ["journals/2024_07_24.md" "ignored/invalid-property-page.md"])
-          conn (d/create-conn db-schema/schema-for-db-based-graph)
-          _ (d/transact! conn (sqlite-create-graph/build-db-initial-data "{}"))
-          notifications (atom [])
-          _ (import-files-to-db files conn {:tag-classes ["123"]
-                                            :notify-user #(swap! notifications conj %)})]
-
-    (is (= [:error :error] (map :level @notifications))
-        "Error notifications for both invalid property and class")
-    (is (some #(re-find #"invalid class" %) (map :msg @notifications))
-        "Helpful message for invalid class")
-    (is (some #(re-find #"invalid property" %) (map :msg @notifications))
-        "Helpful message for invalid property")))
 
 (deftest-async export-files-with-property-classes-option
   (p/let [file-graph-dir "test/resources/exporter-test-graph"

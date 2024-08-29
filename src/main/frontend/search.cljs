@@ -7,7 +7,7 @@
             [frontend.state :as state]
             [frontend.util :as util]
             [promesa.core :as p]
-            [frontend.search.fuzzy :as fuzzy]
+            [frontend.common.search-fuzzy :as fuzzy]
             [logseq.common.config :as common-config]
             [frontend.db.async :as db-async]
             [frontend.db :as db]
@@ -25,7 +25,7 @@
 (defn block-search
   [repo q option]
   (when-let [engine (get-engine repo)]
-    (let [q (util/search-normalize q (state/enable-search-remove-accents?))]
+    (let [q (fuzzy/search-normalize q (state/enable-search-remove-accents?))]
       (when-not (string/blank? q)
         (protocol/query engine q option)))))
 

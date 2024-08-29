@@ -27,7 +27,6 @@
             [rum.core :as rum]
             [clojure.core.async :as async]
             [frontend.pubsub :as pubsub]
-            [frontend.worker.util :as worker-util]
             [datascript.impl.entity :as de]))
   #?(:cljs (:import [goog.async Debouncer]))
   (:require
@@ -543,6 +542,14 @@
                                 :block    "center"}))))))
 
 #?(:cljs
+   (defn bottom-reached?
+     [node threshold]
+     (let [full-height (gobj/get node "scrollHeight")
+           scroll-top (gobj/get node "scrollTop")
+           client-height (gobj/get node "clientHeight")]
+       (<= (- full-height scroll-top client-height) threshold))))
+
+#?(:cljs
    (defn link?
      [node]
      (contains?
@@ -985,14 +992,6 @@
 (defonce linux? #?(:cljs goog.userAgent/LINUX
                    :clj nil))
 
-(defn default-content-with-title
-  [text-format]
-  (case (name text-format)
-    "org"
-    "* "
-
-    "- "))
-
 #?(:cljs
    (defn get-first-block-by-id
      [block-id]
@@ -1005,9 +1004,6 @@
    (defn url-encode
      [string]
      (some-> string str (js/encodeURIComponent) (.replace "+" "%20"))))
-
-#?(:cljs
-   (def search-normalize worker-util/search-normalize))
 
 #?(:cljs
    (def page-name-sanity-lc
@@ -1125,9 +1121,6 @@
      [ch]
      (->> (repeatedly #(async/poll! ch))
           (take-while identity))))
-
-#?(:cljs
-   (def <ratelimit worker-util/<ratelimit))
 
 #?(:cljs
    (defn trace!
@@ -1418,15 +1411,41 @@
              (resolve))))))))
 
 #?(:cljs
+   (defn image-blob->png
+     [blob cb]
+     (let [image (js/Image.)
+           off-canvas (js/document.createElement "canvas")
+           data-url (js/URL.createObjectURL blob)
+           ctx (.getContext off-canvas "2d")]
+       (set! (.-onload image)
+             #(let [width (.-width image)
+                    height (.-height image)]
+                (set! (.-width off-canvas) width)
+                (set! (.-height off-canvas) height)
+                (.drawImage ctx image 0 0 width height)
+                (.toBlob off-canvas cb)))
+       (set! (.-src image) data-url))))
+
+#?(:cljs
+   (defn write-blob-to-clipboard
+     [blob]
+     (->> blob
+          (js-obj (.-type blob))
+          (js/ClipboardItem.)
+          (array)
+          (js/navigator.clipboard.write))))
+
+#?(:cljs
    (defn copy-image-to-clipboard
      [src]
      (-> (js/fetch src)
          (.then (fn [data]
                   (-> (.blob data)
                       (.then (fn [blob]
-                               (js/navigator.clipboard.write (clj->js [(js/ClipboardItem. (clj->js {(.-type blob) blob}))]))))
+                               (if (= (.-type blob) "image/png")
+                                 (write-blob-to-clipboard blob)
+                                 (image-blob->png blob write-blob-to-clipboard))))
                       (.catch js/console.error)))))))
-
 
 (defn memoize-last
   "Different from core.memoize, it only cache the last result.

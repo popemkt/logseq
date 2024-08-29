@@ -39,7 +39,7 @@
 
 (defn get-all-pages
   [repo]
-  (let [db (conn/get-db repo)]
+  (when-let [db (conn/get-db repo)]
     (ldb/get-all-pages db)))
 
 (defn get-all-page-titles
@@ -48,15 +48,14 @@
        (map :block/title)))
 
 (defn get-page-alias
-  [repo page-name]
+  [repo page-id]
   (when-let [db (and repo (conn/get-db repo))]
     (some->> (d/q '[:find ?alias
-                    :in $ ?page-name
+                    :in $ ?page-id
                     :where
-                    [?page :block/name ?page-name]
-                    [?page :block/alias ?alias]]
+                    [?page-id :block/alias ?alias]]
                   db
-                  (util/page-name-sanity-lc page-name))
+                  page-id)
              db-utils/seq-flatten
              distinct)))
 
@@ -369,10 +368,10 @@ independent of format as format specific heading characters are stripped"
 
 (defn page-exists?
   "Whether a page exists."
-  [page-name]
+  [page-name type]
   (let [repo (state/get-current-repo)]
     (when-let [db (conn/get-db repo)]
-     (ldb/page-exists? db page-name))))
+     (ldb/page-exists? db page-name type))))
 
 (defn page-empty?
   "Whether a page is empty. Does it has a non-page block?
@@ -476,6 +475,20 @@ independent of format as format specific heading characters are stripped"
   (when page-name-or-uuid
     (ldb/get-case-page (conn/get-db) page-name-or-uuid)))
 
+(defn get-journal-page
+  [page-title]
+  (when-let [journal-day (date/journal-title->int page-title)]
+    (when-let [db (conn/get-db)]
+      (->
+       (d/q
+        '[:find [?page ...]
+          :in $ ?day
+          :where
+          [?page :block/journal-day ?day]]
+        db
+        journal-day)
+       first))))
+
 (defn get-redirect-page-name
   "Given any readable page-name, return the exact page-name in db. If page
    doesn't exists yet, will return the passed `page-name`. Accepts both
@@ -540,7 +553,7 @@ independent of format as format specific heading characters are stripped"
   (when-let [db (conn/get-db repo)]
     (let [pages (page-alias-set repo page-id)
           ref-pages (d/q
-                     '[:find [?ref-page ?ref-page-name]
+                     '[:find ?ref-page ?ref-page-name
                        :in $ ?pages
                        :where
                        [(untuple ?pages) [?page ...]]
@@ -549,7 +562,9 @@ independent of format as format specific heading characters are stripped"
                        [?ref-page :block/name ?ref-page-name]]
                      db
                      pages)]
-      (mapv (fn [[ref-page ref-page-name]] [ref-page-name (get-page-alias repo ref-page)]) ref-pages))))
+      (mapv (fn [[ref-page ref-page-name]]
+              [ref-page-name (get-page-alias repo ref-page)])
+            ref-pages))))
 
 ;; get pages who mentioned this page
 (defn get-pages-that-mentioned-page
@@ -612,7 +627,6 @@ independent of format as format specific heading characters are stripped"
    (when repo
      (when (conn/get-db repo)
        (let [entity (db-utils/entity eid)
-             page? (ldb/page? entity)
              ids (page-alias-set repo eid)]
          (->>
           (react/q repo
@@ -632,11 +646,11 @@ independent of format as format specific heading characters are stripped"
           :entities
           (remove (fn [block]
                     (or
-                     (= (:db/id (:block/link block)) eid)
                      (= (:db/id block) eid)
                      (= eid (:db/id (:block/page block)))
                      (ldb/hidden? (:block/page block))
-                     (contains? (set (map :db/id (:block/tags block))) (:db/id entity)))))
+                     (contains? (set (map :db/id (:block/tags block))) (:db/id entity))
+                     (some? (get block (:db/ident entity))))))
           (util/distinct-by :db/id)))))))
 
 (defn get-block-referenced-blocks
@@ -792,8 +806,7 @@ independent of format as format specific heading characters are stripped"
   [repo class-id]
   (when class-id
     (-> (react/q repo [:frontend.worker.react/objects class-id]
-                 {:query-fn (fn [_]
-                              (get-class-objects repo class-id))}
+                 {:query-fn (fn [_] (get-class-objects repo class-id))}
                  nil)
         react)))
 

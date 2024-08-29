@@ -117,6 +117,7 @@
                           {:style {:margin-bottom "-2px"}}
                           [:input.cp__select-input.w-full
                            (merge {:type        "text"
+                                   :class "!p-1.5"
                                    :placeholder (or input-default-placeholder (t prompt-key))
                                    :auto-focus  true
                                    :value       @input
@@ -205,7 +206,7 @@
                           [:div.mb-2 (t :select.graph/empty-placeholder-description)]
                           (ui/button
                            (t :select.graph/add-graph)
-                           :href (rfe/href :repo-add)
+                            :href (rfe/href :graphs)
                            :on-click state/close-modal!)])}
    :graph-remove
    {:items-fn (fn []

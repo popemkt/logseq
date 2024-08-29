@@ -3,8 +3,8 @@
   (:require [clojure.string :as string]
             [logseq.common.util.page-ref :as page-ref]
             [datascript.core :as d]
-            [logseq.db.sqlite.util :as sqlite-util]
-            [logseq.common.util :as common-util]))
+            [logseq.common.util :as common-util]
+            [logseq.db.frontend.entity-util :as entity-util]))
 
 (defonce page-ref-special-chars "~^")
 
@@ -82,54 +82,37 @@
   [content refs]
   (reduce
    (fn [content ref]
-     (string/replace content
-                     (str page-ref/left-brackets
-                          (:block/title ref)
-                          page-ref/right-brackets)
-                     (str page-ref/left-brackets
-                          page-ref-special-chars
-                          (:block/uuid ref)
-                          page-ref/right-brackets)))
+     (-> content
+         (string/replace (str page-ref/left-brackets (:block/title ref) page-ref/right-brackets)
+                         (str page-ref/left-brackets page-ref-special-chars (:block/uuid ref) page-ref/right-brackets))))
    content
    refs))
 
 (defn update-block-content
   "Replace `[[internal-id]]` with `[[page name]]`"
-  [repo db item eid]
-  (if (sqlite-util/db-based-graph? repo)
+  [db item eid]
+  (if (entity-util/db-based-graph? db)
     (if-let [content (:block/title item)]
       (let [refs (:block/refs (d/entity db eid))]
         (assoc item :block/title (special-id-ref->page-ref content refs)))
       item)
     item))
 
-(defn content-without-tags
-  "Remove tags from content"
-  [content tags]
-  (->
-   (reduce
-    (fn [content tag]
-      (-> content
-          (string/replace (str "#" tag " ") "")
-          (string/replace (str "#" tag) "")
-          (string/replace (str "#" page-ref/left-brackets tag page-ref/right-brackets " ") "")
-          (string/replace (str "#" page-ref/left-brackets tag page-ref/right-brackets) "")))
-    content
-    tags)
-   (string/trim)))
-
 (defn replace-tags-with-page-refs
   "Replace tags in content with page-ref ids. Ignore case because tags in
   content can have any case and still have a valid ref"
   [content tags]
-  (reduce
-   (fn [content tag]
-     (common-util/replace-ignore-case
-      content
-      (str "#" (:block/title tag))
-      (str page-ref/left-brackets
-           page-ref-special-chars
-           (:block/uuid tag)
-           page-ref/right-brackets)))
-   content
-   (sort-by :block/title > tags)))
+  (->>
+   (reduce
+    (fn [content tag]
+      (let [id-ref (block-id->special-id-ref (:block/uuid tag))]
+        (-> content
+           ;; #[[favorite book]]
+            (common-util/replace-ignore-case
+             (str "#" page-ref/left-brackets (:block/title tag) page-ref/right-brackets)
+             id-ref)
+          ;; #book
+            (common-util/replace-ignore-case (str "#" (:block/title tag)) id-ref))))
+    content
+    (sort-by :block/title > tags))
+   (string/trim)))
