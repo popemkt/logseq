@@ -14,12 +14,16 @@
             [logseq.db.frontend.entity-plus :as entity-plus]
             [logseq.db.sqlite.util :as sqlite-util]
             [logseq.outliner.core :as outliner-core]
+            [logseq.outliner.validate :as outliner-validate]
             [malli.error :as me]
             [malli.util :as mu]
             [clojure.set :as set]))
 
-;; schema -> type, cardinality, object's class
-;;           min, max -> string length, number range, cardinality size limit
+(defn- throw-error-if-read-only-property
+  [property-ident]
+  (when (db-property/read-only-properties property-ident)
+    (throw (ex-info "Read-only property value shouldn't be edited"
+                    {:property property-ident}))))
 
 (defn- build-property-value-tx-data
   ([block property-id value]
@@ -75,8 +79,8 @@
   (let [ident (:db/ident property)
         cardinality (if (= cardinality :many) :db.cardinality/many :db.cardinality/one)
         old-type (get-in property [:block/schema :type])
-        old-ref-type? (db-property-type/ref-property-types old-type)
-        ref-type? (db-property-type/ref-property-types type')]
+        old-ref-type? (db-property-type/user-ref-property-types old-type)
+        ref-type? (db-property-type/user-ref-property-types type')]
     [(cond->
       {:db/ident ident
        :db/cardinality cardinality}
@@ -87,6 +91,9 @@
 
 (defn- update-property
   [conn db-ident property schema {:keys [property-name properties]}]
+  (when (and (some? property-name) (not= property-name (:block/title property)))
+    (outliner-validate/validate-block-title @conn property-name property))
+
   (let [changed-property-attrs
         ;; Only update property if something has changed as we are updating a timestamp
         (cond-> {}
@@ -163,6 +170,7 @@
 (defn- raw-set-block-property!
   "Adds the raw property pair (value not modified) to the given block if the property value is valid"
   [conn block property property-type new-value]
+  (throw-error-if-read-only-property (:db/ident property))
   (let [k-name (:block/title property)
         property-id (:db/ident property)
         schema (get-property-value-schema @conn property-type property)]
@@ -236,6 +244,7 @@
   can pass \"value\" instead of the property value entity. Also handle db
   attributes as properties"
   [conn block-eid property-id v]
+  (throw-error-if-read-only-property property-id)
   (let [block-eid (->eid block-eid)
         _ (assert (qualified-keyword? property-id) "property-id should be a keyword")
         block (d/entity @conn block-eid)
@@ -247,7 +256,7 @@
       (when-not (and (= property-id :block/alias) (= v (:db/id block))) ; alias can't be itself
         (ldb/transact! conn [{:db/id (:db/id block) property-id v}]
                        {:outliner-op :save-block}))
-      (let [new-value (if (db-property-type/ref-property-types property-type)
+      (let [new-value (if (db-property-type/user-ref-property-types property-type)
                         (convert-ref-property-value conn property-id v property-type)
                         v)
             existing-value (get block property-id)]
@@ -260,6 +269,7 @@
    NOTE: This fn only works for properties with cardinality equal to `one`."
   [conn block-ids property-id v]
   (assert property-id "property-id is nil")
+  (throw-error-if-read-only-property property-id)
   (let [block-eids (map ->eid block-ids)
         property (d/entity @conn property-id)
         _ (assert (some? property) (str "Property " property-id " doesn't exist yet"))
@@ -281,6 +291,7 @@
 
 (defn batch-remove-property!
   [conn block-ids property-id]
+  (throw-error-if-read-only-property property-id)
   (let [block-eids (map ->eid block-ids)
         blocks (keep (fn [id] (d/entity @conn id)) block-eids)
         block-id-set (set (map :db/id blocks))]
@@ -312,12 +323,21 @@
 
 (defn remove-block-property!
   [conn eid property-id]
-  (let [eid (->eid eid)]
-    (if (contains? db-property/db-attribute-properties property-id)
-      (when-let [block (d/entity @conn eid)]
+  (throw-error-if-read-only-property property-id)
+  (let [eid (->eid eid)
+        block (d/entity @conn eid)]
+    (cond
+      (and (ldb/class? block) (= property-id :logseq.property/parent))
+      (ldb/transact! conn
+                     [[:db/add (:db/id block) :logseq.property/parent :logseq.class/Root]]
+                     {:outliner-op :save-block})
+
+      (contains? db-property/db-attribute-properties property-id)
+      (when block
         (ldb/transact! conn
                        [[:db/retract (:db/id block) property-id]]
                        {:outliner-op :save-block}))
+      :else
       (batch-remove-property! conn [eid] property-id))))
 
 (defn delete-property-value!
@@ -339,14 +359,14 @@
   (let [tags' (filter ldb/class? tags)
         result (map
                 (fn [id] (d/entity db id))
-                (set (mapcat ldb/get-class-parents tags')))]
+                (mapcat ldb/get-class-parents tags'))]
     (set result)))
 
 (defn ^:api get-class-properties
   [db class]
   (let [class-parents (get-class-parents db [class])]
     (->> (mapcat (fn [class]
-                   (:class/schema.properties class)) (concat [class] class-parents))
+                   (:logseq.property.class/properties class)) (concat [class] class-parents))
          (common-util/distinct-by :db/id)
          (ldb/sort-by-order))))
 
@@ -359,9 +379,9 @@
         class-parents (get-class-parents db classes)
         all-classes (->> (concat classes class-parents)
                          (filter (fn [class]
-                                   (seq (:class/schema.properties class)))))
+                                   (seq (:logseq.property.class/properties class)))))
         all-properties (-> (mapcat (fn [class]
-                                     (map :db/ident (:class/schema.properties class))) all-classes)
+                                     (map :db/ident (:logseq.property.class/properties class))) all-classes)
                            distinct)]
     {:classes classes
      :all-classes all-classes           ; block own classes + parent classes
@@ -369,9 +389,11 @@
 
 (defn- property-with-position?
   [db property-id block-properties position]
-  (and
-   (some? (get block-properties property-id))
-   (let [schema (:block/schema (d/entity db property-id))]
+  (let [property (d/entity db property-id)
+        schema (:block/schema property)]
+    (and
+     (or (some? (get block-properties property-id)) ; property value exists
+         (contains? #{:checkbox} (:type schema)))
      (= (:position schema) position))))
 
 (defn property-with-other-position?
@@ -390,15 +412,6 @@
          (map #(d/entity db %))
          (ldb/sort-by-order)
          (map :db/ident))))
-
-(defn block-has-viewable-properties?
-  [block-entity]
-  (let [properties (->> (keys (:block/properties block-entity))
-                        (remove #{:logseq.property/icon :logseq.property/built-in?}))]
-    (or
-     (seq (:block/alias block-entity))
-     (seq (:block/tags block-entity))
-     (seq properties))))
 
 (defn- build-closed-value-tx
   [db property resolved-value {:keys [id icon]}]
@@ -521,7 +534,7 @@
   (when-let [class (d/entity @conn class-id)]
     (if (ldb/class? class)
       (ldb/transact! conn
-                     [[:db/add (:db/id class) :class/schema.properties property-id]]
+                     [[:db/add (:db/id class) :logseq.property.class/properties property-id]]
                      {:outliner-op :save-block})
       (throw (ex-info "Can't add a property to a block that isn't a class"
                       {:class-id class-id :property-id property-id})))))
@@ -532,5 +545,5 @@
     (when (ldb/class? class)
       (when-let [property (d/entity @conn property-id)]
         (when-not (ldb/built-in-class-property? class property)
-          (ldb/transact! conn [[:db/retract (:db/id class) :class/schema.properties property-id]]
+          (ldb/transact! conn [[:db/retract (:db/id class) :logseq.property.class/properties property-id]]
                          {:outliner-op :save-block}))))))

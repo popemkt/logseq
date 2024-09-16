@@ -35,6 +35,16 @@
             [rum.core :as rum]
             [frontend.config :as config]))
 
+(defn filter-commands
+  [page? commands]
+  (if page?
+    (filter (fn [item]
+              (or
+               (= "Add new property" (first item))
+               (when (= (count item) 5)
+                 (contains? #{"TASK" "PRIORITY"} (last item))))) commands)
+    commands))
+
 (rum/defcs commands < rum/reactive
   (rum/local [] ::matched-commands)
   [s id format]
@@ -42,63 +52,64 @@
         *matched (::matched-commands s)
         _ (when (state/get-editor-action)
             (reset! *matched matched'))
-        matched @*matched]
+        page? (db/page? (db/entity (:db/id (state/get-edit-block))))
+        matched (filter-commands page? @*matched)]
     (ui/auto-complete
-      matched
-      {:get-group-name
-       (fn [item]
-         (when (= (count item) 5) (last item)))
+     matched
+     {:get-group-name
+      (fn [item]
+        (when (= (count item) 5) (last item)))
 
-       :item-render
-       (fn [item]
-         (let [command-name (first item)
-               command-doc (get item 2)
-               plugin-id (get-in item [1 1 1 :pid])
-               doc (when (state/show-command-doc?) command-doc)
-               options (some-> item (get 3))
-               icon-name (some-> (if (map? options) (:icon options) options) (name))
-               command-name (if icon-name
-                              [:span.flex.items-center.gap-1
-                               (shui/tabler-icon icon-name)
-                               [:strong.font-normal command-name]]
-                              command-name)]
-           (cond
-             (or plugin-id (vector? doc))
-             [:div.has-help
-              {:title plugin-id}
-              command-name
-              (when doc (ui/tippy
-                          {:html doc
-                           :interactive true
-                           :fixed-position? true
-                           :position "right"}
+      :item-render
+      (fn [item]
+        (let [command-name (first item)
+              command-doc (get item 2)
+              plugin-id (get-in item [1 1 1 :pid])
+              doc (when (state/show-command-doc?) command-doc)
+              options (some-> item (get 3))
+              icon-name (some-> (if (map? options) (:icon options) options) (name))
+              command-name (if icon-name
+                             [:span.flex.items-center.gap-1
+                              (shui/tabler-icon icon-name)
+                              [:strong.font-normal command-name]]
+                             command-name)]
+          (cond
+            (or plugin-id (vector? doc))
+            [:div.has-help
+             {:title plugin-id}
+             command-name
+             (when doc (ui/tippy
+                        {:html doc
+                         :interactive true
+                         :fixed-position? true
+                         :position "right"}
 
-                          [:small (svg/help-circle)]))]
+                        [:small (svg/help-circle)]))]
 
-             (string? doc)
-             [:div {:title doc}
-              command-name]
+            (string? doc)
+            [:div {:title doc}
+             command-name]
 
-             :else
-             [:div command-name])))
+            :else
+            [:div command-name])))
 
-       :on-chosen
-       (fn [chosen-item]
-         (let [command (first chosen-item)]
-           (reset! commands/*current-command command)
-           (let [command-steps (get (into {} matched) command)
-                 restore-slash? (or
-                                  (contains? #{"Today" "Yesterday" "Tomorrow" "Current time"} command)
-                                  (and
-                                    (not (fn? command-steps))
-                                    (not (contains? (set (map first command-steps)) :editor/input))
-                                    (not (contains? #{"Date picker" "Template" "Deadline" "Scheduled" "Upload an image"} command))))]
-             (editor-handler/insert-command! id command-steps
-               format
-               {:restore? restore-slash?
-                :command command}))))
-       :class
-       "cp__commands-slash"})))
+      :on-chosen
+      (fn [chosen-item]
+        (let [command (first chosen-item)]
+          (reset! commands/*current-command command)
+          (let [command-steps (get (into {} matched) command)
+                restore-slash? (or
+                                (contains? #{"Today" "Yesterday" "Tomorrow" "Current time"} command)
+                                (and
+                                 (not (fn? command-steps))
+                                 (not (contains? (set (map first command-steps)) :editor/input))
+                                 (not (contains? #{"Date picker" "Template" "Deadline" "Scheduled" "Upload an image"} command))))]
+            (editor-handler/insert-command! id command-steps
+                                            format
+                                            {:restore? restore-slash?
+                                             :command command}))))
+      :class
+      "cp__commands-slash"})))
 
 (defn- page-on-chosen-handler
   [embed? input id q pos format]
@@ -119,11 +130,12 @@
                                                  :sibling? true
                                                  :replace-empty-target? true
                                                  :other-attrs {:block/link (:db/id page')}}))))
-    (page-handler/on-chosen-handler input id q pos format)))
+    (page-handler/on-chosen-handler input id pos format)))
 
 (rum/defc page-search-aux
   [id format embed? db-tag? q current-pos input pos]
   (let [db? (config/db-based-graph? (state/get-current-repo))
+        q (string/trim q)
         [matched-pages set-matched-pages!] (rum/use-state nil)]
     (rum/use-effect! (fn []
                        (when-not (string/blank? q)
@@ -136,7 +148,8 @@
                           ;; reorder, shortest and starts-with first.
                           (let [matched-pages-with-new-page
                                 (fn [partial-matched-pages]
-                                  (if (db/page-exists? q (if db-tag? "class" "page"))
+                                  (if (or (db/page-exists? q (if db-tag? "class" "page"))
+                                          (and db-tag? (some ldb/class? (:block/_alias (db/get-page q)))))
                                     partial-matched-pages
                                     (if db-tag?
                                       (concat [{:block/title (str (t :new-tag) " " q)}]
@@ -155,31 +168,48 @@
          :on-enter    (fn []
                         (page-handler/page-not-exists-handler input id q current-pos))
          :item-render (fn [block _chosen?]
-                        [:div.flex.flex-row.items-center.gap-1
-                         (when-not db-tag?
-                           (cond
-                             (ldb/class? block)
-                             [:div (ui/icon "hash" {:size 14})]
-                             (ldb/property? block)
-                             [:div (ui/icon "letter-p" {:size 14})]
-                             (db-model/whiteboard-page? block)
-                             [:div (ui/icon "whiteboard" {:extension? true})]
-                             (db/page? block)
-                             [:div (ui/icon "page" {:extension? true})]
-                             (or (string/starts-with? (str (:block/title block)) (t :new-tag))
-                                 (string/starts-with? (str (:block/title block)) (t :new-page)))
-                             nil
-                             :else
-                             [:div (ui/icon "letter-n" {:size 14})]))
+                        (let [block (if (:block/uuid block)
+                                      (db/entity [:block/uuid (:block/uuid block)])
+                                      block)]
+                          [:div.flex.flex-col
+                           (when-not (db/page? block)
+                             (when-let [breadcrumb (state/get-component :block/breadcrumb)]
+                               [:div.text-xs.opacity-70.mb-1 {:style {:margin-left 3}}
+                                (breadcrumb {:search? true} (state/get-current-repo) (:block/uuid block) {})]))
+                           [:div.flex.flex-row.items-center.gap-1
+                            (when-not db-tag?
+                              [:div.flex.items-center
+                               (cond
+                                 (ldb/class? block)
+                                 (ui/icon "hash" {:size 14})
 
-                         (let [title (if db-tag?
-                                       (:block/title block)
-                                       (title/block-unique-title block))]
-                           (search-handler/highlight-exact-query title q))])
+                                 (ldb/property? block)
+                                 (ui/icon "letter-p" {:size 14})
+
+                                 (db-model/whiteboard-page? block)
+                                 (ui/icon "whiteboard" {:extension? true})
+
+                                 (db/page? block)
+                                 (ui/icon "page" {:extension? true})
+
+                                 (or (string/starts-with? (str (:block/title block)) (t :new-tag))
+                                   (string/starts-with? (str (:block/title block)) (t :new-page)))
+                                 (ui/icon "plus" {:size 14})
+
+                                 :else
+                                 (ui/icon "letter-n" {:size 14}))])
+
+                            (let [title (if db-tag?
+                                          (let [target (first (:block/_alias block))]
+                                            (if (ldb/class? target)
+                                              (str (:block/title block) " -> alias: " (:block/title target))
+                                              (:block/title block)))
+                                          (title/block-unique-title block))]
+                              (search-handler/highlight-exact-query title q))]]))
          :empty-placeholder [:div.text-gray-500.text-sm.px-4.py-2 (if db-tag?
                                                                     "Search for a tag"
                                                                     "Search for a node")]
-         :class       "black"})
+         :class "black"})
 
        (when (and db? db-tag? (not (string/blank? q)))
          [:p.px-1.opacity-50.text-sm
@@ -187,10 +217,10 @@
           [:span " to display this tag inline instead of at the end of this node."]])])))
 
 (rum/defc page-search < rum/reactive
-  {:will-unmount (fn [state]
-                   (reset! commands/*current-command nil)
-                   state)}
-  "Page or tag searching popup"
+                        {:will-unmount (fn [state]
+                                         (reset! commands/*current-command nil)
+                                         state)}
+                        "Page or tag searching popup"
   [id format]
   (let [action (state/sub :editor/action)
         db? (config/db-based-graph? (state/get-current-repo))

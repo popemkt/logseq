@@ -194,6 +194,7 @@ export interface BlockEntity {
   createdAt: number
   updatedAt: number
   properties?: Record<string, any>
+  'collapsed?': boolean
 
   // optional fields in dummy page
   left?: IEntityID
@@ -216,16 +217,19 @@ export interface PageEntity {
   id: EntityID
   uuid: BlockUUID
   name: string
-  originalName: string
+  format: 'markdown' | 'org'
+  type: 'page' | 'journal' | 'whiteboard' | 'class' | 'property' | 'hidden'
+  updatedAt: number
+  createdAt: number
   'journal?': boolean
 
+  title?: string
   file?: IEntityID
+  originalName?: string
   namespace?: IEntityID
   children?: Array<PageEntity>
   properties?: Record<string, any>
-  format?: 'markdown' | 'org'
   journalDay?: number
-  updatedAt?: number
 
   [key: string]: unknown
 }
@@ -794,6 +798,26 @@ export interface IEditorProxy extends Record<string, any> {
 
   saveFocusedCodeEditorContent: () => Promise<void>
 
+  // property entity related APIs (DB only)
+  getProperty: (key: string) => Promise<BlockEntity | null>
+
+  /**
+   * insert or update property entity
+   * @param key
+   * @param schema
+   * @param opts
+   */
+  upsertProperty: (
+    key: string,
+    schema?: Partial<{
+      type: 'default' | 'map' | 'number' | 'keyword' | 'node' | 'date' | 'checkbox' | string,
+      cardinality: 'many' | 'one',
+      hide: boolean
+      public: boolean
+    }>,
+    opts?: { name?: string }) => Promise<IEntityID>
+
+  // block property related APIs
   upsertBlockProperty: (
     block: BlockIdentity,
     key: string,
@@ -802,7 +826,7 @@ export interface IEditorProxy extends Record<string, any> {
 
   removeBlockProperty: (block: BlockIdentity, key: string) => Promise<void>
 
-  getBlockProperty: (block: BlockIdentity, key: string) => Promise<BlockEntity | string| null>
+  getBlockProperty: (block: BlockIdentity, key: string) => Promise<BlockEntity | string | null>
 
   getBlockProperties: (block: BlockIdentity) => Promise<Record<string, any> | null>
 

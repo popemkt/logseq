@@ -165,6 +165,7 @@ html[data-theme=dark] {
     .ui__select-content {
       --accent: 190 100% 15%;
       --muted: 192 100% 13%;
+      --secondary-foreground: 0 0% 82%;
     }
 
     .ui__button {
@@ -332,7 +333,7 @@ div[data-radix-popper-content-wrapper] {
 
 .ui__calendar {
   .rdp-caption_dropdowns {
-    @apply flex items-center justify-center relative border rounded opacity-80;
+    @apply flex items-center justify-center relative rounded opacity-80;
 
     .rdp-vhidden {
       @apply hidden;
@@ -364,35 +365,18 @@ div[data-radix-popper-content-wrapper] {
 
       button[name=previous-month] {
         @apply relative;
+        svg {
+          width: 14px;
+          height: 14px;
+        }
       }
 
       button[name=next-month] {
         @apply relative;
-      }
-    }
-
-    .months-years-nav {
-      @apply flex items-center relative left-0 pr-0 py-[1px] font-[500];
-
-      select {
-        @apply pl-2.5 pr-1 py-0 border-none bg-transparent bg-none text-center overflow-hidden w-auto;
-
-        &[data-month="0"], &[data-month="1"] {
-          @apply w-[86px];
+        svg {
+            width: 14px;
+            height: 14px;
         }
-
-        &[data-month="2"], &[data-month="7"] {
-          @apply w-[74px];
-        }
-
-        &[data-month="3"], &[data-month="4"],
-        &[data-month="5"], &[data-month="6"] {
-          @apply px-0 w-[60px];
-        }
-      }
-
-      input {
-        @apply border-none ml-0 mr-2 bg-transparent;
       }
     }
   }
@@ -404,8 +388,8 @@ div[data-radix-popper-content-wrapper] {
   }
 
   .del-date-btn {
-    @apply absolute right-[9px] top-[19px] px-1 opacity-70 hover:opacity-100
-    active:opacity-80 hover:text-red-rx-09 rounded-md;
+    @apply absolute right-[13px] top-[21px] px-1 opacity-70 hover:opacity-100
+    active:opacity-80 hover:text-red-rx-09 rounded-md !h-6 !w-6;
   }
 
   &.has-del-btn {
@@ -418,6 +402,12 @@ div[data-radix-popper-content-wrapper] {
 
   input[type=number] {
     appearance: initial;
+  }
+
+  .rdp-button {
+    &[name=previous-month], &[name=next-month] {
+      @apply !h-6 !w-6;
+    }
   }
 }
 

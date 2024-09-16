@@ -3,7 +3,8 @@
   fns and their allowed schema attributes"
   (:require [datascript.core :as d]
             [clojure.set :as set]
-            [logseq.common.util.macro :as macro-util]))
+            [logseq.common.util.macro :as macro-util]
+            [logseq.db.frontend.entity-util :as entity-util]))
 
 ;; Config vars
 ;; ===========
@@ -12,7 +13,7 @@
 
 (def internal-built-in-property-types
   "Valid property types only for use by internal built-in-properties"
-  #{:keyword :map :coll :any :entity})
+  #{:keyword :map :coll :any :entity :class :page :property :string :raw-number})
 
 (def user-built-in-property-types
   "Valid property types for users in order they appear in the UI"
@@ -41,19 +42,24 @@
 (def value-ref-property-types
   "Property value ref types where the refed entities either store their value in
   :property.value/content or :block/title (for :default)"
-  (into #{:default}
-        original-value-ref-property-types))
+  (into #{:default} original-value-ref-property-types))
 
-(def ref-property-types
-  "User facing ref types. Property values that users see are stored in either
-  :property.value/content, :block/title.
-  :block/title is for all the page related types"
+(def user-ref-property-types
+  "User ref types. Property values that users see are stored in either
+  :property.value/content or :block/title. :block/title is for all the page related types"
   (into #{:date :node} value-ref-property-types))
 
-(assert (set/subset? ref-property-types
+(assert (set/subset? user-ref-property-types
                      (set user-built-in-property-types))
         "All ref types are valid property types")
 
+(def all-ref-property-types
+  "All ref types - user and internal"
+  (into #{:entity :class :page :property} user-ref-property-types))
+
+(assert (set/subset? all-ref-property-types
+                     (set/union (set user-built-in-property-types) internal-built-in-property-types))
+        "All ref types are valid property types")
 
 ;; Property value validation
 ;; =========================
@@ -87,6 +93,18 @@
   [db id]
   (some? (d/entity db id)))
 
+(defn- class-entity?
+  [db id]
+  (entity-util/class? (d/entity db id)))
+
+(defn- property-entity?
+  [db id]
+  (entity-util/property? (d/entity db id)))
+
+(defn- page-entity?
+  [db id]
+  (entity-util/page? (d/entity db id)))
+
 (defn- number-entity?
   [db id-or-value {:keys [new-closed-value?]}]
   (if new-closed-value?
@@ -104,8 +122,7 @@
 (defn- node-entity?
   [db val]
   (when-let [ent (d/entity db val)]
-    ;; (seq (:block/tags ent))
-    (some? ent)))
+    (some? (:block/title ent))))
 
 (defn- date?
   [db val]
@@ -135,7 +152,12 @@
    ;; Internal usage
    ;; ==============
 
+   :string   string?
+   :raw-number number?
    :entity   entity?
+   :class    class-entity?
+   :property property-entity?
+   :page     page-entity?
    :keyword  keyword?
    :map      map?
    ;; coll elements are ordered as it's saved as a vec
@@ -149,7 +171,7 @@
 
 (def property-types-with-db
   "Property types whose validation fn requires a datascript db"
-  #{:default :url :number :date :node :entity})
+  #{:default :url :number :date :node :entity :class :property :page})
 
 ;; Helper fns
 ;; ==========

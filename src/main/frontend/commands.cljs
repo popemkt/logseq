@@ -12,7 +12,7 @@
             [frontend.state :as state]
             [frontend.util :as util]
             [frontend.util.cursor :as cursor]
-            [frontend.util.priority :as priority]
+            [frontend.util.file-based.priority :as priority]
             [frontend.handler.file-based.property :as file-property-handler]
             [frontend.handler.db-based.property.util :as db-pu]
             [frontend.handler.property.file :as property-file]
@@ -156,7 +156,7 @@
                                      "square-asterisk")]
                           [command (->marker m) (str "Set status to " m) icon]))))]
     (when (seq result)
-      (update result 0 (fn [v] (conj v "TASK"))))))
+      (map (fn [v] (conj v "TASK")) result))))
 
 (defn file-based-priorities
   []
@@ -183,10 +183,10 @@
                            (if db-based?
                              (str "priorityLvl" item)
                              (str "circle-letter-" (util/safe-lower-case item)))])))
-                 (with-no-priority)
-                 (vec))]
+                (with-no-priority)
+                (vec))]
     (when (seq result)
-      (update result 0 (fn [v] (conj v "PRIORITY"))))))
+      (map (fn [v] (conj v "PRIORITY")) result))))
 
 ;; Credits to roamresearch.com
 
@@ -343,6 +343,7 @@
       ;; advanced
       [["Query"
         [[:editor/input "{{query }}" {:backward-pos 2}]
+         [:editor/set-property :block/tags (:db/id (db/entity :logseq.class/Query))]
          [:editor/exit]]
         query-doc
         :icon/query
@@ -682,6 +683,11 @@
     (db-based-set-status status)
     (file-based-set-status status format)))
 
+(defmethod handle-step :editor/set-property [[_ property-id value]]
+  (when (config/db-based-graph? (state/get-current-repo))
+    (when-let [block (state/get-edit-block)]
+      (db-property-handler/set-block-property! (:db/id block) property-id value))))
+
 (defn- file-based-set-priority
   [priority]
   (when-let [input-id (state/get-edit-input-id)]
@@ -839,8 +845,8 @@
   (prn "No handler for step: " type))
 
 (defn handle-steps
-  [vector format]
-  (doseq [step vector]
+  [vector' format]
+  (doseq [step vector']
     (handle-step step format)))
 
 (defn exec-plugin-simple-command!

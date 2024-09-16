@@ -11,6 +11,7 @@
             [frontend.handler.page :as page-handler]
             [frontend.handler.property :as property-handler]
             [frontend.handler.db-based.property :as db-property-handler]
+            [frontend.handler.db-based.page :as db-page-handler]
             [frontend.state :as state]
             [frontend.ui :as ui]
             [logseq.shui.ui :as shui]
@@ -26,12 +27,24 @@
             [frontend.handler.property.util :as pu]
             [logseq.db.frontend.property.type :as db-property-type]
             [dommy.core :as d]
+            [goog.dom :as gdom]
             [frontend.search :as search]
-            [goog.functions :refer [debounce]]))
+            [goog.functions :refer [debounce]]
+            [frontend.handler.route :as route-handler]
+            [frontend.components.title :as title]))
 
 (rum/defc property-empty-btn-value
-  [& {:as opts}]
-  (shui/button (merge {:class "empty-btn" :variant :text} opts) "Empty"))
+  [property & opts]
+  (let [text (cond
+               (= (:db/ident property) :logseq.property/description)
+               "Add description"
+               :else
+               "Empty")]
+    (if (= text "Empty")
+      (shui/button (merge {:class "empty-btn" :variant :text} opts)
+                   text)
+      (shui/button (merge {:class "empty-btn !text-base" :variant :text} opts)
+                   text))))
 
 (rum/defc property-empty-text-value
   [& {:as opts}]
@@ -40,65 +53,78 @@
 
 (rum/defc icon-row
   [block editing?]
-  (let [icon-value (:logseq.property/icon block)]
-    [:div.col-span-3.flex.flex-row.items-center.gap-2
-     (icon-component/icon-picker icon-value
-       {:disabled? config/publishing?
-        :initial-open? editing?
-        :on-chosen (fn [_e icon]
-                     (p/do!
+  (let [icon-value (:logseq.property/icon block)
+        clear-overlay! (fn []
+                         (shui/dialog-close!)
+                         (shui/popup-hide-all!))
+        on-chosen! (fn [_e icon]
+                     (if icon
                        (db-property-handler/set-block-property!
                          (:db/id block)
                          :logseq.property/icon
                          (select-keys icon [:type :id :color]))
-                       (shui/popup-hide!)
-                       (shui/dialog-close!)))})
-     (when (and icon-value (not config/publishing?))
-       [:a.fade-link.flex {:on-click (fn [_e]
-                                       (p/do!
-                                         (db-property-handler/remove-block-property!
-                                           (:db/id block)
-                                           :logseq.property/icon)
-                                         (shui/popup-hide!)
-                                         (shui/dialog-close!)))
-                           :title "Delete this icon"}
-        (ui/icon "X")])]))
+                       (db-property-handler/remove-block-property!
+                         (:db/id block)
+                         :logseq.property/icon))
+                     (clear-overlay!))]
+
+    (rum/use-effect!
+      (fn []
+        (when editing?
+          (clear-overlay!)
+          (let [^js container (or (some-> js/document.activeElement (.closest ".page"))
+                                (gdom/getElement "main-content-container"))
+                icon (get block (pu/get-pid :logseq.property/icon))]
+            (util/schedule
+              (fn []
+                (when-let [^js target (some-> (.querySelector container (str "#ls-block-" (str (:block/uuid block))))
+                                        (.querySelector ".block-main-container"))]
+                  (shui/popup-show! target
+                    #(icon-component/icon-search {:on-chosen on-chosen! :del-btn? (some? icon)})
+                    {:id :ls-icon-picker
+                     :align :start})))))))
+      [editing?])
+
+    [:div.col-span-3.flex.flex-row.items-center.gap-2
+     (icon-component/icon-picker icon-value
+       {:disabled? config/publishing?
+        :del-btn? (some? icon-value)
+        :on-chosen on-chosen!})]))
 
 (defn- select-type?
   [property type]
-  (or (contains? #{:node :number :url :date} type)
+  (or (contains? #{:node :number :url :date :page :class :property} type)
     ;; closed values
     (seq (:property/closed-values property))))
 
 (defn <create-new-block!
   [block property value & {:keys [edit-block?]
                            :or {edit-block? true}}]
+  (shui/popup-hide!)
+  (shui/dialog-close!)
   (p/let [block
           (if (and (= :default (get-in property [:block/schema :type]))
-                (not (db-property/many? property)))
+                   (not (db-property/many? property)))
             (p/let [existing-value (get block (:db/ident property))
                     existing-value? (and (some? existing-value)
-                                      (not= (:db/ident existing-value) :logseq.property/empty-placeholder))
+                                         (not= (:db/ident existing-value) :logseq.property/empty-placeholder))
                     new-block-id (when-not existing-value? (db/new-block-id))
                     _ (when-not existing-value?
                         (db-property-handler/create-property-text-block!
-                          (:db/id block)
-                          (:db/id property)
-                          value
-                          {:new-block-id new-block-id}))]
+                         (:db/id block)
+                         (:db/id property)
+                         value
+                         {:new-block-id new-block-id}))]
               (if existing-value? existing-value (db/entity [:block/uuid new-block-id])))
             (p/let [new-block-id (db/new-block-id)
                     _ (db-property-handler/create-property-text-block!
-                        (:db/id block)
-                        (:db/id property)
-                        value
-                        {:new-block-id new-block-id})]
+                       (:db/id block)
+                       (:db/id property)
+                       value
+                       {:new-block-id new-block-id})]
               (db/entity [:block/uuid new-block-id])))]
     (when edit-block?
-      (p/do!
-        (editor-handler/edit-block! block :max {:container-id :unknown-container})
-        (shui/popup-hide!)
-        (shui/dialog-close!)))
+      (editor-handler/edit-block! block :max {:container-id :unknown-container}))
     block))
 
 (defn <add-property!
@@ -114,21 +140,21 @@
          checkbox? (= :checkbox (get-in property [:block/schema :type]))]
      (assert (qualified-keyword? property-id) "property to add must be a keyword")
      (p/do!
-       (if (and class? class-schema?)
-         (db-property-handler/class-add-property! (:db/id block) property-id)
-         (if (and (db-property-type/ref-property-types (get-in property [:block/schema :type]))
-               (string? property-value'))
-           (<create-new-block! block (db/entity property-id) property-value' {:edit-block? false})
-           (property-handler/set-block-property! repo (:block/uuid block) property-id property-value')))
-       (when exit-edit?
-         (ui/hide-popups-until-preview-popup!)
-         (shui/dialog-close!))
-       (when-not (or many? checkbox?)
-         (when-let [input (state/get-input)]
-           (.focus input)))
-       (when checkbox?
-         (state/set-editor-action-data! {:type :focus-property-value
-                                         :property property}))))))
+      (if (and class? class-schema?)
+        (db-property-handler/class-add-property! (:db/id block) property-id)
+        (if (and (db-property-type/user-ref-property-types (get-in property [:block/schema :type]))
+                 (string? property-value'))
+          (<create-new-block! block (db/entity property-id) property-value' {:edit-block? false})
+          (property-handler/set-block-property! repo (:block/uuid block) property-id property-value')))
+      (when exit-edit?
+        (ui/hide-popups-until-preview-popup!)
+        (shui/dialog-close!))
+      (when-not (or many? checkbox?)
+        (when-let [input (state/get-input)]
+          (.focus input)))
+      (when checkbox?
+        (state/set-editor-action-data! {:type :focus-property-value
+                                        :property property}))))))
 
 (defn- add-or-remove-property-value
   [block property value selected? {:keys [refresh-result-f]}]
@@ -151,16 +177,17 @@
            state)
    :will-mount (fn [state]
                  (js/setTimeout
-                   #(some-> @(::identity state)
-                      (js/document.getElementById)
-                      (.querySelector "[aria-selected=true]")
-                      (.focus)) 16)
+                  #(some-> @(::identity state)
+                           (js/document.getElementById)
+                           (.querySelector "[aria-selected=true]")
+                           (.focus)) 16)
                  state)
    :will-unmount (fn [state]
+                   (shui/popup-hide!)
                    (shui/dialog-close!)
                    (state/set-editor-action! nil)
                    state)}
-  [state id {:keys [on-change value _del-btn? _on-delete]}]
+  [state id {:keys [on-change value del-btn? on-delete]}]
   (let [*ident (::identity state)
         initial-day (or (some-> value (.getTime) (js/Date.)) (js/Date.))
         initial-month (when value
@@ -172,22 +199,24 @@
             (let [gd (goog.date.Date. (.getFullYear d) (.getMonth d) (.getDate d))]
               (let [journal (date/js-date->journal-title gd)]
                 (p/do!
-                  (when-not (db/get-case-page journal)
-                    (page-handler/<create! journal {:redirect? false
-                                                    :create-first-block? false}))
-                  (when (fn? on-change)
-                    (on-change (db/get-case-page journal)))
-                  (shui/popup-hide! id)
-                  (ui/hide-popups-until-preview-popup!)
-                  (shui/dialog-close!))))))]
-    (ui/single-calendar
-      (cond->
-        {:initial-focus true
-         :selected initial-day
-         :id @*ident
-         :on-select select-handler!}
-        initial-month
-        (assoc :default-month initial-month)))))
+                 (when-not (db/get-case-page journal)
+                   (page-handler/<create! journal {:redirect? false
+                                                   :create-first-block? false}))
+                 (when (fn? on-change)
+                   (on-change (db/get-case-page journal)))
+                 (shui/popup-hide! id)
+                 (ui/hide-popups-until-preview-popup!)
+                 (shui/dialog-close!))))))]
+    (ui/nlp-calendar
+     (cond->
+      {:initial-focus true
+       :selected initial-day
+       :id @*ident
+       :del-btn? del-btn?
+       :on-delete on-delete
+       :on-day-click select-handler!}
+       initial-month
+       (assoc :default-month initial-month)))))
 
 (rum/defc date-picker
   [value {:keys [on-change on-delete del-btn? editing? multiple-values? other-position?]}]
@@ -231,11 +260,9 @@
           (when-let [page-cp (state/get-component :block/page-cp)]
             (rum/with-key
               (page-cp {:disable-preview? true
-                        :hide-close-button? true
                         :meta-click? other-position?} page)
               (:db/id page)))
-          (when-not multiple-values?
-            (property-empty-btn-value)))))))
+          (property-empty-btn-value nil))))))
 
 (rum/defc property-value-date-picker
   [block property value opts]
@@ -248,23 +275,25 @@
                       (property-handler/set-block-property! repo (:block/uuid block)
                         (:db/ident property)
                         (:db/id page)))
-         :del-btn? true
+         :del-btn? (some-> value (:block/title) (boolean))
          :on-delete (fn []
                       (property-handler/set-block-property! repo (:block/uuid block)
                         (:db/ident property) nil)
                       (shui/popup-hide!))}))))
 
 (defn- <create-page-if-not-exists!
-  [property classes page]
+  [block property classes page]
   (let [page* (string/trim page)
         ;; inline-class is only for input from :transform-fn
         [page inline-class] (if (and (seq classes) (not (contains? db-property/db-attribute-properties (:db/ident property))))
                               (or (seq (map string/trim (rest (re-find #"(.*)#(.*)$" page*))))
-                                [page* nil])
+                                  [page* nil])
                               [page* nil])
         page-entity (ldb/get-case-page (db/get-db) page)
         id (:db/id page-entity)
-        class? (= :block/tags (:db/ident property))
+        class? (or (= :block/tags (:db/ident property))
+                   (and (= :logseq.property/parent (:db/ident property))
+                        (ldb/class? block)))
         ;; Note: property and other types shouldn't be converted to class
         page? (= "page" (:block/type page-entity))]
     (cond
@@ -273,8 +302,8 @@
       (let [inline-class-uuid
             (when inline-class
               (or (:block/uuid (ldb/get-case-page (db/get-db) inline-class))
-                (do (log/error :msg "Given inline class does not exist" :inline-class inline-class)
-                  nil)))
+                  (do (log/error :msg "Given inline class does not exist" :inline-class inline-class)
+                      nil)))
             create-options {:redirect? false
                             :create-first-block? false
                             :tags (if inline-class-uuid
@@ -283,12 +312,12 @@
                                     ;; one of and not all these classes
                                     (mapv :block/uuid (take 1 classes)))}]
         (p/let [page (if class?
-                       (page-handler/<create-class! page create-options)
+                       (db-page-handler/<create-class! page create-options)
                        (page-handler/<create! page create-options))]
           (:db/id page)))
 
       (and class? page? id)
-      (p/let [_ (page-handler/convert-to-tag! page-entity)]
+      (p/let [_ (db-page-handler/convert-to-tag! page-entity)]
         id)
 
       :else
@@ -297,34 +326,37 @@
 (defn- select-aux
   [block property {:keys [items selected-choices multiple-choices?] :as opts}]
   (let [selected-choices (->> selected-choices
-                           (remove nil?)
-                           (remove #(= :logseq.property/empty-placeholder %)))
+                              (remove nil?)
+                              (remove #(= :logseq.property/empty-placeholder %)))
         clear-value (str "No " (:block/title property))
         clear-value-label [:div.flex.flex-row.items-center.gap-2
                            (ui/icon "x")
                            [:div clear-value]]
         items' (->>
-                 (if (and (seq selected-choices) (not multiple-choices?))
-                   (concat items
-                     [{:value clear-value
-                       :label clear-value-label
-                       :clear? true}])
-                   items)
-                 (remove #(= :logseq.property/empty-placeholder (:value %))))
+                (if (and (seq selected-choices)
+                         (not multiple-choices?)
+                         (not (and (ldb/class? block) (= (:db/ident property) :logseq.property/parent)))
+                         (not= (:db/ident property) :logseq.property.view/type))
+                  (concat items
+                          [{:value clear-value
+                            :label clear-value-label
+                            :clear? true}])
+                  items)
+                (remove #(= :logseq.property/empty-placeholder (:value %))))
         k :on-chosen
         f (get opts k)
         f' (fn [chosen selected?]
              (if (or (and (not multiple-choices?) (= chosen clear-value))
-                   (and multiple-choices? (= chosen [clear-value])))
+                     (and multiple-choices? (= chosen [clear-value])))
                (p/do!
-                 (property-handler/remove-block-property! (state/get-current-repo) (:block/uuid block)
-                   (:db/ident property))
-                 (shui/popup-hide!))
+                (property-handler/remove-block-property! (state/get-current-repo) (:block/uuid block)
+                                                         (:db/ident property))
+                (shui/popup-hide!))
                (f chosen selected?)))]
     (select/select (assoc opts
-                     :selected-choices selected-choices
-                     :items items'
-                     k f'))
+                          :selected-choices selected-choices
+                          :items items'
+                          k f'))
     ;(shui/multi-select-content
     ;  (map #(let [{:keys [value label]} %]
     ;          {:id value :value label}) items') nil opts)
@@ -343,7 +375,7 @@
     "letter-n"))
 
 (rum/defcs ^:large-vars/cleanup-todo select-node < rum/reactive db-mixins/query
-                                                   (rum/local 0 ::refresh-count)
+  (rum/local 0 ::refresh-count)
   [state property
    {:keys [block multiple-choices? dropdown? input-opts on-input] :as opts}
    *result]
@@ -356,101 +388,126 @@
         alias? (= :block/alias (:db/ident property))
         tags-or-alias? (or tags? alias?)
         block (db/entity (:db/id block))
+        result (rum/react *result)
         selected-choices (when block
                            (when-let [v (get block (:db/ident property))]
                              (if (every? de/entity? v)
                                (map :db/id v)
                                [(:db/id v)])))
+        parent-property? (= (:db/ident property) :logseq.property/parent)
+        children-pages (when parent-property? (model/get-structured-children repo (:db/id block)))
         nodes
         (->>
-          (cond
-            (seq classes)
-            (mapcat
-              (fn [class]
-                (if (= :logseq.class/Root (:db/ident class))
-                  (model/get-all-classes repo {:except-root-class? true})
-                  (model/get-class-objects repo (:db/id class))))
-              classes)
+         (cond
+           parent-property?
+           (let [;; Disallows cyclic hierarchies
+                 exclude-ids (-> (set (map (fn [id] (:block/uuid (db/entity id))) children-pages))
+                                 (conj (:block/uuid block))) ; break cycle
+                 options (if (ldb/class? block) (model/get-all-classes repo)
+                             (->> (model/get-all-pages repo)
+                                  (remove (fn [e] (or (ldb/built-in? e) (ldb/property? e))))))
+                 excluded-options (remove (fn [e] (contains? exclude-ids (:block/uuid e))) options)]
+             excluded-options)
 
-            :else
-            (let [result (rum/react *result)]
-              (if (empty? result)
-                (let [v (get block (:db/ident property))]
-                  (remove #(= :logseq.property/empty-placeholder (:db/ident %))
-                    (if (every? de/entity? v) v [v])))
-                (remove (fn [node]
-                          (or (= (:db/id block) (:db/id node))
-                            ;; A page's alias can't be itself
-                            (and alias? (= (or (:db/id (:block/page block))
-                                             (:db/id block))
-                                          (:db/id node)))))
-                  result)))))
+           (seq classes)
+           (mapcat
+            (fn [class]
+              (if (= :logseq.class/Root (:db/ident class))
+                (model/get-all-classes repo {:except-root-class? true})
+                (model/get-class-objects repo (:db/id class))))
+            classes)
+
+           :else
+           (let [property-type (get-in property [:block/schema :type])]
+             (if (empty? result)
+               (let [v (get block (:db/ident property))]
+                 (remove #(= :logseq.property/empty-placeholder (:db/ident %))
+                         (if (every? de/entity? v) v [v])))
+               (remove (fn [node]
+                         (or (= (:db/id block) (:db/id node))
+                             ;; A page's alias can't be itself
+                             (and alias? (= (or (:db/id (:block/page block))
+                                                (:db/id block))
+                                            (:db/id node)))
+                             (when (and property-type (not= property-type :node))
+                               (if (= property-type :page)
+                                 (not (db/page? node))
+                                 (not= property-type (some-> (:block/type node) keyword))))))
+                       result)))))
+
         options (map (fn [node]
                        (let [id (or (:value node) (:db/id node))
                              label (if (integer? id)
-                                     (let [title (subs (:block/title node) 0 256)
+                                     (let [title (subs (title/block-unique-title node) 0 256)
                                            node (or (db/entity id) node)
                                            icon (get-node-icon node)]
-                                       [:div.flex.flex-row.items-center.gap-1
-                                        (when-not (:property/schema.classes property)
-                                          (ui/icon icon {:size 14}))
-                                        [:div title]])
+                                       [:div.flex.flex-col
+                                        (when-not (db/page? node)
+                                          (when-let [breadcrumb (state/get-component :block/breadcrumb)]
+                                            [:div.text-xs.opacity-70.mb-1 {:style {:margin-left 3}}
+                                             (breadcrumb {:search? true} (state/get-current-repo) (:block/uuid block) {})]))
+                                        [:div.flex.flex-row.items-center.gap-1
+                                         (when-not (:property/schema.classes property)
+                                           (ui/icon icon {:size 14}))
+                                         [:div title]]])
                                      (or (:label node) (:block/title node)))]
                          (assoc node
-                           :label-value (:block/title node)
-                           :label label
-                           :value id))) nodes)
+                                :label-value (:block/title node)
+                                :label label
+                                :value id))) nodes)
         classes' (remove (fn [class] (= :logseq.class/Root (:db/ident class))) classes)
         opts' (cond->
-                (merge
-                  opts
-                  {:multiple-choices? multiple-choices?
-                   :items options
-                   :selected-choices selected-choices
-                   :dropdown? dropdown?
-                   :input-default-placeholder (cond
-                                                tags?
-                                                "Set tags"
-                                                alias?
-                                                "Set alias"
-                                                multiple-choices?
-                                                "Choose nodes"
-                                                :else
-                                                "Choose node")
-                   :show-new-when-not-exact-match? true
-                   :extract-chosen-fn :value
-                   :extract-fn (fn [x] (or (:label-value x) (:label x)))
-                   :input-opts input-opts
-                   :on-input (debounce on-input 50)
-                   :on-chosen (fn [chosen selected?]
-                                (p/let [[id new?] (if (integer? chosen)
-                                                    [chosen false]
-                                                    (when-not (string/blank? (string/trim chosen))
-                                                      (p/let [result (<create-page-if-not-exists! property classes' chosen)]
-                                                        [result true])))
-                                        _ (when (and (integer? id) (not (ldb/page? (db/entity id))))
-                                            (db-async/<get-block repo id))]
-                                  (p/do!
-                                    (if id
-                                      (add-or-remove-property-value block property id selected? {})
-                                      (log/error :msg "No :db/id found or created for chosen" :chosen chosen))
-                                    (when new? (swap! *refresh-count inc)))))})
+               (merge
+                opts
+                {:multiple-choices? multiple-choices?
+                 :items options
+                 :selected-choices selected-choices
+                 :dropdown? dropdown?
+                 :input-default-placeholder (cond
+                                              tags?
+                                              "Set tags"
+                                              alias?
+                                              "Set alias"
+                                              multiple-choices?
+                                              "Choose nodes"
+                                              :else
+                                              "Choose node")
+                 :show-new-when-not-exact-match? (if (and parent-property? (contains? (set children-pages) (:db/id block)))
+                                                   false
+                                                   true)
+                 :extract-chosen-fn :value
+                 :extract-fn (fn [x] (or (:label-value x) (:label x)))
+                 :input-opts input-opts
+                 :on-input (debounce on-input 50)
+                 :on-chosen (fn [chosen selected?]
+                              (p/let [[id new?] (if (integer? chosen)
+                                                  [chosen false]
+                                                  (when-not (string/blank? (string/trim chosen))
+                                                    (p/let [result (<create-page-if-not-exists! block property classes' chosen)]
+                                                      [result true])))
+                                      _ (when (and (integer? id) (not (ldb/page? (db/entity id))))
+                                          (db-async/<get-block repo id))]
+                                (p/do!
+                                 (if id
+                                   (add-or-remove-property-value block property id selected? {})
+                                   (log/error :msg "No :db/id found or created for chosen" :chosen chosen))
+                                 (when new? (swap! *refresh-count inc)))))})
 
                 (and (seq classes') (not tags-or-alias?))
                 (assoc
                   ;; Provides additional completion for inline classes on new pages or objects
-                  :transform-fn (fn [results input]
-                                  (if-let [[_ new-page class-input] (and (empty? results) (re-find #"(.*)#(.*)$" input))]
-                                    (let [repo (state/get-current-repo)
-                                          descendent-classes (->> classes'
-                                                               (mapcat #(model/get-class-children repo (:db/id %)))
-                                                               (map #(db/entity repo %)))]
-                                      (->> (concat classes' descendent-classes)
-                                        (filter #(string/includes? (:block/title %) class-input))
-                                        (mapv (fn [p]
-                                                {:value (str new-page "#" (:block/title p))
-                                                 :label (str new-page "#" (:block/title p))}))))
-                                    results))))]
+                 :transform-fn (fn [results input]
+                                 (if-let [[_ new-page class-input] (and (empty? results) (re-find #"(.*)#(.*)$" input))]
+                                   (let [repo (state/get-current-repo)
+                                         descendent-classes (->> classes'
+                                                                 (mapcat #(model/get-structured-children repo (:db/id %)))
+                                                                 (map #(db/entity repo %)))]
+                                     (->> (concat classes' descendent-classes)
+                                          (filter #(string/includes? (:block/title %) class-input))
+                                          (mapv (fn [p]
+                                                  {:value (str new-page "#" (:block/title p))
+                                                   :label (str new-page "#" (:block/title p))}))))
+                                   results))))]
     (select-aux block property opts')))
 
 (rum/defcs property-value-select-node <
@@ -468,16 +525,15 @@
                           "Escape"
                           (when-let [f (:on-chosen opts)] (f))
                           nil))})
-
         opts' (assoc opts
-                :block block
-                :input-opts input-opts
-                :on-input (fn [v]
-                            (if (string/blank? v)
-                              (reset! *result nil)
-                              (p/let [result (search/block-search (state/get-current-repo) v {:enable-snippet? false
-                                                                                              :built-in? false})]
-                                (reset! *result result)))))]
+                     :block block
+                     :input-opts input-opts
+                     :on-input (fn [v]
+                                 (if (string/blank? v)
+                                   (reset! *result nil)
+                                   (p/let [result (search/block-search (state/get-current-repo) v {:enable-snippet? false
+                                                                                                   :built-in? false})]
+                                     (reset! *result result)))))]
     (select-node property opts' *result)))
 
 (rum/defcs select < rum/reactive db-mixins/query
@@ -502,14 +558,14 @@
       (let [schema (:block/schema property)
             type (:type schema)
             closed-values? (seq (:property/closed-values property))
-            ref-type? (db-property-type/ref-property-types type)
+            ref-type? (db-property-type/user-ref-property-types type)
             items (if closed-values?
                     (keep (fn [block]
                             (let [icon (pu/get-block-property-value block :logseq.property/icon)
                                   value (db-property/closed-value-content block)]
                               {:label (if icon
-                                        [:div.flex.flex-row.gap-2
-                                         (icon-component/icon icon)
+                                        [:div.flex.flex-row.gap-1.items-center
+                                         (icon-component/icon icon {:color? true})
                                          value]
                                         value)
                                :value (:db/id block)
@@ -590,14 +646,14 @@
       [:div
        {:tabIndex 0
         :on-click (fn [] (<create-new-block! block property ""))}
-       (property-empty-btn-value)])))
+       (property-empty-btn-value property)])))
 
 (rum/defcs property-block-value < rum/reactive db-mixins/query
-                                  {:init (fn [state]
-                                           (let [block (first (:rum/args state))]
-                                             (when-let [block-id (or (:db/id block) (:block/uuid block))]
-                                               (db-async/<get-block (state/get-current-repo) block-id :children? true)))
-                                           state)}
+  {:init (fn [state]
+           (let [block (first (:rum/args state))]
+             (when-let [block-id (or (:db/id block) (:block/uuid block))]
+               (db-async/<get-block (state/get-current-repo) block-id :children? true)))
+           state)}
   [state value block property page-cp]
   (when value
     (if (state/sub-async-query-loading value)
@@ -612,15 +668,14 @@
               (property-normal-block-value block property v-block)
 
               ;; page/class/etc.
-              (:block/name v-block)
+              (ldb/page? v-block)
               (rum/with-key
                 (page-cp {:disable-preview? true
-                          :hide-close-button? true
                           :tag? class?} v-block)
                 (:db/id v-block))
               :else
               invalid-warning)))
-        (property-empty-btn-value)))))
+        (property-empty-btn-value property)))))
 
 (rum/defc closed-value-item < rum/reactive db-mixins/query
   [value {:keys [inline-text icon?]}]
@@ -633,9 +688,9 @@
           (cond
             icon
             (if icon?
-              [:div.h-6.flex.items-center (icon-component/icon icon)]
+              (icon-component/icon icon {:color? true})
               [:div.flex.flex-row.items-center.gap-2.h-6
-               (icon-component/icon icon)
+               (icon-component/icon icon {:color? true})
                (when value'
                  [:span value'])])
 
@@ -659,26 +714,25 @@
                             (shui/button {:variant :ghost
                                           :size :sm
                                           :class "px-0 py-0 h-4"}
-                              (ui/icon "edit" {:size 14})))])]
+                                         (ui/icon "edit" {:size 14})))])]
     [:div.select-item.cursor-pointer
      (cond
        (= value :logseq.property/empty-placeholder)
-       (property-empty-btn-value)
+       (property-empty-btn-value property)
 
        (or (ldb/page? value)
-         (and (seq (:block/tags value))
-           ;; FIXME: page-cp should be renamed to node-cp and
-           ;; support this case and maybe other complex cases.
-           (not (string/includes? (:block/title value) "[["))))
+           (and (seq (:block/tags value))
+                ;; FIXME: page-cp should be renamed to node-cp and
+                ;; support this case and maybe other complex cases.
+                (not (string/includes? (:block/title value) "[["))))
        (when value
-         (rum/with-key
-           (page-cp {:disable-preview? true
-                     :tag? tag?
-                     :hide-close-button? true
-                     :meta-click? other-position?} value)
+          (rum/with-key
+            (page-cp {:disable-preview? true
+                      :tag? tag?
+                      :meta-click? other-position?} value)
            (:db/id value)))
 
-       (= type :node)
+       (contains? #{:node :class :property :page} type)
        (when-let [reference (state/get-component :block/reference)]
          (reference {} (:block/uuid value)))
 
@@ -700,10 +754,10 @@
   (let [*el (rum/use-ref nil)]
     ;; Open popover initially when editing a property
     (rum/use-effect!
-      (fn []
-        (when (:editing? opts)
-          (.click (rum/deref *el))))
-      [(:editing? opts)])
+     (fn []
+       (when (:editing? opts)
+         (.click (rum/deref *el))))
+     [(:editing? opts)])
     (let [schema (:block/schema property)
           type (get schema :type :default)
           select-opts' (assoc select-opts :multiple-choices? false)
@@ -713,33 +767,33 @@
                              (:number :url :default)
                              (select block property select-opts' opts)
 
-                             (:node :date)
+                             (:node :class :property :page :date)
                              (property-value-select-node block property select-opts' opts))])
           trigger-id (str "trigger-" (:container-id opts) "-" (:db/id block) "-" (:db/id property))
           show! (fn [e]
                   (let [target (.-target e)]
                     (when-not (or config/publishing?
-                                (util/shift-key? e)
-                                (util/meta-key? e)
-                                (util/link? target)
-                                (when-let [node (.closest target "a")]
-                                  (not (or (d/has-class? node "page-ref")
-                                         (d/has-class? node "tag")))))
+                                  (util/shift-key? e)
+                                  (util/meta-key? e)
+                                  (util/link? target)
+                                  (when-let [node (.closest target "a")]
+                                    (not (or (d/has-class? node "page-ref")
+                                             (d/has-class? node "tag")))))
 
                       (shui/popup-show! target popup-content
-                        {:align "start"
-                         :as-dropdown? true
-                         :auto-focus? true
-                         :trigger-id trigger-id}))))]
+                                        {:align "start"
+                                         :as-dropdown? true
+                                         :auto-focus? true
+                                         :trigger-id trigger-id}))))]
       (shui/trigger-as
-        (if (:other-position? opts) :div :div.jtrigger.flex.flex-1.w-full)
-        {:ref *el
-         :id trigger-id
-         :tabIndex 0
-         :on-click show!}
-        (if (string/blank? value)
-          (property-empty-text-value)
-          (value-f))))))
+       (if (:other-position? opts) :div :div.jtrigger.flex.flex-1.w-full)
+       {:ref *el
+        :id trigger-id
+        :tabIndex 0
+        :on-click show!}
+       (if (string/blank? value)
+         (property-empty-text-value)
+         (value-f))))))
 
 (defn- property-value-inner
   [block property value {:keys [inline-text page-cp
@@ -747,7 +801,7 @@
   (let [schema (:block/schema property)
         multiple-values? (db-property/many? property)
         class (str (when-not row? "flex flex-1 ")
-                (when multiple-values? "property-value-content"))
+                   (when multiple-values? "property-value-content"))
         type (:type schema)]
     [:div.cursor-text
      {:id (or dom-id (random-uuid))
@@ -759,7 +813,7 @@
                     (<create-new-block! block property "")))}
      (cond
        (and (= type :default) (nil? (:block/title value)))
-       [:div.jtrigger (property-empty-btn-value)]
+       [:div.jtrigger (property-empty-btn-value property)]
 
        (= type :default)
        (property-block-value value block property page-cp)
@@ -775,8 +829,8 @@
         schema (:block/schema property)
         type (get schema :type :default)
         editing? (or editing?
-                   (and (state/sub-editing? [container-id (:block/uuid block)])
-                     (= (:db/id property) (:db/id (:property (state/get-editor-action-data))))))
+                     (and (state/sub-editing? [container-id (:block/uuid block)])
+                          (= (:db/id property) (:db/id (:property (state/get-editor-action-data))))))
         select-type?' (select-type? property type)
         closed-values? (seq (:property/closed-values property))
         select-opts {:on-chosen on-chosen}
@@ -786,11 +840,15 @@
     (if (= :logseq.property/icon (:db/ident property))
       (icon-row block editing?)
       (if (and select-type?'
-            (not (and (not closed-values?) (= type :date))))
-        (single-value-select block property value
-          (fn [] (select-item property type value opts))
-          select-opts
-          (assoc opts :editing? editing?))
+               (not (and (not closed-values?) (= type :date))))
+        (let [value (if (and (nil? value) (= :logseq.property.view/type (:db/ident property)))
+                      ;; TODO: remove this hack once default value is supported
+                      (db/entity :logseq.property.view/type.table)
+                      value)]
+          (single-value-select block property value
+                               (fn [] (select-item property type value opts))
+                               select-opts
+                               (assoc opts :editing? editing?)))
         (case type
           :date
           (property-value-date-picker block property value (merge opts {:editing? editing?}))
@@ -828,7 +886,7 @@
                                           select-opts
                                           {:dropdown? false})]
                         [:div.property-select
-                         (if (= :node type)
+                         (if (contains? #{:node :page :class :property} type)
                            (property-value-select-node block property
                              select-opts
                              opts)
@@ -875,53 +933,77 @@
   [state block property v {:keys [show-tooltip?]
                            :as opts}]
   (ui/catch-error
-    (ui/block-error "Something wrong" {})
-    (let [block-cp (state/get-component :block/blocks-container)
-          opts (merge opts
-                 {:page-cp (state/get-component :block/page-cp)
-                  :inline-text (state/get-component :block/inline-text)
-                  :editor-box (state/get-component :editor/box)
-                  :block-cp block-cp
-                  :properties-cp (state/get-component :block/properties-cp)})
-          dom-id (str "ls-property-" (:db/id block) "-" (:db/id property))
-          editor-id (str dom-id "-editor")
-          schema (:block/schema property)
-          type (some-> schema (get :type :default))
-          multiple-values? (db-property/many? property)
-          v (cond
-              (and multiple-values? (or (set? v) (and (coll? v) (empty? v)) (nil? v)))
-              v
-              multiple-values?
-              #{v}
-              (set? v)
-              (first v)
-              :else
-              v)
-          empty-value? (when (coll? v) (= :logseq.property/empty-placeholder (:db/ident (first v))))
-          closed-values? (seq (:property/closed-values property))
-          value-cp [:div.property-value-inner
-                    {:data-type type
-                     :class (str (when empty-value? "empty-value")
-                              (when-not (:other-position? opts) " w-full"))}
-                    (cond
-                      (and multiple-values? (= type :default) (not closed-values?))
-                      (property-normal-block-value block property v)
+   (ui/block-error "Something wrong" {})
+   (let [block-cp (state/get-component :block/blocks-container)
+         properties-cp (state/get-component :block/properties-cp)
+         opts (merge opts
+                     {:page-cp (state/get-component :block/page-cp)
+                      :inline-text (state/get-component :block/inline-text)
+                      :editor-box (state/get-component :editor/box)
+                      :block-cp block-cp
+                      :properties-cp :properties-cp})
+         dom-id (str "ls-property-" (:db/id block) "-" (:db/id property))
+         editor-id (str dom-id "-editor")
+         schema (:block/schema property)
+         type (some-> schema (get :type :default))
+         multiple-values? (db-property/many? property)
+         v (cond
+             (and multiple-values? (or (set? v) (and (coll? v) (empty? v)) (nil? v)))
+             v
+             multiple-values?
+             #{v}
+             (set? v)
+             (first v)
+             :else
+             v)
+         empty-value? (when (coll? v) (= :logseq.property/empty-placeholder (:db/ident (first v))))
+         closed-values? (seq (:property/closed-values property))
+         value-cp [:div.property-value-inner
+                   {:data-type type
+                    :class (str (when empty-value? "empty-value")
+                                (when-not (:other-position? opts) " w-full"))}
+                   (cond
+                     (= (:db/ident property) :logseq.property.class/properties)
+                     (properties-cp {} block {:selected? false
+                                              :class-schema? true})
 
-                      multiple-values?
-                      (multiple-values block property opts schema)
+                     (and multiple-values? (= type :default) (not closed-values?))
+                     (property-normal-block-value block property v)
 
-                      :else
-                      (property-scalar-value block property v
-                        (merge
-                          opts
-                          {:editor-id editor-id
-                           :dom-id dom-id})))]]
-      (if show-tooltip?
-        (shui/tooltip-provider
-          (shui/tooltip
-            {:delayDuration 1200}
-            (shui/tooltip-trigger
-              {:onFocusCapture #(util/stop-propagation %)} value-cp)
-            (shui/tooltip-content
-              (str "Change " (:block/title property)))))
-        value-cp))))
+                     multiple-values?
+                     (multiple-values block property opts schema)
+
+                     :else
+                     (let [value-cp (property-scalar-value block property v
+                                      (merge
+                                        opts
+                                        {:editor-id editor-id
+                                         :dom-id dom-id}))
+                           parent? (= (:db/ident property) :logseq.property/parent)
+                           page-ancestors (when parent?
+                                            (let [ancestor-pages (loop [parents [block]]
+                                                                   (if-let [parent (:logseq.property/parent (last parents))]
+                                                                     (when-not (contains? (set parents) parent)
+                                                                       (recur (conj parents parent)))
+                                                                     parents))]
+                                              (->> (reverse ancestor-pages)
+                                                   (remove (fn [e] (= (:db/id block) (:db/id e))))
+                                                   butlast)))]
+                       (if (seq page-ancestors)
+                         [:div.flex.flex-1.items-center.gap-1
+                          (interpose [:span.opacity-50.text-sm " > "]
+                                     (concat
+                                      (map (fn [{title :block/title :as ancestor}]
+                                             [:a {:on-click #(route-handler/redirect-to-page! (:block/uuid ancestor))} title])
+                                           page-ancestors)
+                                      [value-cp]))]
+                         value-cp)))]]
+     (if show-tooltip?
+       (shui/tooltip-provider
+        (shui/tooltip
+         {:delayDuration 1200}
+         (shui/tooltip-trigger
+          {:onFocusCapture #(util/stop-propagation %)} value-cp)
+         (shui/tooltip-content
+          (str "Change " (:block/title property)))))
+       value-cp))))

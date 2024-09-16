@@ -46,7 +46,8 @@
             [logseq.shui.ui :as shui]
             [promesa.core :as p]
             [reitit.frontend.easy :as rfe]
-            [rum.core :as rum]))
+            [rum.core :as rum]
+            [frontend.rum :as frontend-rum]))
 
 (defn- get-page-name
   [state]
@@ -110,44 +111,64 @@
 
   (rum/defc dummy-block
     [page]
-    (when page
-      (let [[hover set-hover!] (rum/use-state false)
-            click-handler-fn (fn []
-                               (p/let [result (editor-handler/insert-first-page-block-if-not-exists! (:block/uuid page))
-                                       result (when (string? result) (:tx-data (ldb/read-transit-str result)))
-                                       first-child-id (first (map :block/uuid result))
-                                       first-child (when first-child-id (db/entity [:block/uuid first-child-id]))]
-                                 (when first-child
-                                   (editor-handler/edit-block! first-child :max {:container-id :unknown-container}))))
-            drop-handler-fn (fn [^js event]
-                              (util/stop event)
-                              (p/let [block-uuids (state/get-selection-block-ids)
-                                      lookup-refs (map (fn [id] [:block/uuid id]) block-uuids)
-                                      selected (db/pull-many (state/get-current-repo) '[*] lookup-refs)
-                                      blocks (if (seq selected) selected [@component-block/*dragging-block])
-                                      _ (editor-handler/insert-first-page-block-if-not-exists! (:block/uuid page))]
-                                (js/setTimeout #(let [target-block page]
-                                                  (dnd/move-blocks event blocks target-block nil :sibling))
-                                               0)))]
-        [:div.ls-dummy-block
-         {:style {:width "100%"
-                ;; The same as .dnd-separator
-                  :border-top (if hover
-                                "3px solid #ccc"
-                                nil)}}
-         [:div.flex.items-center
-          [:div.flex.items-center.mx-1 {:style {:height 24}}
-           [:span.bullet-container.cursor
-            [:span.bullet]]]
-          (shui/trigger-as :div.flex.flex-1
-                           {:tabIndex 0
-                            :on-click click-handler-fn
-                            :on-drag-enter #(set-hover! true)
-                            :on-drag-over #(util/stop %)
-                            :on-drop drop-handler-fn
-                            :on-drag-leave #(set-hover! false)}
-                           [:span.opacity-70.text
-                            "Click here to edit..."])]]))))
+    (let [[hover set-hover!] (rum/use-state false)
+          click-handler-fn (fn []
+                             (p/let [result (editor-handler/insert-first-page-block-if-not-exists! (:block/uuid page))
+                                     result (when (string? result) (:tx-data (ldb/read-transit-str result)))
+                                     first-child-id (first (map :block/uuid result))
+                                     first-child (when first-child-id (db/entity [:block/uuid first-child-id]))]
+                               (when first-child
+                                 (editor-handler/edit-block! first-child :max {:container-id :unknown-container}))))
+          drop-handler-fn (fn [^js event]
+                            (util/stop event)
+                            (p/let [block-uuids (state/get-selection-block-ids)
+                                    lookup-refs (map (fn [id] [:block/uuid id]) block-uuids)
+                                    selected (db/pull-many (state/get-current-repo) '[*] lookup-refs)
+                                    blocks (if (seq selected) selected [@component-block/*dragging-block])
+                                    _ (editor-handler/insert-first-page-block-if-not-exists! (:block/uuid page))]
+                              (js/setTimeout #(let [target-block page]
+                                                (dnd/move-blocks event blocks target-block nil :sibling))
+                                0)))
+          *dummy-block-uuid (rum/use-ref (random-uuid))
+          *el-ref (rum/use-ref nil)
+          _ (frontend-rum/use-atom (@state/state :selection/blocks))
+          selection-ids (state/get-selection-block-ids)
+          selected? (contains? (set selection-ids) (rum/deref *dummy-block-uuid))
+          idstr (str (rum/deref *dummy-block-uuid))
+          focus! (fn [] (js/setTimeout #(some-> (rum/deref *el-ref) (.focus)) 16))]
+
+      ;; mounted
+      ;(rum/use-effect! #(focus!) [])
+      (rum/use-effect! #(if selected? (focus!)
+                          (some-> (rum/deref *el-ref) (.blur))) [selected?])
+
+      (shui/trigger-as
+        :div.ls-dummy-block.ls-block
+
+        {:style {:width "100%"
+                 ;; The same as .dnd-separator
+                 :border-top (if hover
+                               "3px solid #ccc"
+                               nil)}
+         :ref *el-ref
+         :tabIndex 0
+         :on-click click-handler-fn
+         :id idstr
+         :blockid idstr
+         :class (when selected? "selected")}
+
+        [:div.flex.items-center
+         [:div.flex.items-center.mx-1 {:style {:height 24}}
+          [:span.bullet-container.cursor
+           [:span.bullet]]]
+
+         [:div.flex.flex-1
+          {:on-drag-enter #(set-hover! true)
+           :on-drag-over #(util/stop %)
+           :on-drop drop-handler-fn
+           :on-drag-leave #(set-hover! false)}
+          [:span.opacity-70.text
+           "Click here to edit..."]]]))))
 
 (rum/defc add-button
   [args]
@@ -197,7 +218,7 @@
           db-based? (config/db-based-graph? repo)]
       [:<>
        (when (and db-based? (or (ldb/class? block) (ldb/property? block)))
-         [:div.font-medium.mt-8.ml-1.opacity-50
+         [:div.font-medium.mt-8.ml-1.pb-3.opacity-50
           "Notes"])
 
        (cond
@@ -207,7 +228,7 @@
          (and
           (not loading?)
           (not block?)
-          (empty? children))
+          (empty? children) page-e)
          (dummy-block page-e)
 
          :else
@@ -399,9 +420,12 @@
                                                                                            (:block/format page))))
                        :else title))])]])))))
 
-(rum/defc db-page-title
-  [state repo page whiteboard-page?]
-  [:div.ls-page-title.flex.flex-1.w-full.content.items-start
+(rum/defcs db-page-title < rum/reactive
+  (rum/local false ::hover?)
+  [state repo page whiteboard-page? sidebar? container-id]
+  (let [*hover? (::hover? state)
+        hover? (rum/react *hover?)]
+    [:div.ls-page-title.flex.flex-1.w-full.content.items-start
      {:class (when-not whiteboard-page? "title")
       :on-pointer-down (fn [e]
                          (when (util/right-click? e)
@@ -409,20 +433,40 @@
                                                                   :page-entity page})))
       :on-click (fn [e]
                   (when-not (= (.-nodeName (.-target e)) "INPUT")
-                    (cond
-                      (util/meta-key? e)
-                      (do
-                        (.preventDefault e)
-                        (route-handler/redirect-to-page! (:block/uuid page)))
-                      (gobj/get e "shiftKey")
-                      (do
-                        (.preventDefault e)
-                        (state/sidebar-add-block! repo (:db/id page) :page)))))}
+                    (when (gobj/get e "shiftKey")
+                      (.preventDefault e)
+                      (state/sidebar-add-block! repo (:db/id page) :page))))}
 
-     [:div.w-full
+     [:div.w-full.relative {:on-mouse-over #(reset! *hover? true)
+                            :on-mouse-leave (fn []
+                                              (reset! *hover? false))}
+      (when hover?
+        [:div.absolute.-top-3.left-0.fade-in
+         [:div.flex.flex-row.items-center.gap-2
+          (when-not (:logseq.property/icon (db/entity (:db/id page)))
+            (shui/button
+             {:variant :outline
+              :size :sm
+              :class "px-2 py-0 h-4 text-xs text-muted-foreground"
+              :on-click (fn [e]
+                          (state/pub-event! [:editor/new-property {:property-key "Icon"
+                                                                   :block page
+                                                                   :target (.-target e)}]))}
+             "Add icon"))
+
+          (shui/button
+           {:variant :outline
+            :size :sm
+            :class "px-2 py-0 h-4 text-xs text-muted-foreground"
+            :on-click (fn [e]
+                        (state/pub-event! [:editor/new-property {:block page
+                                                                 :target (.-target e)}]))}
+           "Set property")]])
       (component-block/block-container {:page-title? true
+                                        :hide-title? sidebar?
                                         :hide-children? true
-                                        :container-id (:container-id state)} page)]])
+                                        :container-id container-id
+                                        :from-journals? (contains? #{:home :all-journals} (get-in (state/get-route-match) [:data :name]))} page)]]))
 
 (defn- page-mouse-over
   [e *control-show? *all-collapsed?]
@@ -508,6 +552,8 @@
           page (get-page-entity page-name)
           block-id (:block/uuid page)
           block? (some? (:block/page page))
+          class-page? (ldb/class? page)
+          property-page? (ldb/property? page)
           journal? (db/journal-page? page-name)
           db-based? (config/db-based-graph? repo)
           fmt-journal? (boolean (date/journal-title->int page-name))
@@ -525,7 +571,7 @@
           block-or-whiteboard? (or block? whiteboard?)
           home? (= :home (state/get-current-route))]
       (when (or page-name block-or-whiteboard?)
-        [:div.flex-1.page.relative
+        [:div.flex-1.page.relative.cp__page-inner-wrap
          (merge (if (seq (:block/tags page))
                   (let [page-names (map :block/title (:block/tags page))]
                     (when (seq page-names)
@@ -533,12 +579,14 @@
                   {})
 
                 {:key path-page-name
-                 :class (util/classnames [{:is-journals (or journal? fmt-journal?)}])})
+                 :class (util/classnames [{:is-journals (or journal? fmt-journal?)
+                                           :is-node-page (or class-page? property-page?)}])})
 
          (if (and whiteboard-page? (not sidebar?))
            [:div ((state/get-component :whiteboard/tldraw-preview) (:block/uuid page))] ;; FIXME: this is not reactive
            [:div.relative.grid.gap-2.page-inner
-            (when (and (not sidebar?) (not block?))
+            (when (or (and db-based? (not block?))
+                      (and (not db-based?) (not sidebar?) (not block?)))
               [:div.flex.flex-row.space-between
                (when (and (or (mobile-util/native-platform?) (util/mobile?)) (not db-based?))
                  [:div.flex.flex-row.pr-2
@@ -550,16 +598,16 @@
                   (page-blocks-collapse-control title *control-show? *all-collapsed?)])
                (when (and (not whiteboard?) (ldb/page? page))
                  (if db-based?
-                   (db-page-title state repo page whiteboard-page?)
+                   (db-page-title repo page whiteboard-page? sidebar? (:container-id state))
                    (page-title-cp page {:journal? journal?
                                         :fmt-journal? fmt-journal?
                                         :preview? preview?})))
                (lsp-pagebar-slot)])
 
-            (when db-based?
-              (db-page/page-info page))
+            (when (and db-based? (ldb/property? page))
+              (db-page/configure-property page))
 
-            (when (and db-based? (ldb/class? page))
+            (when (and db-based? class-page?)
               (objects/class-objects page))
 
             (when (and db-based? (ldb/property? page))
@@ -571,12 +619,13 @@
                 [:div.mb-4
                  (component-block/breadcrumb config repo block-id {:level-limit 3})]))
 
-            (page-blocks-cp repo page (merge option {:sidebar? sidebar?
-                                                     :container-id (:container-id state)
-                                                     :whiteboard? whiteboard?}))])
+            [:div.ls-page-blocks
+             (page-blocks-cp repo page (merge option {:sidebar? sidebar?
+                                                      :container-id (:container-id state)
+                                                      :whiteboard? whiteboard?}))]])
 
          (when (and (not preview?) @(::main-ready? state))
-           [:div {:style {:padding-left 9}}
+           [:div.ls-page-appendix-els {:style {:padding-left 9}}
             (when today?
               (today-queries repo today? sidebar?))
 
@@ -586,7 +635,7 @@
             (when (and (not block?) (not db-based?))
               (tagged-pages repo page page-title))
 
-            (when (ldb/class? page)
+            (when (and (ldb/page? page) (:logseq.property/_parent page))
               (class-component/class-children page))
 
             ;; referenced blocks
@@ -937,13 +986,7 @@
                     (seq focus-nodes)
                     (not (:orphan-pages? settings)))
                 (graph-handler/n-hops graph focus-nodes n-hops)
-                graph)
-        graph (update graph :links (fn [links]
-                                     (let [nodes (set (map :id (:nodes graph)))]
-                                       (remove (fn [link]
-                                                 (and (not (nodes (:source link)))
-                                                   (not (nodes (:target link)))))
-                                         links))))]
+                graph)]
     [:div.relative#global-graph
      (graph/graph-2d {:nodes (:nodes graph)
                       :links (:links graph)
@@ -964,7 +1007,7 @@
   [nodes filters]
   (if (seq filters)
     (let [filter-patterns (map #(re-pattern (str "(?i)" (util/regex-escape %))) filters)]
-      (filter (fn [node] (some #(re-find % (:id node)) filter-patterns)) nodes))
+      (filter (fn [node] (some #(re-find % (:label node)) filter-patterns)) nodes))
     nodes))
 
 (rum/defcs global-graph < rum/reactive

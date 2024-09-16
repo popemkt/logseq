@@ -265,7 +265,7 @@
 
 (defn <get-tag-objects
   [graph class-id]
-  (let [class-children (db-model/get-class-children graph class-id)
+  (let [class-children (db-model/get-structured-children graph class-id)
         class-ids (distinct (conj class-children class-id))]
     (<q graph {:transact-db? true}
         '[:find [(pull ?b [*]) ...]
@@ -280,8 +280,7 @@
       '[:find [(pull ?b [*]) ...]
         :in $ ?class-id
         :where
-        [?class-id :db/ident ?ident]
-        [?b :logseq.property/view-for ?ident]]
+        [?b :logseq.property/view-for ?class-id]]
       class-id))
 
 (defn <get-tags

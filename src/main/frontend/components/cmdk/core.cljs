@@ -16,6 +16,7 @@
    [frontend.handler.whiteboard :as whiteboard-handler]
    [frontend.handler.notification :as notification]
    [frontend.modules.shortcut.core :as shortcut]
+   [frontend.handler.db-based.page :as db-page-handler]
    [frontend.search :as search]
    [frontend.state :as state]
    [frontend.ui :as ui]
@@ -47,14 +48,17 @@
 
 (def GROUP-LIMIT 5)
 
-(def search-actions
-  [{:filter {:group :current-page} :text "Search only current page" :info "Add filter to search" :icon-theme :gray :icon "page"}
-   {:filter {:group :nodes} :text "Search only nodes" :info "Add filter to search" :icon-theme :gray :icon "letter-n"}
-   {:filter {:group :commands} :text "Search only commands" :info "Add filter to search" :icon-theme :gray :icon "command"}
-   {:filter {:group :files} :text "Search only files" :info "Add filter to search" :icon-theme :gray :icon "file"}
-   {:filter {:group :themes} :text "Search only themes" :info "Add filter to search" :icon-theme :gray :icon "palette"}])
-
-(def filters search-actions)
+(defn filters
+  []
+  (let [current-page (state/get-current-page)]
+    (->>
+     [(when current-page
+        {:filter {:group :current-page} :text "Search only current page" :info "Add filter to search" :icon-theme :gray :icon "page"})
+      {:filter {:group :nodes} :text "Search only nodes" :info "Add filter to search" :icon-theme :gray :icon "letter-n"}
+      {:filter {:group :commands} :text "Search only commands" :info "Add filter to search" :icon-theme :gray :icon "command"}
+      {:filter {:group :files} :text "Search only files" :info "Add filter to search" :icon-theme :gray :icon "file"}
+      {:filter {:group :themes} :text "Search only themes" :info "Add filter to search" :icon-theme :gray :icon "palette"}]
+     (remove nil?))))
 
 ;; The results are separated into groups, and loaded/fetched/queried separately
 (def default-results
@@ -230,22 +234,23 @@
                (ldb/whiteboard? entity)
                "whiteboard"
                :else
-               "page")]
+               "page")
+        title (title/block-unique-title page)
+        title' (if source-page (str title " -> alias: " (:block/title source-page)) title)]
     (hash-map :icon icon
               :icon-theme :gray
-              :text (title/block-unique-title page)
+              :text title'
               :source-page (or source-page page))))
 
 (defn- block-item
   [repo block current-page !input]
   (let [id (:block/uuid block)
-        object? (seq (:block/tags block))
         text (title/block-unique-title block)
         icon "letter-n"]
     {:icon icon
      :icon-theme :gray
      :text (highlight-content-query text @!input)
-     :header (when-not object? (block/breadcrumb {:search? true} repo id {}))
+     :header (when-not (db/page? block) (block/breadcrumb {:search? true} repo id {}))
      :current-page? (when-let [page-id (:block/page block)]
                       (= page-id (:block/uuid current-page)))
      :source-block block}))
@@ -326,8 +331,8 @@
         input @!input
         q (or (get-filter-q input) "")
         matched-items (if (string/blank? q)
-                        filters
-                        (search/fuzzy-search filters q {:extract-fn :text}))]
+                        (filters)
+                        (search/fuzzy-search (filters) q {:extract-fn :text}))]
     (swap! !results update group merge {:status :success :items matched-items})))
 
 (defmethod load-results :current-page [group state]
@@ -490,9 +495,9 @@
     (p/do!
       (cond
         create-class?
-        (page-handler/<create-class! class
-                                     {:redirect? false
-                                      :create-first-block? false})
+        (db-page-handler/<create-class! class
+                                        {:redirect? false
+                                         :create-first-block? false})
         create-whiteboard? (whiteboard-handler/<create-new-whiteboard-and-redirect! @!input)
         create-page? (page-handler/<create! @!input {:redirect? true}))
       (state/close-modal!)

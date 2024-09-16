@@ -7,11 +7,19 @@
   "Map of built-in classes for db graphs with their :db/ident as keys"
   {:logseq.class/Root {:title "Root tag"}
 
+   :logseq.class/Query
+   {:title "Query"
+    :properties {:logseq.property/icon {:type :tabler-icon :id "search"}}}
+
    :logseq.class/Task
    {:title "Task"
     :schema {:properties [:logseq.task/status :logseq.task/priority :logseq.task/deadline]}}
 
    :logseq.class/Card {:title "Card"}
+
+   :logseq.class/Journal {:title "Journal"
+                          :properties {:logseq.property.journal/title-format "MMM do, yyyy"}}
+
    ;; TODO: Add more classes such as :book, :paper, :movie, :music, :project
    })
 

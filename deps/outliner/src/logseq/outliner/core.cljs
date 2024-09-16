@@ -7,6 +7,7 @@
             [logseq.db.frontend.schema :as db-schema]
             [logseq.outliner.datascript :as ds]
             [logseq.outliner.tree :as otree]
+            [logseq.outliner.validate :as outliner-validate]
             [logseq.common.util :as common-util]
             [malli.core :as m]
             [malli.util :as mu]
@@ -133,41 +134,41 @@
 
 (comment
   (defn- create-linked-page-when-save
-   [repo conn db date-formatter txs-state block-entity m tags-has-class?]
-   (if tags-has-class?
-     (let [content (state/get-edit-content)
-           linked-page (some-> content #(gp-block/extract-plain repo %))
-           sanity-linked-page (some-> linked-page util/page-name-sanity-lc)
-           linking-page? (and (not (string/blank? sanity-linked-page))
-                              @(:editor/create-page? @state/state))]
-       (when linking-page?
-         (let [existing-ref-id (some (fn [r]
-                                       (when (= sanity-linked-page (:block/name r))
-                                         (:block/uuid r)))
-                                     (:block/refs m))
-               page-m (gp-block/page-name->map linked-page (or existing-ref-id true)
-                                               db true date-formatter)
-               _ (when-not (d/entity db [:block/uuid (:block/uuid page-m)])
-                   (ldb/transact! conn [page-m]))
-               merge-tx (let [children (:block/_parent block-entity)
-                              page (d/entity db [:block/uuid (:block/uuid page-m)])
-                              [target sibling?] (get-last-child-or-self db page)]
-                          (when (seq children)
-                            (:tx-data
-                             (move-blocks repo conn children target
-                                          {:sibling? sibling?
-                                           :outliner-op :move-blocks}))))]
-           (swap! txs-state (fn [txs]
-                              (concat txs
-                                      [(assoc page-m
-                                              :block/tags (:block/tags m)
-                                              :block/format :markdown)
-                                       {:db/id (:db/id block-entity)
-                                        :block/title ""
-                                        :block/refs []
-                                        :block/link [:block/uuid (:block/uuid page-m)]}]
-                                      merge-tx))))))
-     (reset! (:editor/create-page? @state/state) false))))
+    [repo conn db date-formatter txs-state block-entity m tags-has-class?]
+    (if tags-has-class?
+      (let [content (state/get-edit-content)
+            linked-page (some-> content #(gp-block/extract-plain repo %))
+            sanity-linked-page (some-> linked-page util/page-name-sanity-lc)
+            linking-page? (and (not (string/blank? sanity-linked-page))
+                               @(:editor/create-page? @state/state))]
+        (when linking-page?
+          (let [existing-ref-id (some (fn [r]
+                                        (when (= sanity-linked-page (:block/name r))
+                                          (:block/uuid r)))
+                                      (:block/refs m))
+                page-m (gp-block/page-name->map linked-page (or existing-ref-id true)
+                                                db true date-formatter)
+                _ (when-not (d/entity db [:block/uuid (:block/uuid page-m)])
+                    (ldb/transact! conn [page-m]))
+                merge-tx (let [children (:block/_parent block-entity)
+                               page (d/entity db [:block/uuid (:block/uuid page-m)])
+                               [target sibling?] (get-last-child-or-self db page)]
+                           (when (seq children)
+                             (:tx-data
+                              (move-blocks repo conn children target
+                                           {:sibling? sibling?
+                                            :outliner-op :move-blocks}))))]
+            (swap! txs-state (fn [txs]
+                               (concat txs
+                                       [(assoc page-m
+                                               :block/tags (:block/tags m)
+                                               :block/format :markdown)
+                                        {:db/id (:db/id block-entity)
+                                         :block/title ""
+                                         :block/refs []
+                                         :block/link [:block/uuid (:block/uuid page-m)]}]
+                                       merge-tx))))))
+      (reset! (:editor/create-page? @state/state) false))))
 
 (defn- file-rebuild-block-refs
   [repo db date-formatter {:block/keys [properties] :as block}]
@@ -232,40 +233,6 @@
          (map (fn [tag]
                 [:db/retract (:db/id block) :block/tags (:db/id tag)])))))
 
-;; TODO: Validate tagless pages and other block types
-(defn- validate-unique-by-name-tag-and-block-type
-  [db new-title {:block/keys [tags] :as entity}]
-  ;; (prn :entity entity)
-  (cond
-    (ldb/page? entity)
-    (when-let [res (seq (d/q '[:find [(pull ?b [* {:block/tags [:block/title]}])]
-                               :in $ ?title [?tag-id ...]
-                               :where
-                               [?b :block/title ?title]
-                               [?b :block/tags ?tag-id]
-                               [?b :block/type "page"]]
-                             db
-                             new-title
-                             (map :db/id tags)))]
-      (throw (ex-info "Duplicate tagged page"
-                      {:type :notification
-                       :payload {:message (str "Another page with the new name already exists for tag " (pr-str (-> res first :block/tags first :block/title)))
-                                 :type :error}})))
-    :else
-    (when-let [res (seq (d/q '[:find [(pull ?b [* {:block/tags [:block/title]}])]
-                               :in $ ?title [?tag-id ...]
-                               :where
-                               [?b :block/title ?title]
-                               [?b :block/tags ?tag-id]
-                               [(missing? $ ?b :block/type)]]
-                             db
-                             new-title
-                             (map :db/id tags)))]
-      (throw (ex-info "Duplicate tagged block"
-                      {:type :notification
-                       :payload {:message (str "Another block with the new name already exists for tag " (pr-str (-> res first :block/tags first :block/title)))
-                                 :type :error}})))))
-
 (extend-type Entity
   otree/INode
   (-save [this txs-state conn repo _date-formatter {:keys [retract-attributes? retract-attributes]
@@ -306,13 +273,13 @@
                m*)
           _ (when (and db-based?
                       ;; page or object changed?
-                       (and (or (ldb/page? block-entity) (seq (:block/tags block-entity)))
+                       (and (or (ldb/page? block-entity) (ldb/object? block-entity))
                             (:block/title m*)
                             (not= (:block/title m*) (:block/title block-entity))))
-              (validate-unique-by-name-tag-and-block-type db (:block/title m*) block-entity))
+              (outliner-validate/validate-block-title db (:block/title m*) block-entity))
           m (cond-> m*
               db-based?
-              (dissoc :block/priority :block/marker :block/properties-order))]
+              (dissoc :block/pre-block? :block/priority :block/marker :block/properties-order))]
       ;; Ensure block UUID never changes
       (let [e (d/entity db db-id)]
         (when (and e block-uuid)
@@ -547,8 +514,8 @@
                      (cond
                        (or (map? lookup) (vector? lookup) (de/entity? lookup))
                        (when-let [uuid' (if (and (vector? lookup) (= (first lookup) :block/uuid))
-                                         (get uuids (last lookup))
-                                         (get id->new-uuid (:db/id lookup)))]
+                                          (get uuids (last lookup))
+                                          (get id->new-uuid (:db/id lookup)))]
                          [:block/uuid uuid'])
 
                        (integer? lookup)
@@ -746,18 +713,20 @@
   [:pre [(seq blocks)]]
   (let [top-level-blocks (filter-top-level-blocks @conn blocks)
         non-consecutive? (and (> (count top-level-blocks) 1) (seq (ldb/get-non-consecutive-blocks @conn top-level-blocks)))
-        top-level-blocks (get-top-level-blocks top-level-blocks non-consecutive?)
+        top-level-blocks (->> (get-top-level-blocks top-level-blocks non-consecutive?)
+                              (remove ldb/page?))
         txs-state (ds/new-outliner-txs-state)
         block-ids (map (fn [b] [:block/uuid (:block/uuid b)]) top-level-blocks)
         start-block (first top-level-blocks)
         end-block (last top-level-blocks)]
-    (if (or
-         (= 1 (count top-level-blocks))
-         (= start-block end-block))
-      (delete-block conn txs-state start-block)
-      (doseq [id block-ids]
-        (let [node (d/entity @conn id)]
-          (otree/-del node txs-state conn))))
+    (when (seq top-level-blocks)
+      (if (or
+           (= 1 (count top-level-blocks))
+           (= start-block end-block))
+        (delete-block conn txs-state start-block)
+        (doseq [id block-ids]
+          (let [node (d/entity @conn id)]
+            (otree/-del node txs-state conn)))))
     {:tx-data @txs-state}))
 
 (defn- move-to-original-position?
@@ -982,7 +951,7 @@
 (defn move-blocks!
   [repo conn blocks target-block sibling?]
   (op-transact! move-blocks repo conn blocks target-block {:sibling? sibling?
-                                                             :outliner-op :move-blocks}))
+                                                           :outliner-op :move-blocks}))
 (defn move-blocks-up-down!
   [repo conn blocks up?]
   (op-transact! move-blocks-up-down repo conn blocks up?))

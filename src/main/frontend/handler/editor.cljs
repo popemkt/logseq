@@ -40,9 +40,9 @@
             [frontend.state :as state]
             [frontend.template :as template]
             [frontend.util :as util]
-            [frontend.util.clock :as clock]
+            [frontend.util.file-based.clock :as clock]
             [frontend.util.cursor :as cursor]
-            [frontend.util.drawer :as drawer]
+            [frontend.util.file-based.drawer :as drawer]
             [frontend.util.keycode :as keycode]
             [frontend.util.list :as list]
             [frontend.util.text :as text-util]
@@ -848,7 +848,8 @@
                           delete-prev-block? (and db-based?
                                                   (empty? (:block/tags block))
                                                   (seq (:block/properties block))
-                                                  (empty? (:block/properties prev-block)))]
+                                                  (empty? (:block/properties prev-block))
+                                                  (not (:logseq.property/created-from-property block)))]
                       (if delete-prev-block?
                         (p/do!
                          (ui-outliner-tx/transact!
@@ -891,31 +892,6 @@
                                                           (:block/format block)
                                                           "")]
            (when edit-block-f (edit-block-f))))))))
-
-(defn set-block-query-properties!
-  [block-id all-properties key add?]
-  (when-let [block (db/entity [:block/uuid block-id])]
-    (let [query-properties (get block (pu/get-pid :logseq.property/query-properties))
-          repo (state/get-current-repo)
-          db-based? (config/db-based-graph? repo)
-          query-properties (if db-based?
-                             query-properties
-                             (some-> query-properties
-                                     (common-handler/safe-read-string "Parsing query properties failed")))
-          query-properties (if (seq query-properties)
-                             query-properties
-                             all-properties)
-          query-properties (if add?
-                             (distinct (conj query-properties key))
-                             (remove #{key} query-properties))
-          query-properties (vec query-properties)]
-      (if (seq query-properties)
-        (property-handler/set-block-property! repo block-id
-                                              (pu/get-pid :logseq.property/query-properties)
-                                              (if db-based?
-                                                query-properties
-                                                (str query-properties)))
-        (property-handler/remove-block-property! repo block-id (pu/get-pid :logseq.property/query-properties))))))
 
 (defn set-block-timestamp!
   [block-id key value]
@@ -1160,7 +1136,7 @@
             (let [value (gobj/get input "value")]
               (extract-nearest-link-from-text value pos url-regex))))))))
 
-(defn- get-nearest-page
+(defn get-nearest-page
   "Return the nearest page-name (not dereferenced, may be an alias), block or tag"
   []
   (when-let [block (state/get-edit-block)]
@@ -1327,7 +1303,7 @@
 (defn save-block-aux!
   [block value opts]
   (let [entity (db/entity [:block/uuid (:block/uuid block)])]
-    (when (and (:db/id entity) (not (ldb/property? entity)))
+    (when (and (:db/id entity) (not (ldb/built-in? entity)))
       (let [value (string/trim value)]
         ;; FIXME: somehow frontend.components.editor's will-unmount event will loop forever
         ;; maybe we shouldn't save the block/file in "will-unmount" event?
@@ -1668,6 +1644,9 @@
   "Return matched classes except the root tag"
   [q]
   (let [classes (->> (db-model/get-all-classes (state/get-current-repo) {:except-root-class? true})
+                     (mapcat (fn [class]
+                               (conj (:block/alias class) class)))
+                     (common-util/distinct-by :db/id)
                      (map (fn [e] (select-keys e [:block/uuid :block/title]))))]
     (search/fuzzy-search classes q {:extract-fn :block/title})))
 
@@ -1675,26 +1654,13 @@
   "Return matched blocks that are not built-in"
   [q]
   (p/let [block (state/get-edit-block)
-          editing-page-id (and block
-                               (when-let [page-id (:db/id (:block/page block))]
-                                 (:block/uuid (db/entity page-id))))
-          block-parents (when block
-                          (set (->> (db/get-block-parents (state/get-current-repo)
-                                                          (:block/uuid block)
-                                                          {:depth 99})
-                                    (map :block/uuid))))
-          current-and-parents (set/union #{(:block/uuid block)} block-parents)
           pages (search/block-search (state/get-current-repo) q {:built-in? false
                                                                  :enable-snippet? false})]
-    (->> (if editing-page-id
-           ;; To prevent self references
-           (remove (fn [b]
-                     (or (= editing-page-id (:block/uuid b))
-                         (contains? current-and-parents (:block/uuid b)))) pages)
-           pages)
-         (keep (fn [b]
-                 (when-let [id (:block/uuid b)]
-                   (db/entity [:block/uuid id])))))))
+    (keep (fn [b]
+            (when-let [id (:block/uuid b)]
+              (when-not (= id (:block/uuid block)) ; avoid block self-reference
+                (db/entity [:block/uuid id]))))
+          pages)))
 
 (defn <get-matched-templates
   [q]
@@ -1947,8 +1913,10 @@
 
       ;; Open "Search page or New page" auto-complete
       (and (= last-input-char commands/hashtag)
-           ;; Only trigger at beginning of a line or before whitespace
-           (or (re-find #"(?m)^#" (str (.-value input))) (start-of-new-word? input pos)))
+             ;; Only trigger at beginning of a line, before whitespace or after a reference
+             (or (re-find #"(?m)^#" (str (.-value input)))
+                 (start-of-new-word? input pos)
+                 (and db-based? (= page-ref/right-brackets (common-util/safe-subs (str (.-value input)) (- pos 3) (dec pos))))))
       (do
         (state/set-editor-action-data! {:pos (cursor/get-caret-pos input)})
         (state/set-editor-last-pos! pos)
@@ -2534,21 +2502,27 @@
   [el]
   (some? (dom/closest el ".single-block")))
 
-(defn keydown-new-block-handler [e]
+(defn- inside-of-editor-block
+  [el]
+  (some? (dom/closest el ".block-editor")))
+
+(defn keydown-new-block-handler [^js e]
   (let [state (get-state)]
-    (if (or (state/doc-mode-enter-for-new-line?) (inside-of-single-block (rum/dom-node state)))
-     (keydown-new-line)
-     (do
-       (.preventDefault e)
-       (keydown-new-block state)))))
+    (when (or (nil? (.-target e)) (inside-of-editor-block (.-target e)))
+      (if (or (state/doc-mode-enter-for-new-line?) (inside-of-single-block (rum/dom-node state)))
+        (keydown-new-line)
+        (do
+          (.preventDefault e)
+          (keydown-new-block state))))))
 
 (defn keydown-new-line-handler [e]
   (let [state (get-state)]
-    (if (and (state/doc-mode-enter-for-new-line?) (not (inside-of-single-block (rum/dom-node state))))
-     (keydown-new-block state)
-     (do
-       (.preventDefault e)
-       (keydown-new-line)))))
+    (when (or (nil? (.-target e)) (inside-of-editor-block (.-target e)))
+      (if (and (state/doc-mode-enter-for-new-line?) (not (inside-of-single-block (rum/dom-node state))))
+        (keydown-new-block state)
+        (do
+          (.preventDefault e)
+          (keydown-new-line))))))
 
 (defn- select-first-last
   "Select first or last block in viewpoint"
@@ -3106,13 +3080,15 @@
 
 (defn shortcut-cut-selection
   [e]
-  (util/stop e)
-  (cut-blocks-and-clear-selections! true))
+  (when-not (util/input? (.-target e))
+    (util/stop e)
+    (cut-blocks-and-clear-selections! true)))
 
 (defn shortcut-delete-selection
   [e]
-  (util/stop e)
-  (cut-blocks-and-clear-selections! false))
+  (when-not (util/input? (.-target e))
+    (util/stop e)
+    (cut-blocks-and-clear-selections! false)))
 
 (defn- copy-current-block-ref
   [format]
@@ -3379,8 +3355,9 @@
 (defn collapsable?
   ([block-id]
    (collapsable? block-id {}))
-  ([block-id {:keys [semantic?]
-              :or {semantic? false}}]
+  ([block-id {:keys [semantic? ignore-children?]
+              :or {semantic? false
+                   ignore-children? false}}]
    (when block-id
      (let [repo (state/get-current-repo)]
        (if-let [block (db/entity [:block/uuid block-id])]
@@ -3389,7 +3366,7 @@
                property-keys (->> (keys (:block/properties block))
                                   (remove db-property/db-attribute-properties)
                                   (remove #(outliner-property/property-with-other-position? (db/entity %))))]
-           (or (db-model/has-children? block-id)
+           (or (if ignore-children? false (db-model/has-children? block-id))
                (valid-dsl-query-block? block repo)
                (valid-custom-query-block? block)
                (and db-based?
@@ -3397,7 +3374,7 @@
                     (not (db-pu/all-hidden-properties? property-keys)))
                (and db-based? (seq tags)
                     (some (fn [t]
-                            (let [properties (map :db/ident (:class/schema.properties (:block/schema t)))]
+                            (let [properties (map :db/ident (:logseq.property.class/properties (:block/schema t)))]
                               (and (seq properties)
                                    (not (db-pu/all-hidden-properties? properties))))) tags))
                (and

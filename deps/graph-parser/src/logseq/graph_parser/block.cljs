@@ -310,6 +310,7 @@
   (when-not (and db (common-util/uuid-string? original-page-name)
                  (not (ldb/page? (d/entity db [:block/uuid (uuid original-page-name)]))))
     (let [db-based? (ldb/db-based-graph? db)
+          original-page-name (string/trim original-page-name)
           [page _page-entity] (cond
                                (and original-page-name (string? original-page-name))
                                (let [original-page-name (common-util/remove-boundary-slashes original-page-name)
@@ -349,8 +350,10 @@
                                                {:block/created-at current-ms
                                                 :block/updated-at current-ms}))
                                            (if journal-day
-                                             {:block/type "journal"
-                                              :block/journal-day journal-day}
+                                             (cond-> {:block/type "journal"
+                                                      :block/journal-day journal-day}
+                                               db-based?
+                                               (assoc :block/tags [:logseq.class/Journal]))
                                              {}))]
                                  [page page-entity])
 
@@ -416,7 +419,7 @@
                                (when-not macro?
                                  (let [m (page-name->map item db true date-formatter {:class? tag?})
                                        result (cond->> m
-                                                (and tag? (not (:db/ident m)))
+                                                (and db-based? tag? (not (:db/ident m)))
                                                 (db-class/build-new-class db))
                                        page-name (:block/name result)
                                        id (get @*name->id page-name)]

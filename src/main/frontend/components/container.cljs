@@ -13,6 +13,7 @@
             [frontend.components.dnd :as dnd-component]
             [frontend.components.icon :as icon]
             [frontend.components.handbooks :as handbooks]
+            [frontend.components.block :as block]
             [dommy.core :as d]
             [frontend.components.content :as cp-content]
             [frontend.components.title :as title]
@@ -55,7 +56,8 @@
             [logseq.common.path :as path]
             [react-draggable]
             [reitit.frontend.easy :as rfe]
-            [rum.core :as rum]))
+            [rum.core :as rum]
+            [logseq.db :as ldb]))
 
 (rum/defc nav-content-item < rum/reactive
   [name {:keys [class count]} child]
@@ -77,7 +79,6 @@
         db-based? (config/db-based-graph? repo)
         page (or (db/get-alias-source-page repo (:db/id page)) page)
         title (:block/title page)
-        whiteboard-page? (db-model/whiteboard-page? page)
         untitled? (db-model/untitled-page? title)
         name (:block/name page)
         file-rpath (when (util/electron?) (page-util/get-page-file-rpath name))
@@ -118,23 +119,29 @@
                              (x-menu-shortcut (shortcut-utils/decorate-binding "shift+click")))]))]
 
     ;; TODO: move to standalone component
-    [:a.flex.items-center.justify-between.relative.group
-     {:title (title/block-unique-title page)
-      :on-click
-      (fn [e]
-        (if (gobj/get e "shiftKey")
-          (open-in-sidebar)
-          (route-handler/redirect-to-page! (:block/uuid page) {:click-from-recent? recent?})))
-      :on-context-menu (fn [^js e]
-                         (shui/popup-show! e (x-menu-content)
-                                           {:as-dropdown? true
-                                            :content-props {:on-click (fn [] (shui/popup-hide!))
-                                                            :class "w-60"}})
-                         (util/stop e))}
-     [:span.page-icon.ml-3.justify-center (if whiteboard-page? (ui/icon "whiteboard" {:extension? true}) icon)]
-     [:span.page-title {:class (when untitled? "opacity-50")}
-      (if untitled? (t :untitled)
-          (pdf-utils/fix-local-asset-pagename title))]
+    [:a.flex.items-center.justify-between.relative.group.h-6
+     (cond->
+      {:on-click
+       (fn [e]
+         (if (gobj/get e "shiftKey")
+           (open-in-sidebar)
+           (route-handler/redirect-to-page! (:block/uuid page) {:click-from-recent? recent?})))
+       :on-context-menu (fn [^js e]
+                          (shui/popup-show! e (x-menu-content)
+                                            {:as-dropdown? true
+                                             :content-props {:on-click (fn [] (shui/popup-hide!))
+                                                             :class "w-60"}})
+                          (util/stop e))}
+       (ldb/object? page)
+       (assoc :title (title/block-unique-title page)))
+     [:span.page-icon.ml-3.justify-center icon]
+     [:span.page-title {:class (when untitled? "opacity-50")
+                        :style {:display "ruby"}}
+      (cond
+        (not (db/page? page))
+        (block/inline-text :markdown (:block/title page))
+        untitled? (t :untitled)
+        :else (pdf-utils/fix-local-asset-pagename title))]
 
      ;; dots trigger
      (shui/button
@@ -169,7 +176,7 @@
      (when (seq favorite-entities)
        (let [favorite-items (map
                              (fn [e]
-                               (let [icon (icon/get-node-icon e {})]
+                               (let [icon (icon/get-node-icon-cp e {})]
                                  {:id (str (:db/id e))
                                   :value (:block/uuid e)
                                   :content [:li.favorite-item (page-name e icon false)]}))
@@ -199,7 +206,7 @@
           :draggable true
           :on-drag-start (fn [event] (editor-handler/block->data-transfer! (:block/name page) event true))
           :data-ref name}
-         (page-name page (icon/get-node-icon page {}) true)])])))
+         (page-name page (icon/get-node-icon-cp page {}) true)])])))
 
 (rum/defcs flashcards < db-mixins/query rum/reactive
   {:did-mount (fn [state]
@@ -783,18 +790,18 @@
               (let [show!
                     (fn [content]
                       (shui/popup-show! e
-                        (fn [{:keys [id]}]
-                          [:div {:on-click #(shui/popup-hide! id)
-                                 :data-keep-selection true}
-                           content])
-                        {:on-before-hide state/dom-clear-selection!
-                         :on-after-hide state/state-clear-selection!
-                         :content-props {:class "w-[280px] ls-context-menu-content"}
-                         :as-dropdown? true}))
+                                        (fn [{:keys [id]}]
+                                          [:div {:on-click #(shui/popup-hide! id)
+                                                 :data-keep-selection true}
+                                           content])
+                                        {:on-before-hide state/dom-clear-selection!
+                                         :on-after-hide state/state-clear-selection!
+                                         :content-props {:class "w-[280px] ls-context-menu-content"}
+                                         :as-dropdown? true}))
 
                     handled
                     (cond
-                      page
+                      (and page (not block-id))
                       (do
                         (show! (cp-content/page-title-custom-context-menu-content page-entity))
                         (state/set-state! :page-title/context nil))

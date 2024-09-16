@@ -345,9 +345,9 @@
    :editor/toggle-number-list               {:binding "t n"
                                              :fn      #(state/pub-event! [:editor/toggle-own-number-list (state/get-selection-block-ids)])}
 
-   :editor/add-property                     {:binding "mod+p"
+   :editor/add-property                     {:binding (if mac? "mod+p" "ctrl+alt+p")
                                              :fn      (fn [e]
-                                                        (when e (.preventDefault e))
+                                                        (when e (util/stop e))
                                                         (state/pub-event! [:editor/new-property {}]))}
 
    :editor/add-property-deadline            {:binding "p d"
@@ -364,6 +364,14 @@
                                              :selection? true
                                              :fn      (fn []
                                                         (state/pub-event! [:editor/new-property {:property-key "Priority"}]))}
+
+   :editor/add-property-icon                {:binding "p i"
+                                             :selection? true
+                                             :fn      (fn []
+                                                        (state/pub-event! [:editor/new-property {:property-key "Icon"}]))}
+
+   :editor/toggle-display-all-properties    {:binding "p t"
+                                             :fn      ui-handler/toggle-show-empty-hidden-properties!}
 
    :ui/toggle-brackets                      {:binding "t b"
                                              :fn      config-handler/toggle-ui-show-brackets!}
@@ -771,6 +779,8 @@
             :editor/add-property-deadline
             :editor/add-property-status
             :editor/add-property-priority
+            :editor/add-property-icon
+            :editor/toggle-display-all-properties
             :ui/toggle-wide-mode
             :ui/select-theme-color
             :ui/goto-plugins
@@ -890,7 +900,9 @@
       :editor/add-property
       :editor/add-property-deadline
       :editor/add-property-status
-      :editor/add-property-priority]
+      :editor/add-property-priority
+      :editor/add-property-icon
+      :editor/toggle-display-all-properties]
 
      :shortcut.category/toggle
      [:ui/toggle-help

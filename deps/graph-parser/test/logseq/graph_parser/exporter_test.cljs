@@ -128,7 +128,7 @@
                 (if-let [built-in-type (get-in db-property/built-in-properties [k :schema :type])]
                   (if (= :block/tags k)
                     (mapv #(:db/ident (d/entity db (:db/id %))) v)
-                    (if (db-property-type/ref-property-types built-in-type)
+                    (if (db-property-type/all-ref-property-types built-in-type)
                       (db-property/ref->property-value-contents db v)
                       v))
                   (db-property/ref->property-value-contents db v))])))
@@ -285,9 +285,9 @@
       (is (= #{"gpt"}
              (:block/alias (readable-properties @conn (find-page-by-name @conn "chat-gpt")))))
 
-      (is (= {:logseq.property/query-sort-by :user.property/prop-num
-              :logseq.property/query-properties [:block :page :user.property/prop-string :user.property/prop-num]
-              :logseq.property/query-table true}
+      (is (= {:logseq.property.table/sorting [{:id :user.property/prop-num, :asc? false}]
+              :logseq.property.view/type "Table View"
+              :logseq.property.table/ordered-columns [:block/title :user.property/prop-string :user.property/prop-num]}
              (readable-properties @conn (find-block-by-content @conn "{{query (property :prop-string)}}")))
           "query block has correct query properties"))
 
@@ -450,7 +450,7 @@
 
     (is (= #{:user.property/url :user.property/sameas :user.property/rangeincludes}
            (->> (d/entity @conn :user.class/Property)
-                :class/schema.properties
+                :logseq.property.class/properties
                 (map :db/ident)
                 set))
         "Properties are correctly inferred for a class")
@@ -502,7 +502,7 @@
                 set))
         "All classes are correctly defined by :type")
 
-    (is (= "CreativeWork" (get-in (d/entity @conn :user.class/Movie) [:class/parent :block/title]))
+    (is (= "CreativeWork" (get-in (d/entity @conn :user.class/Movie) [:logseq.property/parent :block/title]))
         "Existing page correctly set as class parent")
-    (is (= "Thing" (get-in (d/entity @conn :user.class/CreativeWork) [:class/parent :block/title]))
+    (is (= "Thing" (get-in (d/entity @conn :user.class/CreativeWork) [:logseq.property/parent :block/title]))
         "New page correctly set as class parent")))

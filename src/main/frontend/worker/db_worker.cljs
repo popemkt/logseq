@@ -3,6 +3,7 @@
   (:require ["@logseq/sqlite-wasm" :default sqlite3InitModule]
             ["comlink" :as Comlink]
             [cljs-bean.core :as bean]
+            [cljs.core.async :as async]
             [clojure.edn :as edn]
             [clojure.string :as string]
             [datascript.core :as d]
@@ -14,7 +15,6 @@
             [frontend.worker.export :as worker-export]
             [frontend.worker.file :as file]
             [frontend.worker.handler.page :as worker-page]
-            [frontend.worker.handler.page.db-based.rename :as db-worker-page-rename]
             [frontend.worker.handler.page.file-based.rename :as file-worker-page-rename]
             [frontend.worker.rtc.asset-db-listener]
             [frontend.worker.rtc.client-op :as client-op]
@@ -144,6 +144,8 @@
           (assoc data :addresses addresses)
           data)))))
 
+(defonce sqlite-writes-chan (async/chan 10000))
+
 (defn new-sqlite-storage
   "Update sqlite-cli/new-sqlite-storage when making changes"
   [repo _opts]
@@ -166,10 +168,17 @@
                            :$content (sqlite-util/transit-write data')
                            :$addresses addresses}))
                   addr+data-seq)]
-        (upsert-addr-content! repo data delete-addrs)))
+        (if (worker-state/rtc-downloading-graph?)
+          (upsert-addr-content! repo data delete-addrs) ; sync writes when downloading whole graph
+          (async/go (async/>! sqlite-writes-chan [repo data delete-addrs])))))
 
     (-restore [_ addr]
       (restore-data-from-addr repo addr))))
+
+(async/go-loop []
+  (let [args (async/<! sqlite-writes-chan)]
+    (apply upsert-addr-content! args))
+  (recur))
 
 (defn new-sqlite-client-ops-storage
   [repo]
@@ -273,10 +282,10 @@
 
         (db-listener/listen-db-changes! repo conn)))))
 
-(defn- iter->vec [iter]
-  (when iter
+(defn- iter->vec [iter']
+  (when iter'
     (p/loop [acc []]
-      (p/let [elem (.next iter)]
+      (p/let [elem (.next iter')]
         (if (.-done elem)
           acc
           (p/recur (conj acc (.-value elem))))))))
@@ -311,6 +320,9 @@
             db-dirs (filter (fn [file]
                               (string/starts-with? (.-name file) ".logseq-pool-"))
                             current-dir-dirs)]
+      (prn :debug
+           :db-dirs (map #(.-name %) db-dirs)
+           :all-dirs (map #(.-name %) current-dir-dirs))
       (p/all (map (fn [dir]
                     (p/let [graph-name (-> (.-name dir)
                                            (string/replace-first ".logseq-pool-" "")
@@ -616,8 +628,7 @@
            (case type
              :notification
              (worker-util/post-message type [[:div [:p (:message payload)]] (:type payload)])
-             nil))
-         (throw e)))))
+             (throw e)))))))
 
   (file-writes-finished?
    [this repo]
@@ -786,7 +797,7 @@
   [repo conn page-uuid new-name]
   (let [config (worker-state/get-config repo)
         f (if (sqlite-util/db-based-graph? repo)
-            db-worker-page-rename/rename!
+            (throw (ex-info "Rename page is a file graph only operation" {}))
             file-worker-page-rename/rename!)]
     (f repo conn config page-uuid new-name)))
 
