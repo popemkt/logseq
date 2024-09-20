@@ -769,25 +769,21 @@
     [:span.warning.mr-1 {:title "Node ref invalid"}
    (->ref id)]))
 
-(rum/defcs page-cp < db-mixins/query rum/reactive
-  {:init (fn [state]
-           (let [page (last (:rum/args state))]
-             (assoc state ::entity
-                    (if (e/entity? page)
-                      page
-                      ;; Use uuid when available to uniquely identify case sensitive contexts
-                      (db/get-page (or (:block/uuid page)
-                                       (when-let [s (:block/name page)]
-                                         (let [s (string/trim s)
-                                               s (if (string/starts-with? s db-content/page-ref-special-chars)
-                                                   (common-util/safe-subs s 2)
-                                                   s)]
-                                           s))))))))}
+(rum/defcs page-cp-inner < db-mixins/query rum/reactive
   "Component for a page. `page` argument contains :block/name which can be (un)sanitized page name.
    Keys for `config`:
    - `:preview?`: Is this component under preview mode? (If true, `page-preview-trigger` won't be registered to this `page-cp`)"
   [state {:keys [label children preview? disable-preview?] :as config} page]
-  (let [entity (::entity state)]
+  (let [entity (if (e/entity? page)
+                 page
+                 ;; Use uuid when available to uniquely identify case sensitive contexts
+                 (db/get-page (or (:block/uuid page)
+                                  (when-let [s (:block/name page)]
+                                    (let [s (string/trim s)
+                                          s (if (string/starts-with? s db-content/page-ref-special-chars)
+                                              (common-util/safe-subs s 2)
+                                              s)]
+                                      s)))))]
     (let [entity (when entity (db/sub-block (:db/id entity)))]
       (cond
         entity
@@ -814,6 +810,11 @@
 
         :else
         nil))))
+
+(rum/defc page-cp
+  [config page]
+  (rum/with-key (page-cp-inner config page)
+    (or (str (:block/uuid page)) (:block/name page))))
 
 (rum/defc asset-reference
   [config title path]
@@ -1273,7 +1274,7 @@
     (show-link? config metadata s full_text)
     (media-link config url s label metadata full_text)
 
-    (util/electron?)
+    (or (util/electron?) (config/db-based-graph? (state/get-current-repo)))
     (let [path (cond
                  (string/starts-with? s "file://")
                  (string/replace s "file://" "")
@@ -1925,7 +1926,7 @@
      {:class (util/classnames [{:is-order-list order-list?
                                 :bullet-closed collapsed?
                                 :bullet-hidden (:hide-bullet? config)}])}
-     (when (or (not fold-button-right?) collapsable?)
+     (when (and (or (not fold-button-right?) collapsable?) (not (:table? config)))
        [:a.block-control
         {:id       (str "control-" uuid)
          :on-click (fn [event]
@@ -2528,10 +2529,10 @@
         mouse-down-key (if (util/ios?)
                          :on-click
                          :on-pointer-down) ; TODO: it seems that Safari doesn't work well with on-pointer-down
-
         attrs (cond->
                {:blockid       (str uuid)
-                :class (when (:property-block? config) "jtrigger")
+                :class (util/classnames [{:jtrigger (:property-block? config)
+                                          :!cursor-pointer (:page-title? config)}])
                 :containerid (:container-id config)
                 :data-type (name block-type)
                 :style {:width "100%"
@@ -2544,14 +2545,26 @@
 
                 (not block-ref?)
                 (assoc mouse-down-key (fn [e]
-                                        (cond (:from-journals? config)
-                                              (do
-                                                (.preventDefault e)
-                                                (route-handler/redirect-to-page! (:block/uuid block)))
-                                              (ldb/journal? block)
+                                        (let [journal-title? (:from-journals? config)]
+                                          (cond
+                                            (util/right-click? e)
+                                            nil
+
+                                            (and journal-title? (gobj/get e "shiftKey"))
+                                            (do
                                               (.preventDefault e)
-                                              :else
-                                              (block-content-on-pointer-down e block block-id content edit-input-id config)))))]
+                                              (state/sidebar-add-block! repo (:db/id block) :page))
+
+                                            journal-title?
+                                            (do
+                                              (.preventDefault e)
+                                              (route-handler/redirect-to-page! (:block/uuid block)))
+
+                                            (ldb/journal? block)
+                                            (.preventDefault e)
+
+                                            :else
+                                            (block-content-on-pointer-down e block block-id content edit-input-id config))))))]
     [:div.block-content.inline
      (cond-> {:id (str "block-content-" uuid)
               :on-pointer-up (fn [e]
@@ -2680,7 +2693,8 @@
       [:div.flex.flex-1.flex-row.gap-1.items-center
        (if (and edit? editor-box)
          [:div.editor-wrapper.flex.flex-1
-          {:id editor-id}
+          {:id editor-id
+           :class (util/classnames [{:opacity-50 (boolean (or (ldb/built-in? block) (ldb/journal? block)))}])}
           (ui/catch-error
            (ui/block-error "Something wrong in the editor" {})
            (editor-box {:block block
@@ -3174,7 +3188,7 @@
          :on-mouse-leave (fn [e]
                            (block-mouse-leave e *control-show? block-id doc-mode?))}
 
-        (when (and (not slide?) (not in-whiteboard?) (not table?))
+        (when (and (not slide?) (not in-whiteboard?))
           (let [edit? (or editing?
                           (= uuid (:block/uuid (state/get-edit-block))))]
             (block-control (assoc config :hide-bullet? (:page-title? config))

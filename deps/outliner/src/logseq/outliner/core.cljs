@@ -20,7 +20,8 @@
             [logseq.db.sqlite.create-graph :as sqlite-create-graph]
             [logseq.outliner.batch-tx :include-macros true :as batch-tx]
             [logseq.db.frontend.order :as db-order]
-            [logseq.outliner.pipeline :as outliner-pipeline]))
+            [logseq.outliner.pipeline :as outliner-pipeline]
+            [logseq.common.util.macro :as macro-util]))
 
 (def ^:private block-map
   (mu/optional-keys
@@ -259,16 +260,14 @@
           eid (or db-id (when block-uuid [:block/uuid block-uuid]))
           block-entity (d/entity db eid)
           page? (ldb/page? block-entity)
-          page-title-changed? (and page? (:block/title m*)
-                                   (not= (:block/title m*) (:block/title block-entity)))
+          block-title (:block/title m*)
+          page-title-changed? (and page? block-title
+                                   (not= block-title (:block/title block-entity)))
+          _ (when (and db-based? page? block-title)
+              (outliner-validate/validate-page-title-characters block-title {:node m*}))
           m* (if (and db-based? page-title-changed?)
-               (let [page-name (common-util/page-name-sanity-lc (:block/title m*))]
-                 (when (string/blank? page-name)
-                   (throw (ex-info "Page title can't be blank"
-                                   {:type :notification
-                                    :payload {:message "Page title can't be blank"
-                                              :type :error}
-                                    :node m*})))
+               (let [_ (outliner-validate/validate-page-title (:block/title m*) {:node m*})
+                     page-name (common-util/page-name-sanity-lc (:block/title m*))]
                  (assoc m* :block/name page-name))
                m*)
           _ (when (and db-based?
@@ -328,6 +327,15 @@
         (let [tx-data (remove-tags-when-title-changed block-entity (:block/title m))]
           (when (seq tx-data)
             (swap! txs-state (fn [txs] (concat txs tx-data))))))
+
+      ;; Add Query class when a query macro is typed or pasted
+      (when (and db-based?
+                 (not= (:block/title m*) (:block/title block-entity))
+                 (macro-util/query-macro? (:block/title m*))
+                 (empty? (:block/tags block-entity)))
+        (swap! txs-state (fn [txs]
+                           (conj (vec txs)
+                                 [:db/add (:db/id block-entity) :block/tags :logseq.class/Query]))))
 
       this))
 

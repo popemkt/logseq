@@ -42,8 +42,7 @@
     ((comp string/capitalize name) property-type)))
 
 (defn- <add-property-from-dropdown
-  "Adds an existing or new property from dropdown. Used from a block or page context.
-   For pages, used to add both schema properties or properties for a page"
+  "Adds an existing or new property from dropdown. Used from a block or page context."
   [entity property-uuid-or-name schema {:keys [class-schema?]}]
   (p/let [repo (state/get-current-repo)
           ;; Both conditions necessary so that a class can add its own page properties
@@ -87,7 +86,7 @@
                           (map (fn [type]
                                  {:label (property-type-label type)
                                   :value type})))]
-    [:div {:class "flex items-center col-span-2"}
+    [:div {:class "flex items-center col-span-1"}
      (shui/select
       (cond->
        {:default-open (boolean default-open?)
@@ -241,16 +240,17 @@
      (when-not other-position?
        (let [content-fn (fn [{:keys [id]}]
                           (icon-component/icon-search
-                           {:on-chosen
-                            (fn [_e icon]
-                              (if icon
-                                (db-property-handler/upsert-property! (:db/ident property)
-                                                                      (:block/schema property)
-                                                                      {:properties {:logseq.property/icon icon}})
-                                (db-property-handler/remove-block-property! (:db/id property)
-                                                                            (pu/get-pid :logseq.property/icon)))
-                              (shui/popup-hide! id))
-                            :del-btn? (boolean icon)}))]
+                            {:on-chosen
+                             (fn [_e icon]
+                               (if icon
+                                 (db-property-handler/upsert-property! (:db/ident property)
+                                   (:block/schema property)
+                                   {:properties {:logseq.property/icon icon}})
+                                 (db-property-handler/remove-block-property! (:db/id property)
+                                   (pu/get-pid :logseq.property/icon)))
+                               (shui/popup-hide! id))
+                             :icon-value icon
+                             :del-btn? (boolean icon)}))]
 
          (shui/trigger-as
           :button.property-m
@@ -345,8 +345,8 @@
     [:div.ls-property-input.flex.flex-1.flex-row.items-center.flex-wrap.gap-1
      {:ref #(reset! *ref %)}
      (if property-key
-       [:div.ls-property-add.grid.grid-cols-5.gap-1.flex.flex-1.flex-row.items-center
-        [:div.flex.flex-row.items-center.col-span-2.property-key.gap-1
+       [:div.ls-property-add.grid.grid-cols-4.gap-1.flex.flex-1.flex-row.items-center
+        [:div.flex.flex-row.items-center.col-span-1.property-key.gap-1
          (when-not (:db/id property) (property-icon property (:type @*property-schema)))
          (if (:db/id property)                              ; property exists already
            (property-key-cp block property opts)
@@ -442,8 +442,8 @@
                         :else
                         "property-pair items-start")}
          (if (seq sortable-opts)
-           (dnd/sortable-item (assoc sortable-opts :class "property-key col-span-2") property-key-cp')
-           [:div.property-key.col-span-2 property-key-cp'])
+           (dnd/sortable-item (assoc sortable-opts :class "property-key col-span-1") property-key-cp')
+           [:div.property-key.col-span-1 property-key-cp'])
 
          (let [class-properties? (= (:db/ident property) :logseq.property.class/properties)
                property-desc (when-not (= (:db/ident property) :logseq.property/description)

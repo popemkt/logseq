@@ -1652,15 +1652,20 @@
 
 (defn <get-matched-blocks
   "Return matched blocks that are not built-in"
-  [q]
+  [q & [{:keys [nlp-pages?]}]]
   (p/let [block (state/get-edit-block)
-          pages (search/block-search (state/get-current-repo) q {:built-in? false
-                                                                 :enable-snippet? false})]
-    (keep (fn [b]
-            (when-let [id (:block/uuid b)]
-              (when-not (= id (:block/uuid block)) ; avoid block self-reference
-                (db/entity [:block/uuid id]))))
-          pages)))
+          nodes (search/block-search (state/get-current-repo) q {:built-in? false
+                                                                 :enable-snippet? false})
+          matched (keep (fn [b]
+                          (when-let [id (:block/uuid b)]
+                            (when-not (= id (:block/uuid block)) ; avoid block self-reference
+                              (db/entity [:block/uuid id]))))
+                        nodes)]
+    (-> (concat matched
+                (when nlp-pages?
+                  (map (fn [title] {:block/title title :nlp-date? true})
+                       date/nlp-pages)))
+        (search/fuzzy-search q {:extract-fn :block/title :limit 50}))))
 
 (defn <get-matched-templates
   [q]
@@ -2841,6 +2846,11 @@
         (state/set-state! :editor/start-pos pos))
 
       (cond
+        (and (= :page-search (state/get-editor-action))
+             (= key commands/hashtag))
+        (do
+          (util/stop e)
+          (notification/show! "Page name can't include \"#\"." :warning))
         ;; stop accepting edits if the new block is not created yet
         (some? @(:editor/async-unsaved-chars @state/state))
         (do
@@ -3478,11 +3488,13 @@
 (defn collapse-block! [block-id]
   (when (collapsable? block-id)
     (when-not (skip-collapsing-in-db?)
-      (set-blocks-collapsed! [block-id] true))))
+      (set-blocks-collapsed! [block-id] true))
+    (state/set-collapsed-block! block-id true)))
 
 (defn expand-block! [block-id]
   (when-not (skip-collapsing-in-db?)
-    (set-blocks-collapsed! [block-id] false)))
+    (set-blocks-collapsed! [block-id] false))
+  (state/set-collapsed-block! block-id false))
 
 (defn expand!
   ([e] (expand! e false))
@@ -3721,12 +3733,14 @@
   ([]
    (escape-editing true))
   ([select?]
-   (p/do!
-    (save-current-block!)
-    (if select?
-      (when-let [node (some-> (state/get-input) (util/rec-get-node "ls-block"))]
-        (state/exit-editing-and-set-selected-blocks! [node]))
-      (state/clear-edit!)))))
+   (let [edit-block (state/get-edit-block)]
+     (p/do!
+      (save-current-block!)
+      (if select?
+        (when-let [node (some-> (state/get-input) (util/rec-get-node "ls-block"))]
+          (state/exit-editing-and-set-selected-blocks! [node]))
+        (when (= (:db/id edit-block) (:db/id (state/get-edit-block)))
+          (state/clear-edit!)))))))
 
 (defn replace-block-reference-with-content-at-point
   []
