@@ -1,9 +1,11 @@
 (ns logseq.outliner.validate
-  "Reusable validations from outliner level and above. Most validations throw
+  "Reusable DB graph validations for outliner level and above. Most validations throw
   errors so the user action stops immediately to display a notification"
   (:require [clojure.string :as string]
             [datascript.core :as d]
-            [logseq.db :as ldb]))
+            [logseq.db :as ldb]
+            [logseq.common.date :as common-date]
+            [logseq.common.util.namespace :as ns-util]))
 
 (defn ^:api validate-page-title-characters
   "Validates characters that must not be in a page title"
@@ -13,6 +15,12 @@
                     (merge meta-m
                            {:type :notification
                             :payload {:message "Page name can't include \"#\"."
+                                      :type :warning}}))))
+  (when (string/includes? page-title ns-util/parent-char)
+    (throw (ex-info "Page name can't include \"/\"."
+                    (merge meta-m
+                           {:type :notification
+                            :payload {:message "Page name can't include \"/\"."
                                       :type :warning}})))))
 
 (defn ^:api validate-page-title
@@ -22,7 +30,7 @@
                     (merge meta-m
                            {:type :notification
                             :payload {:message "Page name can't be blank."
-                                      :type :error}})))))
+                                      :type :warning}})))))
 
 (defn ^:api validate-built-in-pages
   "Validates built-in pages shouldn't be modified"
@@ -31,6 +39,30 @@
     (throw (ex-info "Rename built-in pages"
                     {:type :notification
                      :payload {:message "Built-in pages can't be edited"
+                               :type :warning}}))))
+
+(defn- validate-unique-for-property-page
+  [entity db new-title]
+  (when-let [_res (seq (d/q (if (:logseq.property/built-in? entity)
+                              '[:find [?b ...]
+                                :in $ ?eid ?title
+                                :where
+                                [?b :block/title ?title]
+                                [?b :block/type "property"]
+                                [(not= ?b ?eid)]]
+                              '[:find [?b ...]
+                                :in $ ?eid ?title
+                                :where
+                                [?b :block/title ?title]
+                                [?b :block/type "property"]
+                                [(missing? $ ?b :logseq.property/built-in?)]
+                                [(not= ?b ?eid)]])
+                            db
+                            (:db/id entity)
+                            new-title))]
+    (throw (ex-info "Duplicate property"
+                    {:type :notification
+                     :payload {:message (str "Another property named " (pr-str new-title) " already exists")
                                :type :warning}}))))
 
 (defn- validate-unique-for-page
@@ -54,21 +86,7 @@
                                  :type :warning}})))
 
     (ldb/property? entity)
-    (when-let [_res (seq (d/q '[:find [?b ...]
-                                :in $ ?eid ?type ?title
-                                :where
-                                [?b :block/title ?title]
-                                [?b :block/type ?type]
-                                [(missing? $ ?b :logseq.property/built-in?)]
-                                [(not= ?b ?eid)]]
-                              db
-                              (:db/id entity)
-                              (:block/type entity)
-                              new-title))]
-      (throw (ex-info "Duplicate property"
-                      {:type :notification
-                       :payload {:message (str "Another property named " (pr-str new-title) " already exists")
-                                 :type :warning}})))
+    (validate-unique-for-property-page entity db new-title)
 
     :else
     (when-let [_res (seq (d/q '[:find [?b ...]
@@ -95,8 +113,19 @@
   (when (ldb/page? entity)
     (validate-unique-for-page db new-title entity)))
 
+(defn ^:api validate-disallow-page-with-journal-name
+  "Validates a non-journal page renamed to journal format"
+  [new-title entity]
+  (when (and (ldb/page? entity) (not (ldb/journal? entity))
+             (common-date/normalize-date new-title nil))
+    (throw (ex-info "Page can't be renamed to a journal"
+                      {:type :notification
+                       :payload {:message "This page can't be changed to a journal page"
+                                 :type :warning}}))))
+
 (defn validate-block-title
   "Validates a block title when it has changed"
   [db new-title existing-block-entity]
   (validate-built-in-pages existing-block-entity)
-  (validate-unique-by-name-tag-and-block-type db new-title existing-block-entity))
+  (validate-unique-by-name-tag-and-block-type db new-title existing-block-entity)
+  (validate-disallow-page-with-journal-name new-title existing-block-entity))

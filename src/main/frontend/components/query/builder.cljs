@@ -21,6 +21,7 @@
             [promesa.core :as p]
             [frontend.config :as config]
             [logseq.db.frontend.property :as db-property]
+            [logseq.db.frontend.property.type :as db-property-type]
             [logseq.db.sqlite.util :as sqlite-util]
             [frontend.db-mixins :as db-mixins]))
 
@@ -33,10 +34,10 @@
                {:label "Pages"
                 :value "page"
                 :selected (= @*find :page)}]
-     (fn [e v]
+              (fn [e v]
        ;; Prevent opening the current block's editor
-       (util/stop e)
-       (reset! *find (keyword v))))])
+                (util/stop e)
+                (reset! *find (keyword v))))])
 
 (defn- select
   ([items on-chosen]
@@ -83,10 +84,10 @@
 
 (defonce *between-dates (atom {}))
 (rum/defcs datepicker < rum/reactive
-                        (rum/local nil ::input-value)
-                        {:will-unmount (fn [state]
-                                         (swap! *between-dates dissoc (first (:rum/args state)))
-                                         state)}
+  (rum/local nil ::input-value)
+  {:will-unmount (fn [state]
+                   (swap! *between-dates dissoc (first (:rum/args state)))
+                   state)}
   [state id placeholder {:keys [auto-focus]}]
   (let [*input-value (::input-value state)]
     [:div.ml-4
@@ -97,24 +98,24 @@
        :value (some-> @*input-value (first))
        :on-focus (fn [^js e]
                    (js/setTimeout
-                     #(shui/popup-show! (.-target e)
-                        (let [select-handle! (fn [^js d]
-                                               (let [gd (date/js-date->goog-date d)
-                                                     journal-date (date/js-date->journal-title gd)]
-                                                 (reset! *input-value [journal-date d])
-                                                 (swap! *between-dates assoc id journal-date))
-                                               (shui/popup-hide!))]
-                          (shui/calendar
-                            {:mode "single"
-                             :initial-focus true
-                             :selected (some-> @*input-value (second))
-                             :on-select select-handle!
-                             :on-day-key-down (fn [^js d _ ^js e]
-                                                (when (= "Enter" (.-key e))
-                                                  (select-handle! d)
-                                                  (util/stop e)))}))
-                        {:id :query-datepicker
-                         :align :start}) 16))}]]))
+                    #(shui/popup-show! (.-target e)
+                                       (let [select-handle! (fn [^js d]
+                                                              (let [gd (date/js-date->goog-date d)
+                                                                    journal-date (date/js-date->journal-title gd)]
+                                                                (reset! *input-value [journal-date d])
+                                                                (swap! *between-dates assoc id journal-date))
+                                                              (shui/popup-hide!))]
+                                         (shui/calendar
+                                          {:mode "single"
+                                           :initial-focus true
+                                           :selected (some-> @*input-value (second))
+                                           :on-select select-handle!
+                                           :on-day-key-down (fn [^js d _ ^js e]
+                                                              (when (= "Enter" (.-key e))
+                                                                (select-handle! d)
+                                                                (util/stop e)))}))
+                                       {:id :query-datepicker
+                                        :align :start}) 16))}]]))
 
 (rum/defcs between <
   (rum/local nil ::start)
@@ -127,12 +128,12 @@
     (datepicker :end "End date" opts)]
    [:p.pt-2
     (ui/button "Submit"
-      :on-click (fn []
-                  (let [{:keys [start end]} @*between-dates]
-                    (when (and start end)
-                      (let [clause [:between [:page-ref start] [:page-ref end]]]
-                        (append-tree! tree opts loc clause)
-                        (reset! *between-dates {}))))))]])
+               :on-click (fn []
+                           (let [{:keys [start end]} @*between-dates]
+                             (when (and start end)
+                               (let [clause [:between [:page-ref start] [:page-ref end]]]
+                                 (append-tree! tree opts loc clause)
+                                 (reset! *between-dates {}))))))]])
 
 (rum/defc property-select
   [*mode *property]
@@ -153,12 +154,18 @@
 
 (rum/defc property-value-select-inner
   < rum/reactive db-mixins/query
-  [repo *property *find *tree opts loc db-graph? values]
+  [repo *property *find *tree opts loc values {:keys [db-graph? ref-property? property-type]}]
   (let [;; FIXME: lazy load property values consistently on first call
-        _ (when db-graph?
+        ;; Guard against non ref properties like :logseq.property/icon
+        _ (when (and db-graph? ref-property?)
             (doseq [id values] (db/sub-block id)))
         values' (if db-graph?
-                  (map #(db-property/property-value-content (db/entity repo %)) values)
+                  (if ref-property?
+                    (map #(db-property/property-value-content (db/entity repo %)) values)
+                    (if (contains? #{:checkbox} property-type)
+                      values
+                      ;; Don't display non-ref property values as they don't have display and query support
+                      []))
                   values)
         values'' (map #(hash-map :value (str %)
                                    ;; Preserve original-value as some values like boolean do not display in select
@@ -175,18 +182,23 @@
 (rum/defc property-value-select
   [repo *property *find *tree opts loc]
   (let [db-graph? (sqlite-util/db-based-graph? repo)
+        property-type (when db-graph? (get-in (db/entity repo @*property) [:block/schema :type]))
+        ref-property? (and db-graph? (contains? db-property-type/all-ref-property-types property-type))
         [values set-values!] (rum/use-state nil)]
     (rum/use-effect!
      (fn []
        (p/let [result (if db-graph?
                         (db-async/<get-block-property-values repo @*property)
                         (db-async/<file-get-property-values repo @*property))]
-         (when db-graph?
+         (when (and db-graph? ref-property?)
            (doseq [db-id result]
              (db-async/<get-block repo db-id :children? false)))
          (set-values! result)))
      [@*property])
-    (property-value-select-inner repo *property *find *tree opts loc db-graph? values)))
+    (property-value-select-inner repo *property *find *tree opts loc values
+                                 {:db-graph? db-graph?
+                                  :ref-property? ref-property?
+                                  :property-type property-type})))
 
 (rum/defc tags
   [repo *tree opts loc]
@@ -276,7 +288,7 @@
 
        "full text search"
        (search (fn [v] (append-tree! *tree opts loc v))
-         (:toggle-fn opts))
+               (:toggle-fn opts))
 
        "between"
        (between (merge opts
@@ -330,17 +342,17 @@
 (rum/defc add-filter
   [*find *tree loc clause]
   (shui/button
-   {:class "!px-1 h-6 add-filter text-muted-foreground"
+   {:class "jtrigger !px-1 h-6 add-filter text-muted-foreground"
     :size :sm
-    :variant :ghost
-    :title "Add clause"
+    :variant :outline
     :on-pointer-down util/stop-propagation
     :on-click (fn [^js e]
                 (shui/popup-show! (.-target e)
                                   (fn [{:keys [id]}]
                                     (picker *find *tree loc clause {:toggle-fn #(shui/popup-hide! id)}))
                                   {:align :start}))}
-   (ui/icon "plus" {:size 12})))
+   (ui/icon "plus" {:size 14})
+   (when (= [0] loc) "Filter")))
 
 (declare clauses-group)
 
@@ -349,7 +361,7 @@
   (let [f (first clause)]
     (cond
       (string? clause)
-      (str "search: " clause)
+      (str "Search: " clause)
 
       (= (keyword f) :page-ref)
       (page-ref/->page-ref (second clause))
@@ -367,7 +379,7 @@
       (str (if (and (config/db-based-graph? (state/get-current-repo))
                     (qualified-keyword? (second clause)))
              (:block/title (db/entity (second clause)))
-             (name (second clause)))
+             (some-> (second clause) name))
            ": "
            (cond
              (and (vector? (last clause)) (= :page-ref (first (last clause))))
@@ -439,13 +451,13 @@
       [:div.flex.flex-row.gap-2
        (for [op query-builder/operators]
          (ui/button (string/upper-case (name op))
-           :intent "logseq"
-           :small? true
-           :on-click (fn []
-                       (swap! *tree (fn [q]
-                                      (let [loc' (if operator? (vec (butlast loc)) loc)]
-                                        (query-builder/wrap-operator q loc' op))))
-                       (toggle-fn))))]
+                    :intent "logseq"
+                    :small? true
+                    :on-click (fn []
+                                (swap! *tree (fn [q]
+                                               (let [loc' (if operator? (vec (butlast loc)) loc)]
+                                                 (query-builder/wrap-operator q loc' op))))
+                                (toggle-fn))))]
 
       (when operator?
         [:div
@@ -453,12 +465,12 @@
          [:div.flex.flex-row.gap-2
           (for [op (remove #{(keyword (string/lower-case clause))} query-builder/operators)]
             (ui/button (string/upper-case (name op))
-              :intent "logseq"
-              :small? true
-              :on-click (fn []
-                          (swap! *tree (fn [q]
-                                         (query-builder/replace-element q loc op)))
-                          (toggle-fn))))]])])
+                       :intent "logseq"
+                       :small? true
+                       :on-click (fn []
+                                   (swap! *tree (fn [q]
+                                                  (query-builder/replace-element q loc op)))
+                                   (toggle-fn))))]])])
    {:modal-class (util/hiccup->class
                   "origin-top-right.absolute.left-0.mt-2.ml-2.rounded-md.shadow-lg.w-64")}))
 
@@ -505,10 +517,27 @@
                           [:and [@tree]])]
     (clauses-group *tree *find [0] kind' clauses)))
 
+(defn sanitize-q
+  [q-str]
+  (if (string/blank? q-str)
+    ""
+    (if (or (common-util/wrapped-by-parens? q-str)
+            (common-util/wrapped-by-quotes? q-str)
+            (page-ref/page-ref? q-str))
+      q-str
+      (str "\"" q-str "\""))))
+
+(defn- get-q
+  [block]
+  (sanitize-q (or (:file-version/query-macro-title block)
+                  (:block/title block)
+                  "")))
+
 (rum/defcs builder <
   (rum/local nil ::find)
   {:init (fn [state]
-           (let [q-str (first (:rum/args state))
+           (let [block (first (:rum/args state))
+                 q-str (get-q block)
                  query (common-util/safe-read-string
                         query-dsl/custom-readers
                         (query-dsl/pre-transform-query q-str))
@@ -522,10 +551,9 @@
                           :else
                           [:and])
                  tree (query-builder/from-dsl query')
-                 *tree (atom tree)
-                 config (last (:rum/args state))]
+                 *tree (atom tree)]
              (add-watch *tree :updated (fn [_ _ _old _new]
-                                         (when-let [block (:block config)]
+                                         (when block
                                            (let [q (if (= [:and] @*tree)
                                                      ""
                                                      (let [result (query-builder/->dsl @*tree)]
@@ -533,15 +561,16 @@
                                                          (util/format "\"%s\"" result)
                                                          (str result))))
                                                  repo (state/get-current-repo)
-                                                 block (db/pull [:block/uuid (:block/uuid block)])]
-                                             (when block
+                                                 block (db/entity [:block/uuid (:block/uuid block)])]
+                                             (if (config/db-based-graph? (state/get-current-repo))
+                                               (editor-handler/save-block! repo (:block/uuid block) q)
                                                (let [content (string/replace (:block/title block)
                                                                              #"\{\{query[^}]+\}\}"
                                                                              (util/format "{{query %s}}" q))]
                                                  (editor-handler/save-block! repo (:block/uuid block) content)))))))
              (assoc state ::tree *tree)))
    :will-mount (fn [state]
-                 (let [q-str (first (:rum/args state))
+                 (let [q-str (get-q (first (:rum/args state)))
                        blocks-query? (:blocks? (query-dsl/parse-query q-str))
                        find-mode (cond
                                    blocks-query?
@@ -552,7 +581,7 @@
                                    nil)]
                    (when find-mode (reset! (::find state) find-mode))
                    state))}
-  [state _query _config]
+  [state _block _option]
   (let [*find (::find state)
         *tree (::tree state)]
     [:div.cp__query-builder

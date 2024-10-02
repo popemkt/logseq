@@ -9,7 +9,8 @@
             [frontend.worker.search :as search]
             [cljs-bean.core :as bean]
             [logseq.db.sqlite.util :as sqlite-util]
-            [logseq.common.config :as common-config]))
+            [logseq.common.config :as common-config]
+            [logseq.common.util :as common-util]))
 
 ;; TODO: fixes/rollback
 
@@ -96,6 +97,28 @@
                               [:db/add id new prop-value]]))))
             old-new-props)))
 
+(defn- rename-properties
+  [props-to-rename]
+  (fn [conn _search-db]
+    (when (ldb/db-based-graph? @conn)
+      (let [props-tx (mapv (fn [[old new]]
+                             (merge {:db/id (:db/id (d/entity @conn old))
+                                     :db/ident new}
+                                    (when-let [new-title (get-in db-property/built-in-properties [new :title])]
+                                      {:block/title new-title
+                                       :block/name (common-util/page-name-sanity-lc new-title)})))
+                           props-to-rename)]
+       ;; Property changes need to be in their own tx for subsequent uses of properties to take effect
+        (ldb/transact! conn props-tx {:db-migrate? true})
+
+        (mapcat (fn [[old new]]
+                 ;; can't use datoms b/c user properties aren't indexed
+                  (->> (d/q '[:find ?b ?prop-v :in $ ?prop :where [?b ?prop ?prop-v]] @conn old)
+                       (mapcat (fn [[id prop-value]]
+                                 [[:db/retract id old]
+                                  [:db/add id new prop-value]]))))
+                props-to-rename)))))
+
 (defn- update-block-type-many->one
   [conn _search-db]
   (let [db @conn
@@ -123,7 +146,7 @@
                                          types)]
                               (when type
                                 [[:db/retract id :block/type]
-                                [:db/add id :block/type type]])))))
+                                 [:db/add id :block/type type]])))))
         schema (:schema db)]
     (ldb/transact! conn new-type-tx {:db-migrate? true})
     (d/reset-schema! conn (update schema :block/type #(assoc % :db/cardinality :db.cardinality/one)))
@@ -134,12 +157,12 @@
   (let [db @conn]
     (when (ldb/db-based-graph? db)
       (let [datoms (d/datoms db :avet :class/parent)]
-       (->> (set (map :e datoms))
-            (mapcat
-             (fn [id]
-               (let [value (:db/id (:class/parent (d/entity db id)))]
-                 [[:db/retract id :class/parent]
-                  [:db/add id :logseq.property/parent value]]))))))))
+        (->> (set (map :e datoms))
+             (mapcat
+              (fn [id]
+                (let [value (:db/id (:class/parent (d/entity db id)))]
+                  [[:db/retract id :class/parent]
+                   [:db/add id :logseq.property/parent value]]))))))))
 
 (defn- deprecate-class-schema-properties
   [conn _search-db]
@@ -184,12 +207,29 @@
             fix-data (keep
                       (fn [d]
                         (if-let [id (if (= :all-pages (:v d))
-                                   (:db/id (ldb/get-case-page db common-config/views-page-name))
-                                   (:db/id (d/entity db (:v d))))]
+                                      (:db/id (ldb/get-case-page db common-config/views-page-name))
+                                      (:db/id (d/entity db (:v d))))]
                           [:db/add (:e d) :logseq.property/view-for id]
                           [:db/retract (:e d) :logseq.property/view-for (:v d)]))
                       datoms)]
         (cons fix-schema fix-data)))))
+
+(defn- add-card-properties
+  [conn _search-db]
+  (let [db @conn]
+    (when (ldb/db-based-graph? db)
+      (let [card (d/entity db :logseq.class/Card)
+            card-id (:db/id card)]
+        [[:db/add card-id :logseq.property.class/properties :logseq.property.fsrs/due]
+         [:db/add card-id :logseq.property.class/properties :logseq.property.fsrs/state]]))))
+
+(defn- add-query-property-to-query-tag
+  [conn _search-db]
+  (let [db @conn]
+    (when (ldb/db-based-graph? db)
+      (let [query (d/entity db :logseq.class/Query)
+            query-id (:db/id query)]
+        [[:db/add query-id :logseq.property.class/properties :logseq.property/query]]))))
 
 (defn- add-addresses-in-kvs-table
   [^Object sqlite-db]
@@ -251,7 +291,16 @@
    [17 {:fix update-db-attrs-type}]
    [18 {:properties [:logseq.property.view/type]}]
    [19 {:classes [:logseq.class/Query]}]
-   [20 {:fix fix-view-for}]])
+   [20 {:fix fix-view-for}]
+   [21 {:properties [:logseq.property.table/sized-columns]}]
+   [22 {:properties [:logseq.property.fsrs/state :logseq.property.fsrs/due]}]
+   [23 {:fix add-card-properties}]
+   [24 {:classes [:logseq.class/Cards]}]
+   [25 {:properties [:logseq.property/query]
+        :fix add-query-property-to-query-tag}]
+   [26 {:properties [:logseq.property.node/type]}]
+   [27 {:properties [:logseq.property.code/mode]}]
+   [28 {:fix (rename-properties {:logseq.property.node/type :logseq.property.node/display-type})}]])
 
 (let [max-schema-version (apply max (map first schema-version->updates))]
   (assert (<= db-schema/version max-schema-version))

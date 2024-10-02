@@ -1,6 +1,7 @@
 (ns frontend.components.views
   "Different views of blocks"
-  (:require [cljs-time.coerce :as tc]
+  (:require [cljs-bean.core :as bean]
+            [cljs-time.coerce :as tc]
             [cljs-time.core :as t]
             [clojure.set :as set]
             [clojure.string :as string]
@@ -17,6 +18,7 @@
             [frontend.ui :as ui]
             [frontend.util :as util]
             [goog.dom :as gdom]
+            [dommy.core :as dom]
             [goog.functions :refer [debounce]]
             [logseq.db.frontend.property :as db-property]
             [logseq.db.frontend.property.type :as db-property-type]
@@ -117,7 +119,8 @@
           :header (fn [table _column] (header-checkbox table))
           :cell (fn [table row column]
                   (row-checkbox table row column))
-          :column-list? false}
+          :column-list? false
+          :resizable? false}
          (when with-object-name?
            {:id :block/title
             :name "Name"
@@ -129,7 +132,8 @@
         (keep
          (fn [property]
            (let [ident (or (:db/ident property) (:id property))]
-             (when-not (contains? #{:logseq.property/built-in?} ident)
+             (when-not (or (contains? #{:logseq.property/built-in?} ident)
+                           (contains? #{:map :entity} (get-in property [:block/schema :type])))
                (let [property (if (de/entity? property)
                                 property
                                 (or (db/entity ident) property))
@@ -166,12 +170,12 @@
 
         [{:id :block/created-at
           :name (t :page/created-at)
-          :type :date-time
+          :type :datetime
           :header header-cp
           :cell timestamp-cell-cp}
          {:id :block/updated-at
           :name (t :page/updated-at)
-          :type :date-time
+          :type :datetime
           :header header-cp
           :cell timestamp-cell-cp}])
        (remove nil?)))
@@ -218,13 +222,23 @@
           (:name column)))))))))
 
 (defn- get-column-size
-  [column]
-  (case (:id column)
-    :select 32
-    :add-property 160
-    (:block/title :block/name) 360
-    (:block/created-at :block/updated-at) 160
-    180))
+  [column sized-columns]
+  (let [id (:id column)
+        size (get sized-columns id)]
+    (cond
+      (number? size)
+      size
+
+      (= id :logseq.property/query)
+      400
+
+      :else
+      (case id
+        :select 32
+        :add-property 160
+        (:block/title :block/name) 360
+        (:block/created-at :block/updated-at) 160
+        180))))
 
 (rum/defc add-property-button < rum/static
   []
@@ -252,14 +266,98 @@
                    (on-delete-rows table selected-rows))}
       (ui/icon "trash")))))
 
+(rum/defc column-resizer
+  [_column on-sized!]
+  (let [*el (rum/use-ref nil)
+        [dx set-dx!] (rum/use-state nil)
+        [width set-width!] (rum/use-state nil)
+        add-resizing-class #(dom/add-class! js/document.documentElement "is-resizing-buf")
+        remove-resizing-class #(dom/remove-class! js/document.documentElement "is-resizing-buf")]
+
+    (rum/use-effect!
+     (fn []
+       (when (number? dx)
+         (some-> (rum/deref *el)
+                 (dom/set-style! :transform (str "translate3D(" dx "px , 0, 0)")))))
+     [dx])
+
+    (rum/use-effect!
+     (fn []
+       (when-let [el (and (fn? js/window.interact) (rum/deref *el))]
+         (let [*field-rect (atom nil)
+               min-width 120
+               max-width 500]
+           (-> (js/interact el)
+               (.draggable
+                (bean/->js
+                 {:listeners
+                  {:start (fn []
+                            (let [{:keys [width right] :as rect} (bean/->clj (.toJSON (.getBoundingClientRect (.closest el ".ls-table-header-cell"))))
+                                  left-dx (if (>= width min-width) (- min-width width) 0)
+                                  right-dx (if (<= width max-width) (- max-width width) 0)]
+                              (reset! *field-rect rect)
+                              (swap! *field-rect assoc
+                                 ;; calculate left/right boundary
+                                     :left-dx left-dx
+                                     :right-dx right-dx
+                                     :left-b (inc (+ left-dx right))
+                                     :right-b (inc (+ right-dx right)))
+                              (dom/add-class! el "is-active")))
+                   :move (fn [^js e]
+                           (let [dx (.-dx e)
+                                 pointer-x (js/Math.floor (.-clientX e))
+                                 {:keys [left-b right-b]} @*field-rect
+                                 left-b (js/Math.floor left-b)
+                                 right-b (js/Math.floor right-b)]
+                             (when (and (> pointer-x left-b)
+                                        (< pointer-x right-b))
+                               (set-dx! (fn [dx']
+                                          (if (contains? #{min-width max-width} (abs dx'))
+                                            dx'
+                                            (let [to-dx (+ (or dx' 0) dx)
+                                                  {:keys [left-dx right-dx]} @*field-rect]
+                                              (cond
+                                                 ;; left
+                                                (neg? to-dx) (if (> (abs left-dx) (abs to-dx)) to-dx left-dx)
+                                                 ;; right
+                                                (pos? to-dx) (if (> right-dx to-dx) to-dx right-dx)))))))))
+                   :end (fn []
+                          (set-dx!
+                           (fn [dx]
+                             (let [w (js/Math.round (+ dx (:width @*field-rect)))]
+                               (set-width! (cond
+                                             (< w min-width) min-width
+                                             (> w max-width) max-width
+                                             :else w)))
+                             (reset! *field-rect nil)
+                             (dom/remove-class! el "is-active")
+                             0)))}}))
+               (.styleCursor false)
+               (.on "dragstart" add-resizing-class)
+               (.on "dragend" remove-resizing-class)
+               (.on "mousedown" util/stop-propagation)))))
+     [])
+
+    (rum/use-effect!
+     (fn []
+       (when (number? width)
+         (on-sized! width)))
+     [width])
+
+    [:a.ls-table-resize-handle
+     {:data-no-dnd true
+      :ref *el}]))
+
 (defn- table-header
   [table columns {:keys [show-add-property? add-property!] :as option} selected-rows]
   (let [set-ordered-columns! (get-in table [:data-fns :set-ordered-columns!])
+        set-sized-columns! (get-in table [:data-fns :set-sized-columns!])
+        sized-columns (get-in table [:state :sized-columns])
         items (mapv (fn [column]
                       {:id (:name column)
                        :value (:id column)
                        :content (let [header-fn (:header column)
-                                      width (get-column-size column)
+                                      width (get-column-size column sized-columns)
                                       select? (= :select (:id column))]
                                   [:div.ls-table-header-cell
                                    {:style {:width width
@@ -267,7 +365,12 @@
                                     :class (when select? "!border-0")}
                                    (if (fn? header-fn)
                                      (header-fn table column)
-                                     header-fn)])
+                                     header-fn)
+                                   ;; resize handle
+                                   (when-not (false? (:resizable? column))
+                                     (column-resizer column
+                                                     (fn [size]
+                                                       (set-sized-columns! (assoc sized-columns (:id column) size)))))])
                        :disabled? (= (:id column) :select)}) columns)
         items (if show-add-property?
                 (conj items
@@ -297,7 +400,8 @@
                   (conj (vec columns)
                         {:id :add-property
                          :cell (fn [_table _row _column])})
-                  columns)]
+                  columns)
+        sized-columns (get-in table [:state :sized-columns])]
     (shui/table-row
      (merge
       props
@@ -306,7 +410,7 @@
      (for [column columns]
        (let [id (str (:id row) "-" (:id column))
              render (get column :cell)
-             width (get-column-size column)
+             width (get-column-size column sized-columns)
              select? (= (:id column) :select)
              add-property? (= (:id column) :add-property)]
          (when render
@@ -353,10 +457,10 @@
 
 (comment
   (defn- property-ref-type?
-   [property]
-   (let [schema (:block/schema property)
-         type (:type schema)]
-     (db-property-type/all-ref-property-types type))))
+    [property]
+    (let [schema (:block/schema property)
+          type (:type schema)]
+      (db-property-type/all-ref-property-types type))))
 
 (defn- get-property-values
   [rows property]
@@ -375,9 +479,11 @@
           values)
      (sort-by :label))))
 
-(defn timestamp-property?
-  [ident]
-  (contains? #{:block/created-at :block/updated-at} ident))
+(defn datetime-property?
+  [property]
+  (or
+   (= :datetime (get-in property [:block/schema :type]))
+   (contains? #{:block/created-at :block/updated-at} (:db/ident property))))
 
 (def timestamp-options
   [{:value "1 week ago"
@@ -412,7 +518,7 @@
   [columns {:keys [data-fns] :as table}]
   (let [[property set-property!] (rum/use-state nil)
         schema (:schema (db/get-db))
-        timestamp? (timestamp-property? (:db/ident property))
+        timestamp? (datetime-property? property)
         set-filters! (:set-filters! data-fns)
         filters (get-in table [:state :filters])
         columns (remove #(false? (:column-list? %)) columns)
@@ -511,7 +617,7 @@
 
 (defn get-property-operators
   [property]
-  (if (contains? #{:block/created-at :block/updated-at} (:db/ident property))
+  (if (datetime-property? property)
     [:before :after]
     (concat
      [:is :is-not]
@@ -519,7 +625,7 @@
        (case (get-in property [:block/schema :type])
          (:default :url :node)
          [:text-contains :text-not-contains]
-         :date
+         (:date)
          [:date-before :date-after]
          :number
          [:number-gt :number-lt :number-gte :number-lte :between]
@@ -706,7 +812,6 @@
                         (set-filters! new-filters))))
         :class "w-24 !h-6 !py-0 border-none focus-visible:ring-0 focus-visible:ring-offset-0"})
 
-
       (filter-value-select table property value operator idx))))
 
 (rum/defc filters-row < rum/static
@@ -874,7 +979,8 @@
    filters))
 
 (defn- db-set-table-state!
-  [entity {:keys [set-sorting! set-filters! set-visible-columns! set-ordered-columns!]}]
+  [entity {:keys [set-sorting! set-filters! set-visible-columns!
+                  set-ordered-columns! set-sized-columns!]}]
   (let [repo (state/get-current-repo)]
     {:set-sorting!
      (fn [sorting]
@@ -896,33 +1002,37 @@
      (fn [ordered-columns]
        (let [ids (vec (remove #{:select} ordered-columns))]
          (set-ordered-columns! ordered-columns)
-         (property-handler/set-block-property! repo (:db/id entity) :logseq.property.table/ordered-columns ids)))}))
+         (property-handler/set-block-property! repo (:db/id entity) :logseq.property.table/ordered-columns ids)))
+     :set-sized-columns!
+     (fn [sized-columns]
+       (set-sized-columns! sized-columns)
+       (property-handler/set-block-property! repo (:db/id entity) :logseq.property.table/sized-columns sized-columns))}))
 
 (rum/defc table-view < rum/static
   [table option row-selection add-new-object! ready?]
   (let [selected-rows (shui/table-get-selection-rows row-selection (:rows table))]
     (shui/table
-    (let [columns' (:columns table)
-          rows (:rows table)]
-      [:div.ls-table-rows.content.overflow-x-auto.force-visible-scrollbar
-       {:class (when (not ready?) "invisible")}
-       [:div.relative
-        (table-header table columns' option selected-rows)
+     (let [columns' (:columns table)
+           rows (:rows table)]
+       [:div.ls-table-rows.content.overflow-x-auto.force-visible-scrollbar
+        {:class (when (not ready?) "invisible")}
+        [:div.relative
+         (table-header table columns' option selected-rows)
 
-        (ui/virtualized-list
-         {:custom-scroll-parent (gdom/getElement "main-content-container")
-          :increase-viewport-by 128
-          :overscan 128
-          :compute-item-key (fn [idx]
-                              (let [block (nth rows idx)]
-                                (str "table-row-" (:db/id block))))
-          :total-count (count rows)
-          :item-content (fn [idx]
-                          (let [row (nth rows idx)]
-                            (table-row table row columns' {} option)))})
+         (ui/virtualized-list
+          {:custom-scroll-parent (gdom/getElement "main-content-container")
+           :increase-viewport-by 128
+           :overscan 128
+           :compute-item-key (fn [idx]
+                               (let [block (nth rows idx)]
+                                 (str "table-row-" (:db/id block))))
+           :total-count (count rows)
+           :item-content (fn [idx]
+                           (let [row (nth rows idx)]
+                             (table-row table row columns' {} option)))})
 
-        (when add-new-object!
-          (shui/table-footer (add-new-row table)))]]))))
+         (when add-new-object!
+           (shui/table-footer (add-new-row table)))]]))))
 
 (rum/defc list-view < rum/static
   [view-entity result config]
@@ -951,11 +1061,14 @@
         hidden-columns (:logseq.property.table/hidden-columns view-entity)
         [visible-columns set-visible-columns!] (rum/use-state (zipmap hidden-columns (repeat false)))
         ordered-columns (vec (concat [:select] (:logseq.property.table/ordered-columns view-entity)))
+        sized-columns (:logseq.property.table/sized-columns view-entity)
         [ordered-columns set-ordered-columns!] (rum/use-state ordered-columns)
-        {:keys [set-sorting! set-filters! set-visible-columns! set-ordered-columns!]}
+        [sized-columns set-sized-columns!] (rum/use-state sized-columns)
+        {:keys [set-sorting! set-filters! set-visible-columns! set-ordered-columns! set-sized-columns!]}
         (db-set-table-state! view-entity {:set-sorting! set-sorting!
                                           :set-filters! set-filters!
                                           :set-visible-columns! set-visible-columns!
+                                          :set-sized-columns! set-sized-columns!
                                           :set-ordered-columns! set-ordered-columns!})
         row-filter-fn (fn []
                         (fn [row]
@@ -971,12 +1084,14 @@
                                           :row-filter row-filter
                                           :row-selection row-selection
                                           :visible-columns visible-columns
+                                          :sized-columns sized-columns
                                           :ordered-columns ordered-columns}
                                   :data-fns {:set-data! set-data!
                                              :set-filters! set-filters!
                                              :set-sorting! set-sorting!
                                              :set-visible-columns! set-visible-columns!
                                              :set-ordered-columns! set-ordered-columns!
+                                             :set-sized-columns! set-sized-columns!
                                              :set-row-selection! set-row-selection!
                                              :add-new-object! add-new-object!}})
 
@@ -1033,7 +1148,20 @@
 
        (table-view table option row-selection add-new-object! ready?))]))
 
-(rum/defc view < rum/reactive
+(rum/defc view
+  "Provides a view for data like query results and tagged objects, multiple
+   layouts such as table and list are supported. Args:
+   * view-entity: a db Entity
+   * option:
+     * title-key: dict key defaults to `:views.table/default-title`
+     * data: a collections of entities
+     * set-data!: `fn` to update `data`
+     * columns: view columns including properties and db attributes, which could be built by `build-columns`
+     * add-new-object!: `fn` to create a new object (or row)
+     * show-add-property?: whether to show `Add property`
+     * add-property!: `fn` to add a new property (or column)
+     * on-delete-rows: `fn` to trigger when deleting selected objects"
+  < rum/reactive
   [view-entity option]
   (let [view-entity' (db/sub-block (:db/id view-entity))]
     (rum/with-key (view-inner view-entity' option)

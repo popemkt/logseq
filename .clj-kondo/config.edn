@@ -155,6 +155,7 @@
              logseq.common.util.page-ref page-ref
              logseq.common.util.block-ref block-ref
              logseq.common.util.macro macro-util
+             logseq.common.util.namespace ns-util
              logseq.db ldb
              logseq.db.frontend.content db-content
              logseq.db.frontend.class db-class
@@ -172,6 +173,7 @@
              logseq.db.frontend.validate db-validate
              logseq.db.sqlite.cli sqlite-cli
              logseq.db.sqlite.util sqlite-util
+             logseq.db.test.helper db-test
              logseq.graph-parser graph-parser
              logseq.graph-parser.text text
              logseq.graph-parser.db gp-db
@@ -200,6 +202,7 @@
  :lint-as {promesa.core/let clojure.core/let
            promesa.core/loop clojure.core/loop
            promesa.core/recur clojure.core/recur
+           promesa.core/doseq clojure.core/doseq
            rum.core/defcc rum.core/defc
            rum.core/with-context clojure.core/let
            rum.core/defcontext clojure.core/def

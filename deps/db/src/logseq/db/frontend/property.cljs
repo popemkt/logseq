@@ -38,6 +38,16 @@
                                    :cardinality :many
                                    :public? true
                                    :classes #{:logseq.class/Root}}}
+   :logseq.property.node/display-type {:title "Node Display Type"
+                                       :schema {:type :keyword
+                                                :public? false
+                                                :hide? true
+                                                :view-context :block}}
+   :logseq.property.code/mode {:title "Code mode"
+                               :schema {:type :string
+                                        :public? false
+                                        :hide? true
+                                        :view-context :block}}
    :logseq.property/parent {:title "Parent"
                             :schema {:type :node
                                      :public? true
@@ -51,6 +61,11 @@
                                           :schema {:type :checkbox
                                                    :public? true
                                                    :view-context :class}}
+   :logseq.property/query       {:title "Query"
+                                 :schema {:type :default
+                                          :public? true
+                                          :hide? true
+                                          :view-context :block}}
    :logseq.property/page-tags {:title "Page Tags"
                                :schema {:type :page
                                         :public? true
@@ -209,6 +224,12 @@
                                            {:type :coll
                                             :hide? true
                                             :public? false}}
+
+   :logseq.property.table/sized-columns {:schema
+                                         {:type :map
+                                          :hide? true
+                                          :public? false}}
+
    :logseq.property/view-for {:schema
                               {:type :node
                                :hide? true
@@ -216,7 +237,17 @@
    :logseq.property.asset/remote-metadata {:schema
                                            {:type :map
                                             :hide? true
-                                            :public? false}}))
+                                            :public? false}}
+   :logseq.property.fsrs/due {:title "Due"
+                              :schema
+                              {:type :datetime
+                               :hide? false
+                               :public? false}}
+   :logseq.property.fsrs/state {:title "State"
+                                :schema
+                                {:type :map
+                                 :hide? false ; TODO: show for debug now, hide it later
+                                 :public? false}}))
 
 (def built-in-properties
   (->> built-in-properties*
@@ -243,8 +274,9 @@
         "All db attribute properties are configured in built-in-properties")
 
 (def logseq-property-namespaces
-  #{"logseq.property" "logseq.property.tldraw" "logseq.property.pdf" "logseq.task"
-    "logseq.property.linked-references" "logseq.property.asset" "logseq.property.table"
+  #{"logseq.property" "logseq.property.tldraw" "logseq.property.pdf" "logseq.property.fsrs" "logseq.task"
+    "logseq.property.linked-references" "logseq.property.asset" "logseq.property.table" "logseq.property.node"
+    "logseq.property.code"
     "logseq.property.journal" "logseq.property.class" "logseq.property.view"})
 
 (defn logseq-property?

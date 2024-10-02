@@ -25,6 +25,15 @@
     (throw (ex-info "Read-only property value shouldn't be edited"
                     {:property property-ident}))))
 
+(defn- throw-error-if-add-class-parent-to-page
+  [blocks entity]
+  (when (and (ldb/class? entity) (not (every? ldb/class? blocks)))
+    (throw (ex-info "Can't set a tag as a parent for non-tag page"
+                    {:type :notification
+                     :payload {:message "Can't set a tag as a parent for non-tag page"
+                               :type :warning}
+                     :blocks (map #(select-keys % [:db/id :block/title]) (remove ldb/class? blocks))}))))
+
 (defn- build-property-value-tx-data
   ([block property-id value]
    (build-property-value-tx-data block property-id value (= property-id :logseq.task/status)))
@@ -42,7 +51,6 @@
        [(when multiple-values-empty?
           [:db/retract (:db/id block) property-id :logseq.property/empty-placeholder])
         block-tx-data]))))
-
 
 (defn- get-property-value-schema
   "Gets a malli schema to validate the property value for the given property type and builds
@@ -222,7 +230,9 @@
 (defn- find-or-create-property-value
   "Find or create a property value. Only to be used with properties that have ref types"
   [conn property-id v]
-  (or (get-property-value-eid @conn property-id v)
+  ;; FIXME: some properties should always create new values
+  (or (when-not (contains? #{:logseq.property/query} property-id)
+        (get-property-value-eid @conn property-id v))
       (let [v-uuid (create-property-text-block! conn nil property-id v {})]
         (:db/id (d/entity @conn [:block/uuid v-uuid])))))
 
@@ -267,17 +277,19 @@
 
 (defn batch-set-property!
   "Sets properties for multiple blocks. Automatically handles property value refs.
-   Does no validation of property values.
-   NOTE: This fn only works for properties with cardinality equal to `one`."
+   Does no validation of property values."
   [conn block-ids property-id v]
   (assert property-id "property-id is nil")
   (throw-error-if-read-only-property property-id)
   (let [block-eids (map ->eid block-ids)
         property (d/entity @conn property-id)
+        _ (when (= (:db/ident property) :logseq.property/parent)
+            (throw-error-if-add-class-parent-to-page
+             (map #(d/entity @conn %) block-eids)
+             (if (number? v) (d/entity @conn v) v)))
         _ (assert (some? property) (str "Property " property-id " doesn't exist yet"))
-        _ (assert (not (db-property/many? property)) "Property must be cardinality :one in batch-set-property!")
         property-type (get-in property [:block/schema :type] :default)
-        _ (assert v "Can't set a nil property value must be not nil")
+        _ (assert (some? v) "Can't set a nil property value must be not nil")
         v' (if (db-property-type/value-ref-property-types property-type)
              (convert-ref-property-value conn property-id v property-type)
              v)
@@ -356,17 +368,13 @@
                            [[:db/retract (:db/id block) property-id property-value]]
                            {:outliner-op :save-block})))))))
 
-(defn ^:api get-class-parents
-  [db tags]
-  (let [tags' (filter ldb/class? tags)
-        result (map
-                (fn [id] (d/entity db id))
-                (mapcat ldb/get-class-parents tags'))]
-    (set result)))
+(defn ^:api get-classes-parents
+  [tags]
+  (ldb/get-classes-parents tags))
 
 (defn ^:api get-class-properties
-  [db class]
-  (let [class-parents (get-class-parents db [class])]
+  [class]
+  (let [class-parents (get-classes-parents [class])]
     (->> (mapcat (fn [class]
                    (:logseq.property.class/properties class)) (concat [class] class-parents))
          (common-util/distinct-by :db/id)
@@ -378,7 +386,7 @@
         classes (->> (:block/tags block)
                      (sort-by :block/name)
                      (filter ldb/class?))
-        class-parents (get-class-parents db classes)
+        class-parents (get-classes-parents classes)
         all-classes (->> (concat classes class-parents)
                          (filter (fn [class]
                                    (seq (:logseq.property.class/properties class)))))

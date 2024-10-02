@@ -4,24 +4,23 @@
             [clojure.string :as string]
             [datascript.core :as d]
             [datascript.impl.entity :as de :refer [Entity]]
+            [logseq.common.util :as common-util]
+            [logseq.db :as ldb]
+            [logseq.db.frontend.order :as db-order]
+            [logseq.db.frontend.property.util :as db-property-util]
             [logseq.db.frontend.schema :as db-schema]
+            [logseq.db.sqlite.create-graph :as sqlite-create-graph]
+            [logseq.db.sqlite.util :as sqlite-util]
+            [logseq.graph-parser.block :as gp-block]
+            [logseq.graph-parser.db :as gp-db]
+            [logseq.graph-parser.property :as gp-property]
+            [logseq.outliner.batch-tx :include-macros true :as batch-tx]
             [logseq.outliner.datascript :as ds]
+            [logseq.outliner.pipeline :as outliner-pipeline]
             [logseq.outliner.tree :as otree]
             [logseq.outliner.validate :as outliner-validate]
-            [logseq.common.util :as common-util]
             [malli.core :as m]
-            [malli.util :as mu]
-            [logseq.db :as ldb]
-            [logseq.graph-parser.property :as gp-property]
-            [logseq.graph-parser.db :as gp-db]
-            [logseq.graph-parser.block :as gp-block]
-            [logseq.db.frontend.property.util :as db-property-util]
-            [logseq.db.sqlite.util :as sqlite-util]
-            [logseq.db.sqlite.create-graph :as sqlite-create-graph]
-            [logseq.outliner.batch-tx :include-macros true :as batch-tx]
-            [logseq.db.frontend.order :as db-order]
-            [logseq.outliner.pipeline :as outliner-pipeline]
-            [logseq.common.util.macro :as macro-util]))
+            [malli.util :as mu]))
 
 (def ^:private block-map
   (mu/optional-keys
@@ -207,21 +206,33 @@
     (file-rebuild-block-refs repo db date-formatter block)))
 
 (defn- fix-tag-ids
-  "Updates :block/tags to reference ids from :block/refs"
-  [m]
+  "Fix or remove tags related when entered via `Escape`"
+  [m {:keys [db-graph?]}]
   (let [refs (set (map :block/name (seq (:block/refs m))))
         tags (seq (:block/tags m))]
     (if (and refs tags)
-      (update m :block/tags (fn [tags]
-                              (map (fn [tag]
-                                     (if (contains? refs (:block/name tag))
-                                       (assoc tag :block/uuid
-                                              (:block/uuid
-                                               (first (filter (fn [r] (= (:block/name tag)
-                                                                         (:block/name r)))
-                                                              (:block/refs m)))))
-                                       tag))
-                                   tags)))
+      (update m :block/tags
+              (fn [tags]
+                (cond->>
+                 ;; Update :block/tag to reference ids from :block/refs
+                 (map (fn [tag]
+                        (if (contains? refs (:block/name tag))
+                          (assoc tag :block/uuid
+                                 (:block/uuid
+                                  (first (filter (fn [r] (= (:block/name tag)
+                                                            (:block/name r)))
+                                                 (:block/refs m)))))
+                          tag))
+                      tags)
+
+                  db-graph?
+                  ;; Remove tags changing case with `Escape`
+                  ((fn [tags']
+                     (let [ref-titles (set (map :block/title (:block/refs m)))
+                           lc-ref-titles (set (map string/lower-case ref-titles))]
+                       (remove #(and (not (contains? ref-titles (:block/title %)))
+                                     (contains? lc-ref-titles (string/lower-case (:block/title %))))
+                               tags')))))))
       m)))
 
 (defn- remove-tags-when-title-changed
@@ -253,7 +264,7 @@
                          :block.temp/ast-title :block.temp/ast-body :block/level :block.temp/fully-loaded?)
                  common-util/remove-nils
                  block-with-updated-at
-                 fix-tag-ids)
+                 (fix-tag-ids {:db-graph? db-based?}))
           db @conn
           db-id (:db/id this)
           block-uuid (:block/uuid this)
@@ -271,7 +282,7 @@
                  (assoc m* :block/name page-name))
                m*)
           _ (when (and db-based?
-                      ;; page or object changed?
+                       ;; page or object changed?
                        (and (or (ldb/page? block-entity) (ldb/object? block-entity))
                             (:block/title m*)
                             (not= (:block/title m*) (:block/title block-entity))))
@@ -328,15 +339,6 @@
           (when (seq tx-data)
             (swap! txs-state (fn [txs] (concat txs tx-data))))))
 
-      ;; Add Query class when a query macro is typed or pasted
-      (when (and db-based?
-                 (not= (:block/title m*) (:block/title block-entity))
-                 (macro-util/query-macro? (:block/title m*))
-                 (empty? (:block/tags block-entity)))
-        (swap! txs-state (fn [txs]
-                           (conj (vec txs)
-                                 [:db/add (:db/id block-entity) :block/tags :logseq.class/Query]))))
-
       this))
 
   (-del [this txs-state conn]
@@ -389,7 +391,6 @@
                                       :db/id db-id)]))
                           [(assoc block :db/id (dec (- idx)))]))) blocks)
        (apply concat)))
-
 
 (defn- get-id
   [x]
@@ -589,7 +590,6 @@
           sibling? (if (ldb/page? block) false sibling?)
           block (if (de/entity? block) block (d/entity db (:db/id block)))]
       [block sibling?])))
-
 
 (defn ^:api blocks-with-level
   "Calculate `:block/level` for all the `blocks`. Blocks should be sorted already."

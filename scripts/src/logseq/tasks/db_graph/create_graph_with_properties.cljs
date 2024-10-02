@@ -4,6 +4,7 @@
    NOTE: This script is also used in CI to confirm graph creation works"
   (:require [logseq.outliner.cli :as outliner-cli]
             [logseq.common.util.date-time :as date-time-util]
+            [logseq.common.util :as common-util]
             [logseq.common.util.page-ref :as page-ref]
             [logseq.db.frontend.property.type :as db-property-type]
             [clojure.string :as string]
@@ -41,6 +42,11 @@
    ;; If this is enabled again, :uuid translation support would need to be added for :build/closed-values
    :date-closed
    {}})
+
+(defn- query [query-string]
+  {:block/title query-string
+   :build/properties {:logseq.property/query query-string}
+   :block/tags [{:db/ident :logseq.class/Query}]})
 
 (defn- create-init-data
   []
@@ -96,29 +102,30 @@
           {:block/title "node property block" :build/properties {:node [:block/uuid object-uuid]}}
           {:block/title "node without classes property block" :build/properties {:node-without-classes [:page "Page 1"]}}
           {:block/title "node-many property block" :build/properties {:node-many #{[:block/uuid object-uuid] [:page "Page object"]}}}
-          ;;  ;; :date-closed disabled for now since they're not supported
           {:block/title "date property block" :build/properties {:date [:page (date-journal-title today)]}}
           {:block/title "date-many property block" :build/properties {:date-many #{[:page (date-journal-title today)]
                                                                                    [:page (date-journal-title yesterday)]}}}
+          {:block/title "datetime property block" :build/properties {:datetime (common-util/time-ms)}}
+          ;; :date-closed disabled for now since they're not supported
           #_{:block/title "date-closed property block" :build/properties {:date-closed (random-closed-value :date-closed)}}]}
         {:page {:block/title "Block Property Queries"}
          :blocks
-         [{:block/title "{{query (property :default \"haha\")}}"}
-          {:block/title "{{query (property :default-many \"haw\")}}"}
-          {:block/title (str "{{query (property :default-closed " (pr-str (get-closed-value :default-closed)) ")}}")}
-          {:block/title "{{query (property :url \"https://logseq.com\")}}"}
-          {:block/title "{{query (property :url-many \"https://logseq.com\")}}"}
-          {:block/title (str "{{query (property :url-closed " (pr-str (get-closed-value :url-closed)) ")}}")}
-          {:block/title "{{query (property :checkbox true)}}"}
-          {:block/title "{{query (property :number 5)}}"}
-          {:block/title "{{query (property :number-many 10)}}"}
-          {:block/title (str "{{query (property :number-closed " (pr-str (get-closed-value :number-closed)) ")}}")}
-          {:block/title "{{query (property :node \"block object\")}}"}
-          {:block/title "{{query (property :node-without-classes [[Page 1]])}}"}
-          {:block/title "{{query (property :node-many [[Page object]])}}"}
-          {:block/title (str "{{query (property :date " (page-ref/->page-ref (string/capitalize (date-journal-title today))) ")}}")}
-          {:block/title (str "{{query (property :date-many " (page-ref/->page-ref (string/capitalize (date-journal-title yesterday))) ")}}")}
-          #_{:block/title (str "{{query (property :date-closed " (page-ref/->page-ref (string/capitalize (get-closed-value :date-closed))) ")}}")}]}
+         [(query "(property :default \"haha\")")
+          (query "(property :default-many \"haw\")")
+          (query (str "(property :default-closed " (pr-str (get-closed-value :default-closed)) ")"))
+          (query "(property :url \"https://logseq.com\")")
+          (query "(property :url-many \"https://logseq.com\")")
+          (query (str "(property :url-closed " (pr-str (get-closed-value :url-closed)) ")"))
+          (query "(property :checkbox true)")
+          (query "(property :number 5)")
+          (query "(property :number-many 10)")
+          (query (str "(property :number-closed " (pr-str (get-closed-value :number-closed)) ")"))
+          (query "(property :node \"block object\")")
+          (query "(property :node-without-classes [[Page 1]])")
+          (query "(property :node-many [[Page object]])")
+          (query (str "(property :date " (page-ref/->page-ref (string/capitalize (date-journal-title today))) ")"))
+          (query (str "(property :date-many " (page-ref/->page-ref (string/capitalize (date-journal-title yesterday))) ")"))
+          #_(query (str "(property :date-closed " (page-ref/->page-ref (string/capitalize (get-closed-value :date-closed))) ")"))]}
 
         ;; Page property pages and queries
         {:page {:block/title "default page" :build/properties {:default "yolo"}}}
@@ -137,25 +144,26 @@
         {:page {:block/title "date page" :build/properties {:date [:page (date-journal-title today)]}}}
         {:page {:block/title "date-many page" :build/properties {:date-many #{[:page (date-journal-title today)]
                                                                               [:page (date-journal-title yesterday)]}}}}
+        {:page {:block/title "datetime page" :build/properties {:datetime (common-util/time-ms)}}}
         #_{:page {:block/title "date-closed page" :build/properties {:date-closed (random-closed-value :date-closed)}}}
         {:page {:block/title "Page Property Queries"}
          :blocks
-         [{:block/title "{{query (page-property :default \"yolo\")}}"}
-          {:block/title "{{query (page-property :default-many \"haw\")}}"}
-          {:block/title (str "{{query (page-property :default-closed " (pr-str (get-closed-value :default-closed)) ")}}")}
-          {:block/title "{{query (page-property :url \"https://logseq.com\")}}"}
-          {:block/title "{{query (page-property :url-many \"https://logseq.com\")}}"}
-          {:block/title (str "{{query (page-property :url-closed " (pr-str (get-closed-value :url-closed)) ")}}")}
-          {:block/title "{{query (page-property :checkbox true)}}"}
-          {:block/title "{{query (page-property :number 5)}}"}
-          {:block/title "{{query (page-property :number-many 10)}}"}
-          {:block/title (str "{{query (page-property :number-closed " (pr-str (get-closed-value :number-closed)) ")}}")}
-          {:block/title "{{query (page-property :node \"block object\")}}"}
-          {:block/title "{{query (page-property :node-without-classes [[Page 1]])}}"}
-          {:block/title "{{query (page-property :node-many [[Page object]])}}"}
-          {:block/title (str "{{query (page-property :date " (page-ref/->page-ref (string/capitalize (date-journal-title today))) ")}}")}
-          {:block/title (str "{{query (page-property :date-many " (page-ref/->page-ref (string/capitalize (date-journal-title yesterday))) ")}}")}
-          #_{:block/title (str "{{query (page-property :date-closed " (page-ref/->page-ref (string/capitalize (get-closed-value :date-closed))) ")}}")}]}]))
+         [(query "(page-property :default \"yolo\")")
+          (query "(page-property :default-many \"haw\")")
+          (query (str "(page-property :default-closed " (pr-str (get-closed-value :default-closed)) ")"))
+          (query "(page-property :url \"https://logseq.com\")")
+          (query "(page-property :url-many \"https://logseq.com\")")
+          (query (str "(page-property :url-closed " (pr-str (get-closed-value :url-closed)) ")"))
+          (query "(page-property :checkbox true)")
+          (query "(page-property :number 5)")
+          (query "(page-property :number-many 10)")
+          (query (str "(page-property :number-closed " (pr-str (get-closed-value :number-closed)) ")"))
+          (query "(page-property :node \"block object\")")
+          (query "(page-property :node-without-classes [[Page 1]])")
+          (query "(page-property :node-many [[Page object]])")
+          (query (str "(page-property :date " (page-ref/->page-ref (string/capitalize (date-journal-title today))) ")"))
+          (query (str "(page-property :date-many " (page-ref/->page-ref (string/capitalize (date-journal-title yesterday))) ")"))
+          #_(query (str "(page-property :date-closed " (page-ref/->page-ref (string/capitalize (get-closed-value :date-closed))) ")"))]}]))
 
      :classes {:TestClass {}}
 

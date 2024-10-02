@@ -2,24 +2,34 @@
   "Provides util handler fns for pages"
   (:require [cljs.reader :as reader]
             [clojure.string :as string]
+            [datascript.core :as d]
+            [datascript.impl.entity :as de]
+            [electron.ipc :as ipc]
             [frontend.commands :as commands]
             [frontend.config :as config]
+            [frontend.context.i18n :refer [t]]
             [frontend.date :as date]
             [frontend.db :as db]
             [frontend.db.async :as db-async]
+            [frontend.db.conn :as conn]
             [frontend.db.model :as model]
             [frontend.fs :as fs]
             [frontend.handler.common :as common-handler]
             [frontend.handler.common.page :as page-common-handler]
-            [frontend.handler.editor :as editor-handler]
-            [frontend.handler.plugin :as plugin-handler]
-            [frontend.handler.notification :as notification]
-            [frontend.handler.property :as property-handler]
+            [frontend.handler.db-based.page :as db-page-handler]
             [frontend.handler.db-based.property :as db-property-handler]
-            [frontend.handler.ui :as ui-handler]
+            [frontend.handler.editor :as editor-handler]
             [frontend.handler.file-based.nfs :as nfs-handler]
             [frontend.handler.graph :as graph-handler]
+            [frontend.handler.notification :as notification]
+            [frontend.handler.plugin :as plugin-handler]
+            [frontend.handler.property :as property-handler]
+            [frontend.handler.property.util :as pu]
+            [frontend.handler.ui :as ui-handler]
             [frontend.mobile.util :as mobile-util]
+            [frontend.modules.outliner.op :as outliner-op]
+            [frontend.modules.outliner.ui :as ui-outliner-tx]
+            [frontend.persist-db.browser :as db-browser]
             [frontend.state :as state]
             [frontend.util :as util]
             [frontend.util.cursor :as cursor]
@@ -29,23 +39,14 @@
             [goog.object :as gobj]
             [lambdaisland.glogi :as log]
             [logseq.common.config :as common-config]
-            [logseq.common.util :as common-util]
-            [logseq.common.util.page-ref :as page-ref]
-            [logseq.common.util.block-ref :as block-ref]
-            [promesa.core :as p]
             [logseq.common.path :as path]
-            [electron.ipc :as ipc]
-            [frontend.context.i18n :refer [t]]
-            [frontend.persist-db.browser :as db-browser]
-            [datascript.core :as d]
-            [frontend.db.conn :as conn]
+            [logseq.common.util :as common-util]
+            [logseq.common.util.block-ref :as block-ref]
+            [logseq.common.util.page-ref :as page-ref]
             [logseq.db :as ldb]
             [logseq.graph-parser.db :as gp-db]
-            [frontend.modules.outliner.ui :as ui-outliner-tx]
-            [frontend.modules.outliner.op :as outliner-op]
-            [frontend.handler.property.util :as pu]
-            [datascript.impl.entity :as de]
-            [frontend.handler.db-based.page :as db-page-handler]))
+            [logseq.graph-parser.text :as text]
+            [promesa.core :as p]))
 
 (def <create! page-common-handler/<create!)
 (def <delete! page-common-handler/<delete!)
@@ -79,7 +80,6 @@
          (page-common-handler/db-favorited? page-block-uuid)))
       (page-common-handler/file-favorited? page-name))))
 
-
 (defn get-favorites
   "return page-block entities"
   []
@@ -97,7 +97,6 @@
                               (mapv util/safe-page-name-sanity-lc)
                               (distinct))]
           (keep (fn [page-name] (db/get-page page-name)) page-names))))))
-
 
 ;; FIXME: add whiteboard
 (defn- get-directory
@@ -168,7 +167,7 @@
 (defn load-more-journals!
   []
   (when (has-more-journals?)
-    (state/set-journals-length! (+ (:journals-length @state/state) 1))))
+    (state/set-journals-length! (+ (:journals-length @state/state) 7))))
 
 (defn update-public-attribute!
   [page value]
@@ -321,9 +320,12 @@
                      (string/replace-first (str (t :new-tag) " ") "")
                      (string/replace-first (str (t :new-page) " ") ""))
           wrapped? (= page-ref/left-brackets (common-util/safe-subs edit-content (- pos 2) pos))
-          wrapped-tag (if (and (util/safe-re-find #"\s+" chosen) (not wrapped?))
-                        (page-ref/->page-ref chosen)
-                        chosen)
+          chosen-last-part (if (text/namespace-page? chosen)
+                             (text/get-namespace-last-part chosen)
+                             chosen)
+          wrapped-tag (if (and (util/safe-re-find #"\s+" chosen-last-part) (not wrapped?))
+                        (page-ref/->page-ref chosen-last-part)
+                        chosen-last-part)
           q (if (editor-handler/get-selected-text) "" q)
           last-pattern (if wrapped?
                          q
@@ -371,8 +373,12 @@
                      (when-not (de/entity? chosen-result)
                        (<create! chosen'
                                  {:redirect? false
-                                  :create-first-block? false})))
-            ref-text' (if result (page-ref/->page-ref (:block/title result)) ref-text)]
+                                  :create-first-block? false
+                                  :split-namespace? true})))
+            ref-text' (if result
+                        (let [title (:block/title result)]
+                          (page-ref/->page-ref title))
+                        ref-text)]
       (p/do!
        (editor-handler/insert-command! id
                                        ref-text'

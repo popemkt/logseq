@@ -32,7 +32,7 @@
 
 (defn- search
   [mode]
-  (editor-handler/escape-editing true)
+  (editor-handler/escape-editing {:select? true})
   (if (state/get-search-mode)
     (js/setTimeout #(route-handler/go-to-search! mode) 128)
     (route-handler/go-to-search! mode)))
@@ -179,6 +179,18 @@
 
    :cards/recall                            {:binding "t"
                                              :fn      srs/recall}
+
+   :cards/again                             {:binding "1"
+                                             :fn      srs/card-again}
+
+   :cards/hard                              {:binding "2"
+                                             :fn      srs/card-hard}
+
+   :cards/good                              {:binding "3"
+                                             :fn      srs/card-good}
+
+   :cards/easy                              {:binding "4"
+                                             :fn      srs/card-easy}
 
    :editor/escape-editing                   {:binding []
                                              :fn      (fn [_ _]
@@ -462,7 +474,7 @@
    :command/run                             {:binding  "mod+shift+1"
                                              :inactive (not (util/electron?))
                                              :fn       #(do
-                                                          (editor-handler/escape-editing true)
+                                                          (editor-handler/escape-editing {:select? true})
                                                           (state/pub-event! [:command/run]))}
 
    :go/home                                 {:binding "g h"

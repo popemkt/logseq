@@ -25,17 +25,18 @@
 
 (defn- get-block-title
   [^Entity e k default-value]
-  (let [db (.-db e)]
-    (if (and (db-based-graph? db) (= "journal" (:block/type e)))
+  (let [db (.-db e)
+        db-based? (db-based-graph? db)]
+    (if (and db-based? (= "journal" (:block/type e)))
       (get-journal-title db e)
       (or
        (get (.-kv e) k)
-       (let [result (lookup-entity e k default-value)]
-         (or
-          (if (string? result)
-            (db-content/special-id-ref->page-ref result (:block/refs e))
-            result)
-          default-value))))))
+       (let [result (lookup-entity e k default-value)
+             result' (if (string? result)
+                       (db-content/special-id-ref->page-ref result
+                                                            (:block/refs e))
+                       result)]
+         (or result' default-value))))))
 
 (defn lookup-kv-then-entity
   ([e k] (lookup-kv-then-entity e k nil))
