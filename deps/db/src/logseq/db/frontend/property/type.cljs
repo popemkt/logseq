@@ -4,7 +4,8 @@
   (:require [datascript.core :as d]
             [clojure.set :as set]
             [logseq.common.util.macro :as macro-util]
-            [logseq.db.frontend.entity-util :as entity-util]))
+            [logseq.db.frontend.entity-util :as entity-util]
+            [clojure.string :as string]))
 
 ;; Config vars
 ;; ===========
@@ -82,12 +83,13 @@
   (macro-util/macro? s))
 
 (defn- url-entity?
+  "Empty string, url or macro url"
   [db val {:keys [new-closed-value?]}]
   (if new-closed-value?
     (or (url? val) (macro-url? val))
     (when-let [ent (d/entity db val)]
-      (or (url? (:property.value/content ent))
-          (macro-url? (:property.value/content ent))))))
+      (let [title (:block/title ent)]
+        (or (string/blank? title) (url? title) (macro-url? title))))))
 
 (defn- entity?
   [db id]

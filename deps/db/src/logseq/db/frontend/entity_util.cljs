@@ -16,6 +16,10 @@
   (contains? #{"page" "journal" "whiteboard" "class" "property" "hidden"}
              (:block/type block)))
 
+(defn internal-page?
+  [entity]
+  (= (:block/type entity) "page"))
+
 (defn class?
   [entity]
   (= (:block/type entity) "class"))
@@ -37,6 +41,12 @@
   "Given a page entity or map, check if it is a journal page"
   [page]
   (= (:block/type page) "journal"))
+
+(defn asset?
+  "Given an entity or map, check if it is an asset block"
+  [entity]
+  ;; Can't use :block/tags because this is used in some perf sensitive fns like ldb/transact!
+  (some? (:logseq.property.asset/type entity)))
 
 (defn hidden?
   [page]

@@ -43,7 +43,7 @@
                                                 :public? false
                                                 :hide? true
                                                 :view-context :block}}
-   :logseq.property.code/mode {:title "Code mode"
+   :logseq.property.code/lang {:title "Code mode"
                                :schema {:type :string
                                         :public? false
                                         :hide? true
@@ -52,11 +52,19 @@
                             :schema {:type :node
                                      :public? true
                                      :view-context :page}}
+   ;; :logseq.property/default-value {:title "Default value"
+   ;;                                 :schema {:type :any
+   ;;                                          :public? true
+   ;;                                          :view-context :property}}
    :logseq.property.class/properties {:title "Tag Properties"
                                       :schema {:type :property
                                                :cardinality :many
                                                :public? true
                                                :view-context :never}}
+   :logseq.property/hide-empty-value {:title "Hide empty value"
+                                      :schema {:type :checkbox
+                                               :public? true
+                                               :view-context :property}}
    :logseq.property.class/hide-from-node {:title "Hide from Node"
                                           :schema {:type :checkbox
                                                    :public? true
@@ -82,17 +90,30 @@
                                                     :hide? true}}
    :logseq.property/built-in?             {:schema {:type :checkbox
                                                     :hide? true}}
+   :logseq.property/asset   {:title "Asset"
+                             :schema {:type :entity
+                                      :hide? true}}
+   ;; used by pdf and whiteboard
    :logseq.property/ls-type {:schema {:type :keyword
                                       :hide? true}}
-   :logseq.property/hl-type {:schema {:type :keyword :hide? true}}
-   :logseq.property/hl-color {:schema {:type :default :hide? true}}
-   :logseq.property.pdf/hl-page {:schema {:type :number :hide? true}}
-   :logseq.property.pdf/hl-stamp {:schema {:type :number :hide? true}}
+
+   :logseq.property.pdf/hl-type {:schema {:type :keyword :hide? true}}
+   :logseq.property.pdf/hl-color
+   {:schema {:type :default}
+    :closed-values
+    (mapv (fn [[db-ident value]]
+            {:db-ident db-ident
+             :value value
+             :uuid (common-uuid/gen-uuid :db-ident-block-uuid db-ident)})
+          [[:logseq.property/color.yellow "yellow"]
+           [:logseq.property/color.red "red"]
+           [:logseq.property/color.green "green"]
+           [:logseq.property/color.blue "blue"]
+           [:logseq.property/color.purple "purple"]])}
+   :logseq.property.pdf/hl-page {:schema {:type :raw-number}}
+   :logseq.property.pdf/hl-image {:schema {:type :entity :hide? true}}
    :logseq.property.pdf/hl-value {:schema {:type :map :hide? true}}
-   :logseq.property.pdf/file
-   {:schema {:type :default :hide? true :public? true :view-context :page}}
-   :logseq.property.pdf/file-path
-   {:schema {:type :default :hide? true :public? true :view-context :page}}
+   ;; FIXME: :logseq.property/order-list-type should updated to closed values
    :logseq.property/order-list-type {:name :logseq.order-list-type
                                      :schema {:type :default
                                               :hide? true}}
@@ -131,6 +152,23 @@
    ;;                                :public? false}}
 
    ;; Task props
+   :logseq.task/priority
+   {:title "Priority"
+    :schema
+    {:type :default
+     :public? true
+     :position :block-left}
+    :closed-values
+    (mapv (fn [[db-ident value icon]]
+            {:db-ident db-ident
+             :value value
+             :uuid (common-uuid/gen-uuid :db-ident-block-uuid db-ident)
+             :icon {:type :tabler-icon :id icon}})
+          [[:logseq.task/priority.low "Low" "priorityLvlLow"]
+           [:logseq.task/priority.medium "Medium" "priorityLvlMedium"]
+           [:logseq.task/priority.high "High" "priorityLvlHigh"]
+           [:logseq.task/priority.urgent "Urgent" "priorityLvlUrgent"]])
+    :properties {:logseq.property/hide-empty-value true}}
    :logseq.task/status
    {:title "Status"
     :schema
@@ -148,28 +186,14 @@
            [:logseq.task/status.doing "Doing" "InProgress50"]
            [:logseq.task/status.in-review "In Review" "InReview"]
            [:logseq.task/status.done "Done" "Done"]
-           [:logseq.task/status.canceled "Canceled" "Cancelled"]])}
-   :logseq.task/priority
-   {:title "Priority"
-    :schema
-    {:type :default
-     :public? true
-     :position :block-left}
-    :closed-values
-    (mapv (fn [[db-ident value icon]]
-            {:db-ident db-ident
-             :value value
-             :uuid (common-uuid/gen-uuid :db-ident-block-uuid db-ident)
-             :icon {:type :tabler-icon :id icon}})
-          [[:logseq.task/priority.low "Low" "priorityLvlLow"]
-           [:logseq.task/priority.medium "Medium" "priorityLvlMedium"]
-           [:logseq.task/priority.high "High" "priorityLvlHigh"]
-           [:logseq.task/priority.urgent "Urgent" "priorityLvlUrgent"]])}
+           [:logseq.task/status.canceled "Canceled" "Cancelled"]])
+    :properties {:logseq.property/hide-empty-value true}}
    :logseq.task/deadline
    {:title "Deadline"
     :schema {:type :date
              :public? true
-             :position :block-below}}
+             :position :block-below}
+    :properties {:logseq.property/hide-empty-value true}}
 
    ;; TODO: Add more props :Assignee, :Estimate, :Cycle, :Project
 
@@ -202,7 +226,8 @@
              :value value
              :uuid (common-uuid/gen-uuid :db-ident-block-uuid db-ident)})
           [[:logseq.property.view/type.table "Table View"]
-           [:logseq.property.view/type.list "List View"]])}
+           [:logseq.property.view/type.list "List View"]
+           [:logseq.property.view/type.gallery "Gallery View"]])}
 
    :logseq.property.table/sorting {:schema
                                    {:type :coll
@@ -234,10 +259,30 @@
                               {:type :node
                                :hide? true
                                :public? false}}
+   :logseq.property.asset/type {:title "File type"
+                                :schema {:type :string
+                                         :hide? true
+                                         :public? false}}
+   :logseq.property.asset/size {:title "File size"
+                                :schema {:type :raw-number
+                                         :hide? true
+                                         :public? false}}
+   :logseq.property.asset/checksum {:title "File checksum"
+                                    :schema {:type :string
+                                             :hide? true
+                                             :public? false}}
+   :logseq.property.asset/last-visit-page {:title "Last visit page"
+                                           :schema {:type :raw-number
+                                                    :hide? true
+                                                    :public? false}}
    :logseq.property.asset/remote-metadata {:schema
                                            {:type :map
                                             :hide? true
                                             :public? false}}
+   :logseq.property.asset/resize-metadata {:title "Asset resize metadata"
+                                           :schema {:type :map
+                                                    :hide? true
+                                                    :public? false}}
    :logseq.property.fsrs/due {:title "Due"
                               :schema
                               {:type :datetime

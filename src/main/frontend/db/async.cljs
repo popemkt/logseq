@@ -117,10 +117,11 @@
 (defn <get-block
   [graph name-or-uuid & {:keys [children? nested-children?]
                          :or {children? true
-                              nested-children? false}}]
+                              nested-children? false}
+                         :as opts}]
   (let [name' (str name-or-uuid)
         *async-queries (:db/async-queries @state/state)
-        async-requested? (get @*async-queries name')
+        async-requested? (get @*async-queries [name' opts])
         e (cond
             (number? name-or-uuid)
             (db/entity name-or-uuid)
@@ -134,7 +135,7 @@
     (if (or (:block.temp/fully-loaded? e) async-requested?)
       e
       (when-let [^Object sqlite @db-browser/*worker]
-        (swap! *async-queries assoc name' true)
+        (swap! *async-queries assoc [name' opts] true)
         (state/update-state! :db/async-query-loading (fn [s] (conj s name')))
         (p/let [result (.get-block-and-children sqlite graph id (ldb/write-transit-str
                                                                  {:children? children?
@@ -169,11 +170,11 @@
   (when-let [page (some-> page-name (db-model/get-page))]
     (when-let [^Object worker @db-browser/*worker]
       (p/let [result (.get-block-and-children worker
-                       (state/get-current-repo)
-                       (str (:block/uuid page))
-                       (ldb/write-transit-str
-                         {:children? true
-                          :nested-children? false}))]
+                                              (state/get-current-repo)
+                                              (str (:block/uuid page))
+                                              (ldb/write-transit-str
+                                               {:children? true
+                                                :nested-children? false}))]
         (some-> result (ldb/read-transit-str) (:children))))))
 
 (defn <get-block-refs
@@ -289,6 +290,28 @@
       '[:find [(pull ?tag [:db/id :block/title])]
         :where
         [?tag :block/type "class"]]))
+
+(defn <get-asset-with-checksum
+  [graph checksum]
+  (p/let [result (<q graph {:transact-db? true}
+                     '[:find [(pull ?b [*]) ...]
+                       :in $ ?checksum
+                       :where
+                       [?b :logseq.property.asset/checksum ?checksum]]
+                     checksum)]
+    (some-> (first result)
+            :db/id
+            db/entity)))
+
+(defn <get-pdf-annotations
+  [graph pdf-id]
+  (p/let [result (<q graph {:transact-db? true}
+                     '[:find [(pull ?b [*]) ...]
+                       :in $ ?pdf-id
+                       :where
+                       [?b :logseq.property/asset ?pdf-id]]
+                     pdf-id)]
+    result))
 
 (comment
   (defn <fetch-all-pages

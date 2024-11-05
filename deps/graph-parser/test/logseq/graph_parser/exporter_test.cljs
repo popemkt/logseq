@@ -41,7 +41,13 @@
               db)
          first)))
 
-(defn- find-block-by-property [db property property-value]
+(defn- find-block-by-property [db property]
+  (d/q '[:find [(pull ?b [*]) ...]
+         :in $ ?prop %
+         :where (has-property ?b ?prop)]
+       db property (rules/extract-rules rules/db-query-dsl-rules [:has-property])))
+
+(defn- find-block-by-property-value [db property property-value]
   (->> (d/q '[:find [(pull ?b [*]) ...]
               :in $ ?prop ?prop-value %
               :where (property ?b ?prop ?prop-value)]
@@ -106,7 +112,7 @@
   "Import a file graph dir just like UI does. However, unlike the UI the
   exporter receives file maps containing keys :path and ::rpath since :path
   are full paths"
-  [file-graph-dir conn {:keys [assets] :as options}]
+  [file-graph-dir conn {:keys [assets] :or {assets (atom [])} :as options}]
   (let [*files (build-graph-files file-graph-dir)
         config-file (first (filter #(string/ends-with? (:path %) "logseq/config.edn") *files))
         _ (assert config-file "No 'logseq/config.edn' found for file graph dir")
@@ -120,7 +126,8 @@
 (defn- import-files-to-db
   "Import specific doc files for dev purposes"
   [files conn options]
-  (p/let [doc-options (gp-exporter/build-doc-options {:macros {}} (merge default-export-options options))
+  (p/let [doc-options (gp-exporter/build-doc-options (merge {:macros {}} (:user-config options))
+                                                     (merge default-export-options options))
           files' (mapv #(hash-map :path %) files)
           _ (gp-exporter/export-doc-files conn files' <read-file doc-options)]
     {:import-state (:import-state doc-options)}))
@@ -148,9 +155,8 @@
   (p/let [file-graph-dir "test/resources/docs-0.10.9"
           _ (docs-graph-helper/clone-docs-repo-if-not-exists file-graph-dir "v0.10.9")
           conn (db-test/create-conn)
-          assets (atom [])
           {:keys [import-state]}
-          (import-file-graph-to-db file-graph-dir conn {:assets assets})]
+          (import-file-graph-to-db file-graph-dir conn {})]
 
     (is (empty? (map :entity (:errors (db-validate/validate-db! @conn))))
         "Created graph has no validation errors")
@@ -172,20 +178,25 @@
 
       ;; Counts
       ;; Includes journals as property values e.g. :logseq.task/deadline
-      (is (= 18 (count (d/q '[:find ?b :where [?b :block/type "journal"]] @conn))))
-      (is (= 18 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Journal]] @conn))))
+      (is (= 20 (count (d/q '[:find ?b :where [?b :block/type "journal"]] @conn))))
+      (is (= 20 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Journal]] @conn))))
 
       (is (= 4 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Task]] @conn))))
-      (is (= 1 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Query]] @conn))))
+      (is (= 3 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Query]] @conn))))
 
       ;; Don't count pages like url.md that have properties but no content
-      (is (= 8
+      (is (= 9
              (count (->> (d/q '[:find [(pull ?b [:block/title :block/type]) ...]
                                 :where [?b :block/title] [_ :block/page ?b]] @conn)
-                         (filter #(= "page" (:block/type %))))))
+                         (filter ldb/internal-page?))))
           "Correct number of pages with block content")
+      (is (= 0 (->> @conn
+                    (d/q '[:find [?ident ...]
+                           :where [?b :block/type "class"] [?b :db/ident ?ident] (not [?b :logseq.property/built-in?])])
+                    count))
+          "Correct number of user classes")
       (is (= 4 (count (d/datoms @conn :avet :block/type "whiteboard"))))
-      (is (= 1 (count @(:ignored-properties import-state))) ":filters should be the only ignored property")
+      (is (= 0 (count @(:ignored-properties import-state))) ":filters should be the only ignored property")
       (is (= 1 (count @assets))))
 
     (testing "logseq files"
@@ -292,15 +303,52 @@
           "numered block has correct property")
 
       (is (= #{"gpt"}
-             (:block/alias (readable-properties @conn (find-page-by-name @conn "chat-gpt")))))
+             (:block/alias (readable-properties @conn (find-page-by-name @conn "chat-gpt"))))
+          "alias set correctly")
 
+      (is (= {:logseq.property.linked-references/includes #{"Oct 9th, 2024"}
+              :logseq.property.linked-references/excludes #{"ref2"}}
+             (select-keys (readable-properties @conn (find-page-by-name @conn "chat-gpt"))
+                          [:logseq.property.linked-references/excludes :logseq.property.linked-references/includes]))
+          "linked ref filters set correctly")
+
+      ;; Queries
       (is (= {:logseq.property.table/sorting [{:id :user.property/prop-num, :asc? false}]
               :logseq.property.view/type "Table View"
               :logseq.property.table/ordered-columns [:block/title :user.property/prop-string :user.property/prop-num]
               :logseq.property/query "(property :prop-string)"
               :block/tags [:logseq.class/Query]}
-             (readable-properties @conn (find-block-by-property @conn :logseq.property/query "(property :prop-string)")))
-          "query block has correct query properties"))
+             (readable-properties @conn (find-block-by-property-value @conn :logseq.property/query "(property :prop-string)")))
+          "simple query block has correct query properties")
+      (is (= "For example, here's a query with title text:"
+             (:block/title (find-block-by-content @conn #"query with title text")))
+          "Text around a simple query block is set as a query's title")
+      (is (= {:logseq.property.view/type "List View"
+              :logseq.property/query "{:query (task todo doing)}"
+              :block/tags [:logseq.class/Query]
+              :logseq.property.table/ordered-columns [:block/title]}
+             (readable-properties @conn (find-block-by-content @conn #"tasks with")))
+          "Advanced query has correct query properties")
+      (is (= "tasks with todo and doing"
+             (:block/title (find-block-by-content @conn #"tasks with")))
+          "Advanced query has custom title migrated"))
+
+    (testing "namespaces"
+      (let [expand-children (fn expand-children [ent parent]
+                              (if-let [children (:logseq.property/_parent ent)]
+                                (cons {:parent (:block/title parent) :child (:block/title ent)}
+                                      (mapcat #(expand-children % ent) children))
+                                [{:parent (:block/title parent) :child (:block/title ent)}]))]
+        (is (= [{:parent "n1" :child "x"}
+                {:parent "x" :child "z"}
+                {:parent "x" :child "y"}]
+               (rest (expand-children (d/entity @conn (:db/id (find-page-by-name @conn "n1"))) nil)))
+            "First namespace tests duplicate parent page name")
+        (is (= [{:parent "n2" :child "x"}
+                {:parent "x" :child "z"}
+                {:parent "n2" :child "alias"}]
+               (rest (expand-children (d/entity @conn (:db/id (find-page-by-name @conn "n2"))) nil)))
+            "First namespace tests duplicate child page name and built-in page name")))
 
     (testing "db attributes"
       (is (= true
@@ -338,7 +386,11 @@
             "existing :node property value correctly saved as :default with full text")
         (is (= #{"[[Gabriel]] [[Jakob]]"}
                (:user.property/people (readable-properties @conn (find-block-by-content @conn #"pending block for :node"))))
-            "pending :node property value correctly saved as :default with full text")))
+            "pending :node property value correctly saved as :default with full text")
+        (is (some? (find-page-by-name @conn "Jakob"))
+            "Previous :node property value still exists")
+        (is (= 3 (count (find-block-by-property @conn :user.property/people)))
+            "Converted property has correct number of property values")))
 
     (testing "replacing refs in :block/title"
       (is (= 2
@@ -368,9 +420,7 @@
     (testing "multiline blocks"
       (is (= "|markdown| table|\n|some|thing|" (:block/title (find-block-by-content @conn #"markdown.*table"))))
       (is (= "multiline block\na 2nd\nand a 3rd" (:block/title (find-block-by-content @conn #"multiline block"))))
-      (is (= "logbook block" (:block/title (find-block-by-content @conn #"logbook block"))))
-      (is (re-find #"(?s)^Text before\n#\+BEGIN_QUERY.*END_QUERY\nText after$"
-                   (:block/title (find-block-by-content @conn #":title \"tasks")))))
+      (is (= "logbook block" (:block/title (find-block-by-content @conn #"logbook block")))))
 
     (testing "block refs and path-refs"
       (let [block (find-block-by-content @conn "old todo block")]
@@ -412,6 +462,23 @@
         (is (= #{"LargeLanguageModel" "fun" "ai"}
                (:logseq.property/page-tags (readable-properties @conn (find-page-by-name @conn "chat-gpt"))))
             "tagged page has new page and other pages marked with '#' and '[[]]` imported as tags to page-tags")))))
+
+(deftest-async export-basic-graph-with-convert-all-tags
+  (p/let [file-graph-dir "test/resources/exporter-test-graph"
+          conn (db-test/create-conn)
+          ;; Simulate frontend path-refs being calculated
+          _ (db-pipeline/add-listener conn)
+          {:keys [import-state]}
+          (import-file-graph-to-db file-graph-dir conn {:convert-all-tags? true})]
+
+    (is (empty? (map :entity (:errors (db-validate/validate-db! @conn))))
+        "Created graph has no validation errors")
+    (is (= 0 (count @(:ignored-properties import-state))) "No ignored properties")
+    (is (= 9 (->> @conn
+                  (d/q '[:find [?ident ...]
+                         :where [?b :block/type "class"] [?b :db/ident ?ident] (not [?b :logseq.property/built-in?])])
+                  count))
+        "Correct number of user classes")))
 
 (deftest-async export-files-with-tag-classes-option
   (p/let [file-graph-dir "test/resources/exporter-test-graph"
@@ -484,6 +551,18 @@
              (:block/tags (readable-properties @conn (find-page-by-name @conn "url"))))
           "tagged page has configured tag imported as a class"))))
 
+(deftest-async export-files-with-remove-inline-tags
+  (p/let [file-graph-dir "test/resources/exporter-test-graph"
+          files (mapv #(node-path/join file-graph-dir %) ["journals/2024_02_07.md"])
+          conn (db-test/create-conn)
+          _ (import-files-to-db files conn {:remove-inline-tags? false :convert-all-tags? true})]
+
+    (is (empty? (map :entity (:errors (db-validate/validate-db! @conn))))
+        "Created graph has no validation errors")
+    (is (string/starts-with? (:block/title (find-block-by-content @conn #"Inception"))
+                             "Inception #Movie")
+        "block with tag preserves inline tag")))
+
 (deftest-async export-files-with-ignored-properties
   (p/let [file-graph-dir "test/resources/exporter-test-graph"
           files (mapv #(node-path/join file-graph-dir %) ["ignored/icon-page.md"])
@@ -513,3 +592,11 @@
         "Existing page correctly set as class parent")
     (is (= "Thing" (get-in (d/entity @conn :user.class/CreativeWork) [:logseq.property/parent :block/title]))
         "New page correctly set as class parent")))
+
+(deftest-async export-config-file-sets-title-format
+  (p/let [conn (db-test/create-conn)
+          read-file #(p/do! (pr-str {:journal/page-title-format "yyyy-MM-dd"}))
+          _ (gp-exporter/export-config-file conn "logseq/config.edn" read-file {})]
+    (is (= "yyyy-MM-dd"
+           (:logseq.property.journal/title-format (d/entity @conn :logseq.class/Journal)))
+        "title format set correctly by config")))

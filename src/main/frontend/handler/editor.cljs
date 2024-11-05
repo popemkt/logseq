@@ -29,7 +29,6 @@
             [frontend.handler.property :as property-handler]
             [frontend.handler.property.file :as property-file]
             [frontend.handler.property.util :as pu]
-            [frontend.handler.repeated :as repeated]
             [frontend.handler.route :as route-handler]
             [frontend.mobile.util :as mobile-util]
             [frontend.modules.outliner.op :as outliner-op]
@@ -39,7 +38,6 @@
             [frontend.state :as state]
             [frontend.template :as template]
             [frontend.util :as util]
-            [frontend.util.file-based.clock :as clock]
             [frontend.util.cursor :as cursor]
             [frontend.util.file-based.drawer :as drawer]
             [frontend.util.keycode :as keycode]
@@ -610,43 +608,11 @@
                {:outliner-op :insert-blocks}
                (outliner-op/insert-blocks! [new-block] page {:sibling? false})))))))))
 
-(defn update-timestamps-content!
-  [{:block/keys [repeated? marker format] :as block} content]
-  (if repeated?
-    (let [scheduled-ast (block-handler/get-scheduled-ast block)
-          deadline-ast (block-handler/get-deadline-ast block)
-          content (some->> (filter repeated/repeated? [scheduled-ast deadline-ast])
-                           (map (fn [ts]
-                                  [(repeated/timestamp->text ts)
-                                   (repeated/next-timestamp-text ts)]))
-                           (reduce (fn [content [old new]]
-                                     (string/replace content old new))
-                                   content))
-          content (string/replace-first
-                   content marker
-                   (case marker
-                     "DOING"
-                     "TODO"
-
-                     "NOW"
-                     "LATER"
-
-                     marker))
-          content (clock/clock-out format content)
-          content (drawer/insert-drawer
-                   format content "logbook"
-                   (util/format (str (if (= :org format) "-" "*")
-                                     " State \"DONE\" from \"%s\" [%s]")
-                                marker
-                                (date/get-date-time-string-3)))]
-      content)
-    content))
-
 (defn check
   [{:block/keys [marker title repeated? uuid] :as block}]
   (let [new-content (string/replace-first title marker "DONE")
         new-content (if repeated?
-                      (update-timestamps-content! block title)
+                      (file-editor-handler/update-timestamps-content! block title)
                       new-content)
         input-id (state/get-edit-input-id)]
     (if (and input-id
@@ -1415,40 +1381,40 @@
   (p/let [[repo-dir assets-dir] (ensure-assets-dir! (state/get-current-repo))]
     (path/path-join repo-dir assets-dir filename)))
 
-(defn save-assets!
+(defn file-based-save-assets!
   "Save incoming(pasted) assets to assets directory.
 
    Returns: [file-rpath file-obj file-fpath matched-alias]"
   ([repo files]
    (p/let [[repo-dir assets-dir] (ensure-assets-dir! repo)]
-     (save-assets! repo repo-dir assets-dir files
-                   (fn [index file-stem]
+     (file-based-save-assets! repo repo-dir assets-dir files
+                              (fn [index file-stem]
                      ;; TODO: maybe there're other chars we need to handle?
-                     (let [file-base (-> file-stem
-                                         (string/replace " " "_")
-                                         (string/replace "%" "_")
-                                         (string/replace "/" "_"))
-                           file-name (str file-base "_" (.now js/Date) "_" index)]
-                       (string/replace file-name #"_+" "_"))))))
+                                (let [file-base (-> file-stem
+                                                    (string/replace " " "_")
+                                                    (string/replace "%" "_")
+                                                    (string/replace "/" "_"))
+                                      file-name (str file-base "_" (.now js/Date) "_" index)]
+                                  (string/replace file-name #"_+" "_"))))))
   ([repo repo-dir asset-dir-rpath files gen-filename]
    (p/all
     (for [[index ^js file] (map-indexed vector files)]
       ;; WARN file name maybe fully qualified path when paste file
-      (let [file-name (util/node-path.basename (.-name file))
-            [file-stem ext-full ext-base] (if file-name
-                                            (let [ext-base (util/node-path.extname file-name)
-                                                  ext-full (if-not (config/extname-of-supported? ext-base)
-                                                             (util/full-path-extname file-name) ext-base)]
-                                              [(subs file-name 0 (- (count file-name)
-                                                                    (count ext-full))) ext-full ext-base])
-                                            ["" "" ""])
-            filename  (str (gen-filename index file-stem) ext-full)
-            file-rpath  (str asset-dir-rpath "/" filename)
-            matched-alias (assets-handler/get-matched-alias-by-ext ext-base)
-            file-rpath (cond-> file-rpath
-                         (not (nil? matched-alias))
-                         (string/replace #"^[.\/\\]*assets[\/\\]+" ""))
-            dir (or (:dir matched-alias) repo-dir)]
+      (p/let [file-name (util/node-path.basename (.-name file))
+              [file-stem ext-full ext-base] (if file-name
+                                              (let [ext-base (util/node-path.extname file-name)
+                                                    ext-full (if-not (config/extname-of-supported? ext-base)
+                                                               (util/full-path-extname file-name) ext-base)]
+                                                [(subs file-name 0 (- (count file-name)
+                                                                      (count ext-full))) ext-full ext-base])
+                                              ["" "" ""])
+              filename  (str (gen-filename index file-stem) ext-full)
+              file-rpath  (str asset-dir-rpath "/" filename)
+              matched-alias (assets-handler/get-matched-alias-by-ext ext-base)
+              file-rpath (cond-> file-rpath
+                           (not (nil? matched-alias))
+                           (string/replace #"^[.\/\\]*assets[\/\\]+" ""))
+              dir (or (:dir matched-alias) repo-dir)]
         (if (util/electron?)
           (let [from (not-empty (.-path file))]
             (js/console.debug "Debug: Copy Asset #" dir file-rpath from)
@@ -1484,23 +1450,27 @@
                       (js/console.error error))))))))))
 
 (defn delete-asset-of-block!
-  [{:keys [repo href full-text block-id local? delete-local?] :as _opts}]
+  [{:keys [repo asset-block href full-text block-id local? delete-local?] :as _opts}]
   (let [block (db-model/query-block-by-uuid block-id)
-        _ (or block (throw (str block-id " not exists")))
+        _ (or block (throw (ex-info (str block-id " not exists")
+                                    {:block-id block-id})))
         text (:block/title block)
-        content (string/replace text full-text "")]
+        content (if asset-block
+                  (string/replace text (page-ref/->page-ref (:block/uuid asset-block)) "")
+                  (string/replace text full-text ""))]
     (save-block! repo block content)
     (when (and local? delete-local?)
-      (when-let [href (if (util/electron?) href
-                          (second (re-find #"\((.+)\)$" full-text)))]
-        (let [block-file-rpath (db-model/get-block-file-path block)
-              asset-fpath (if (string/starts-with? href "assets://")
-                            (path/url-to-path href)
-                            (config/get-repo-fpath
-                             repo
-                             (path/resolve-relative-path block-file-rpath href)))]
-          (prn ::deleting-asset href asset-fpath)
-          (fs/unlink! repo asset-fpath nil))))))
+      (if asset-block
+        (delete-block-aux! asset-block)
+        (when-let [href (if (util/electron?) href
+                            (second (re-find #"\((.+)\)$" full-text)))]
+          (let [block-file-rpath (db-model/get-block-file-path block)
+                asset-fpath (if (string/starts-with? href "assets://")
+                              (path/url-to-path href)
+                              (config/get-repo-fpath
+                               repo
+                               (path/resolve-relative-path block-file-rpath href)))]
+            (fs/unlink! repo asset-fpath nil)))))))
 
 ;; assets/journals_2021_02_03_1612350230540_0.png
 (defn resolve-relative-path
@@ -1518,39 +1488,147 @@
       (path/get-relative-path current-file-fpath file-path))
     file-path))
 
+(defn file-upload-assets!
+  "Paste asset and insert link to current editing block"
+  [repo id ^js files format uploading? drop-or-paste?]
+  (when (config/local-file-based-graph? repo)
+    (-> (file-based-save-assets! repo (js->clj files))
+          ;; FIXME: only the first asset is handled
+        (p/then
+         (fn [res]
+           (when-let [[asset-file-name file-obj asset-file-fpath matched-alias] (first res)]
+             (let [image? (config/ext-of-image? asset-file-name)]
+               (insert-command!
+                id
+                (assets-handler/get-asset-file-link format
+                                                    (if matched-alias
+                                                      (str
+                                                       (if image? "../assets/" "")
+                                                       "@" (:name matched-alias) "/" asset-file-name)
+                                                      (resolve-relative-path (or asset-file-fpath asset-file-name)))
+                                                    (if file-obj (.-name file-obj) (if image? "image" "asset"))
+                                                    image?)
+                format
+                {:last-pattern (if drop-or-paste? "" commands/command-trigger)
+                 :restore?     true
+                 :command      :insert-asset})
+               (recur (rest res))))))
+        (p/catch (fn [e]
+                   (js/console.error e)))
+        (p/finally
+          (fn []
+            (reset! uploading? false)
+            (reset! *asset-uploading? false)
+            (reset! *asset-uploading-process 0))))))
+
+(defn db-based-save-assets!
+  "Save incoming(pasted) assets to assets directory.
+
+   Returns: asset entity"
+  ([repo files]
+   (p/let [[repo-dir assets-dir] (ensure-assets-dir! repo)]
+     (db-based-save-assets! repo repo-dir assets-dir files)))
+  ([repo repo-dir asset-dir-rpath files]
+   (p/all
+    (for [[_index ^js file] (map-indexed vector files)]
+      ;; WARN file name maybe fully qualified path when paste file
+      (p/let [file-name (util/node-path.basename (.-name file))
+              file-name-without-ext (.-name (util/node-path.parse file-name))
+              checksum (assets-handler/get-file-checksum file)
+              existing-asset (db-async/<get-asset-with-checksum repo checksum)]
+        (if existing-asset
+          existing-asset
+          (p/let [block-id (ldb/new-block-id)
+                  ext (when file-name
+                        (string/lower-case (.substr (util/node-path.extname file-name) 1)))
+                  _ (when (string/blank? ext)
+                      (throw (ex-info "File doesn't have a valid ext."
+                                      {:file-name file-name})))
+                  file-path   (str block-id "." ext)
+                  file-rpath  (str asset-dir-rpath "/" file-path)
+                  dir repo-dir
+                  asset (db/entity :logseq.class/Asset)
+                  properties {:logseq.property.asset/type ext
+                              :logseq.property.asset/size (.-size file)
+                              :logseq.property.asset/checksum checksum
+                              :block/tags (:db/id asset)}
+                  insert-opts {:custom-uuid block-id
+                               :edit-block? false
+                               :properties properties}
+                  edit-block (state/get-edit-block)
+                  _ (when (util/electron?)
+                      (if-let [from (not-empty (.-path file))]
+                        (-> (js/window.apis.copyFileToAssets dir file-rpath from)
+                            (p/catch #(js/console.error "Debug: Copy Asset Error#" %)))
+                        (-> (p/let [buffer (.arrayBuffer file)]
+                              (fs/write-file! repo dir file-rpath buffer {:skip-compare? false}))
+                            (p/catch #(js/console.error "Debug: Writing Asset #" %)))))
+                  insert-opts' (if (and (:block/uuid edit-block)
+                                        (string/blank? (:block/title edit-block)))
+                                 (assoc insert-opts
+                                        :block-uuid (:block/uuid edit-block)
+                                        :replace-empty-target? true
+                                        :sibling? true)
+                                 (assoc insert-opts :page (:block/uuid asset)))
+                  result (api-insert-new-block! file-name-without-ext insert-opts')
+                  new-entity (db/entity [:block/uuid (:block/uuid result)])]
+            (if (util/electron?)
+              new-entity
+              (->
+               (p/do! (js/console.debug "Debug: Writing Asset #" dir file-rpath)
+                      (cond
+                        (mobile-util/native-platform?)
+                        ;; capacitor fs accepts Blob, File implements Blob
+                        (p/let [buffer (.arrayBuffer file)
+                                content (base64/encodeByteArray (js/Uint8Array. buffer))
+                                fpath (path/path-join dir file-rpath)]
+                          (capacitor-fs/<write-file-with-base64 fpath content))
+
+                        (config/db-based-graph? repo) ;; memory-fs
+                        (p/let [buffer (.arrayBuffer file)
+                                content (js/Uint8Array. buffer)]
+                          (fs/write-file! repo dir file-rpath content nil))
+
+                        :else
+                        (throw (ex-info "Paste failed"
+                                        {:file-name file-name})))
+                      new-entity)
+               (p/catch (fn [error]
+                          (prn :paste-file-error)
+                          (js/console.error error))))))))))))
+
+(defn db-upload-assets!
+  "Paste asset and insert link to current editing block"
+  [repo id ^js files format uploading? drop-or-paste?]
+  (when (or (config/local-file-based-graph? repo)
+            (config/db-based-graph? repo))
+    (-> (db-based-save-assets! repo (js->clj files))
+          ;; FIXME: only the first asset is handled
+        (p/then
+         (fn [entities]
+           (let [entity (first entities)]
+             (insert-command!
+              id
+              (page-ref/->page-ref (:block/uuid entity))
+              format
+              {:last-pattern (if drop-or-paste? "" commands/command-trigger)
+               :restore?     true
+               :command      :insert-asset}))))
+        (p/catch (fn [e]
+                   (js/console.error e)))
+        (p/finally
+          (fn []
+            (reset! uploading? false)
+            (reset! *asset-uploading? false)
+            (reset! *asset-uploading-process 0))))))
+
 (defn upload-asset!
   "Paste asset and insert link to current editing block"
   [id ^js files format uploading? drop-or-paste?]
   (let [repo (state/get-current-repo)]
-    (when (or (config/local-file-based-graph? repo)
-              (config/db-based-graph? repo))
-      (-> (save-assets! repo (js->clj files))
-          ;; FIXME: only the first asset is handled
-          (p/then
-           (fn [res]
-             (when-let [[asset-file-name file-obj asset-file-fpath matched-alias] (and (seq res) (first res))]
-               (let [image? (config/ext-of-image? asset-file-name)]
-                 (insert-command!
-                  id
-                  (assets-handler/get-asset-file-link format
-                                                      (if matched-alias
-                                                        (str
-                                                         (if image? "../assets/" "")
-                                                         "@" (:name matched-alias) "/" asset-file-name)
-                                                        (resolve-relative-path (or asset-file-fpath asset-file-name)))
-                                                      (if file-obj (.-name file-obj) (if image? "image" "asset"))
-                                                      image?)
-                  format
-                  {:last-pattern (if drop-or-paste? "" commands/command-trigger)
-                   :restore?     true
-                   :command      :insert-asset})))))
-          (p/catch (fn [e]
-                     (js/console.error e)))
-          (p/finally
-            (fn []
-              (reset! uploading? false)
-              (reset! *asset-uploading? false)
-              (reset! *asset-uploading-process 0)))))))
+    (if (config/db-based-graph? repo)
+      (db-upload-assets! repo id ^js files format uploading? drop-or-paste?)
+      (file-upload-assets! repo id ^js files format uploading? drop-or-paste?))))
 
 ;; Editor should track some useful information, like editor modes.
 ;; For example:
@@ -1826,14 +1904,20 @@
     (state/clear-editor-action!)))
 
 (defn resize-image!
-  [block-id metadata full_text size]
-  (let [new-meta (merge metadata size)
-        image-part (first (string/split full_text #"\{"))
-        new-full-text (str image-part (pr-str new-meta))
-        block (db/entity [:block/uuid block-id])
-        value (:block/title block)
-        new-value (string/replace value full_text new-full-text)]
-    (save-block-aux! block new-value {})))
+  [config block-id metadata full_text size]
+  (let [asset (:asset-block config)]
+    (if (and asset (config/db-based-graph?))
+      (property-handler/set-block-property! (state/get-current-repo)
+                                            (:db/id asset)
+                                            :logseq.property.asset/resize-metadata
+                                            size)
+      (let [new-meta (merge metadata size)
+            image-part (first (string/split full_text #"\{"))
+            new-full-text (str image-part (pr-str new-meta))
+            block (db/entity [:block/uuid block-id])
+            value (:block/title block)
+            new-value (string/replace value full_text new-full-text)]
+        (save-block-aux! block new-value {})))))
 
 (defonce *auto-save-timeout (atom nil))
 (defn edit-box-on-change!
@@ -2555,11 +2639,10 @@
       (util/scroll-to-block sibling-block)
       (state/exit-editing-and-set-selected-blocks! [sibling-block]))))
 
-(defn- move-cross-boundary-up-down
+(defn move-cross-boundary-up-down
   [direction move-opts]
-  (when-let [input (state/get-input)]
-    (let [line-pos (util/get-line-pos (.-value input) (util/get-selection-start input))
-          repo (state/get-current-repo)
+  (when-let [input (or (:input move-opts) (state/get-input))]
+    (let [repo (state/get-current-repo)
           f (case direction
               :up util/get-prev-block-non-collapsed
               :down util/get-next-block-non-collapsed)
@@ -2571,15 +2654,17 @@
           (let [container-id (some-> (dom/attr sibling-block "containerid") js/parseInt)
                 value (state/get-edit-content)]
             (p/do!
-             (when (not= (clean-content! repo format title)
-                         (string/trim value))
+             (when (and
+                    (not (state/block-component-editing?))
+                    (not= (clean-content! repo format title)
+                          (string/trim value)))
                (save-block! repo uuid value))
 
              (let [new-uuid (cljs.core/uuid sibling-block-id)
                    block (db/entity [:block/uuid new-uuid])]
                (edit-block! block
                             (or (:pos move-opts)
-                                [direction line-pos])
+                                [direction (util/get-line-pos (.-value input) (util/get-selection-start input))])
                             {:container-id container-id
                              :direction direction})))))
         (case direction
@@ -2608,11 +2693,11 @@
         (cursor/move-cursor-up input)
         (cursor/move-cursor-down input)))))
 
-(defn- move-to-block-when-cross-boundary
-  [direction]
+(defn move-to-block-when-cross-boundary
+  [direction {:keys [block]}]
   (let [up? (= :left direction)
         pos (if up? :max 0)
-        {:block/keys [format uuid] :as block} (state/get-edit-block)
+        {:block/keys [format uuid] :as block} (or block (state/get-edit-block))
         repo (state/get-current-repo)
         editing-block (gdom/getElement (state/get-editing-block-dom-id))
         f (if up? util/get-prev-block-non-collapsed util/get-next-block-non-collapsed)
@@ -2658,7 +2743,7 @@
 
         (or (and left? (cursor/start? input))
             (and right? (cursor/end? input)))
-        (move-to-block-when-cross-boundary direction)
+        (move-to-block-when-cross-boundary direction {})
 
         :else
         (if left?
@@ -2857,7 +2942,8 @@
           pos (cursor/pos input)
           hashtag? (or (surround-by? input "#" " ")
                        (surround-by? input "#" :end)
-                       (= key "#"))]
+                       (= key "#"))
+          db-based? (config/db-based-graph? (state/get-current-repo))]
       (when (or (not @(:editor/start-pos @state/state))
                 (and key (string/starts-with? key "Arrow")))
         (state/set-state! :editor/start-pos pos))
@@ -2944,7 +3030,7 @@
 
         ; `;;` to add or change property for db graphs
         (let [sym ";"]
-          (and (config/db-based-graph? (state/get-current-repo)) (double-chars-typed? value pos key sym)))
+          (and db-based? (double-chars-typed? value pos key sym)))
         (state/pub-event! [:editor/new-property])
 
         (let [sym "$"]
@@ -3024,7 +3110,8 @@
   [_state input]
   (fn [e key-code]
     (when-not (util/goog-event-is-composing? e)
-      (let [current-pos (cursor/pos input)
+      (let [db-based? (config/db-based-graph?)
+            current-pos (cursor/pos input)
             value (gobj/get input "value")
             c (util/nth-safe value (dec current-pos))
             [key-code k code is-processed?]
@@ -3052,6 +3139,20 @@
                 ;; #3440
                (util/goog-event-is-composing? e true)])]
         (cond
+          (and db-based? (= value "``````")) ; turn this block into a code block
+          (do
+            (state/set-edit-content! (.-id input) "")
+            (state/pub-event! [:editor/upsert-type-block {:block (assoc (state/get-edit-block) :block/title "")
+                                                          :type :code
+                                                          :update-current-block? true}]))
+
+          (and db-based? (= value ">")) ; turn this block into a quote block
+          (do
+            (state/set-edit-content! (.-id input) "")
+            (state/pub-event! [:editor/upsert-type-block {:block (assoc (state/get-edit-block) :block/title "")
+                                                          :type :quote
+                                                          :update-current-block? true}]))
+
           ;; When you type something after /
           (and (= :commands (state/get-editor-action)) (not= k commands/command-trigger))
           (if (= commands/command-trigger (second (re-find #"(\S+)\s+$" value)))
@@ -3284,7 +3385,8 @@
       (util/stop e)
       (let [block {:block/uuid block-id}
             left? (= direction :left)
-            opts {:container-id (some-> node (dom/attr "containerid") (parse-long))}]
+            opts {:container-id (some-> node (dom/attr "containerid") (parse-long))
+                  :event e}]
         (edit-block! block (if left? 0 :max) opts)))))
 
 (defn shortcut-left-right [direction]

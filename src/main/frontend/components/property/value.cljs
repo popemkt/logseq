@@ -50,9 +50,14 @@
                    text))))
 
 (rum/defc property-empty-text-value
-  [& {:as opts}]
+  [property {:keys [property-position]}]
   [:span.inline-flex.items-center.cursor-pointer
-   (merge {:class "empty-text-btn" :variant :text} opts) "Empty"])
+   (merge {:class "empty-text-btn" :variant :text})
+   (if property-position
+     (if-let [icon (:logseq.property/icon property)]
+       (icon-component/icon icon {:color? true})
+       (ui/icon "line-dashed"))
+     "Empty")])
 
 (rum/defc icon-row
   [block editing?]
@@ -99,7 +104,7 @@
 
 (defn- select-type?
   [property type]
-  (or (contains? #{:node :number :url :date :page :class :property} type)
+  (or (contains? #{:node :number :date :page :class :property} type)
     ;; closed values
       (seq (:property/closed-values property))))
 
@@ -241,7 +246,7 @@
        :id @*ident
        :del-btn? del-btn?
        :on-delete on-delete
-       :on-select select-handler!}
+       :on-day-click select-handler!}
        initial-month
        (assoc :default-month initial-month)))))
 
@@ -330,7 +335,7 @@
                                       (property-handler/set-block-property! repo (:block/uuid block)
                                                                             (:db/ident property)
                                                                             (if (map? value) (:db/id value) value)))
-                         :del-btn? (some-> value (:block/title) (boolean))
+                         :del-btn? (some? value)
                          :on-delete (fn []
                                       (property-handler/set-block-property! repo (:block/uuid block)
                                                                             (:db/ident property) nil)
@@ -350,7 +355,7 @@
                    (and (= :logseq.property/parent (:db/ident property))
                         (ldb/class? block)))
         ;; Note: property and other types shouldn't be converted to class
-        page? (= "page" (:block/type page-entity))]
+        page? (ldb/internal-page? page-entity)]
     (cond
       ;; page not exists or page exists but not a page type
       (or (nil? id) (and class? (not page?)))
@@ -464,11 +469,11 @@
                                  (conj (:block/uuid block))) ; break cycle
                  options (if (ldb/class? block)
                            (model/get-all-classes repo)
-                           (cond->>
-                            (->> (model/get-all-pages repo)
-                                 (remove (fn [e] (or (ldb/built-in? e) (ldb/property? e)))))
-                             (contains? #{"property" "page"} (:block/type block))
-                             (remove ldb/class?)))
+                           (when (ldb/internal-page? block)
+                             (cond->>
+                              (->> (model/get-all-pages repo)
+                                   (filter ldb/internal-page?)
+                                   (remove ldb/built-in?)))))
                  excluded-options (remove (fn [e] (contains? exclude-ids (:block/uuid e))) options)]
              excluded-options)
 
@@ -769,17 +774,12 @@
             (inline-text {} :markdown (str value'))))))))
 
 (rum/defc select-item
-  [property type value {:keys [page-cp inline-text other-position? _icon?] :as opts}]
+  [property type value {:keys [page-cp inline-text other-position? property-position _icon?] :as opts}]
   (let [closed-values? (seq (:property/closed-values property))
         tag? (or (:tag? opts) (= (:db/ident property) :block/tags))
         inline-text-cp (fn [content]
                          [:div.flex.flex-row.items-center
-                          (inline-text {} :markdown (macro-util/expand-value-if-macro content (state/get-macros)))
-                          (when (and (= type :url) other-position?)
-                            (shui/button {:variant :ghost
-                                          :size :sm
-                                          :class "px-0 py-0 h-4"}
-                                         (ui/icon "edit" {:size 14})))])]
+                          (inline-text {} :markdown (macro-util/expand-value-if-macro content (state/get-macros)))])]
     [:div.select-item.cursor-pointer
      (cond
        (= value :logseq.property/empty-placeholder)
@@ -794,6 +794,7 @@
          (rum/with-key
            (page-cp {:disable-preview? true
                      :tag? tag?
+                     :property-position property-position
                      :meta-click? other-position?} value)
            (:db/id value)))
 
@@ -829,7 +830,7 @@
           popup-content (fn content-fn [_]
                           [:div.property-select
                            (case type
-                             (:number :url :default)
+                             (:number :default)
                              (select block property select-opts' opts)
 
                              (:node :class :property :page :date)
@@ -851,13 +852,13 @@
                                          :auto-focus? true
                                          :trigger-id trigger-id}))))]
       (shui/trigger-as
-       (if (:other-position? opts) :div :div.jtrigger.flex.flex-1.w-full)
+       (if (:other-position? opts) :div.jtrigger :div.jtrigger.flex.flex-1.w-full)
        {:ref *el
         :id trigger-id
         :tabIndex 0
         :on-click show!}
        (if (string/blank? value)
-         (property-empty-text-value)
+         (property-empty-text-value property opts)
          (value-f))))))
 
 (defn- property-value-inner
@@ -877,10 +878,10 @@
                   (when (and (= type :default) (nil? value))
                     (<create-new-block! block property "")))}
      (cond
-       (and (= type :default) (nil? (:block/title value)))
+       (and (contains? #{:default :url} type) (nil? (:block/title value)))
        [:div.jtrigger (property-empty-btn-value property)]
 
-       (= type :default)
+       (#{:default :url :entity} type)
        (property-block-value value block property page-cp)
 
        :else
@@ -906,14 +907,10 @@
       (icon-row block editing?)
       (if (and select-type?'
                (not (and (not closed-values?) (= type :date))))
-        (let [value (if (and (nil? value) (= :logseq.property.view/type (:db/ident property)))
-                      ;; TODO: remove this hack once default value is supported
-                      (db/entity :logseq.property.view/type.table)
-                      value)]
-          (single-value-select block property value
-                               (fn [] (select-item property type value opts))
-                               select-opts
-                               (assoc opts :editing? editing?)))
+        (single-value-select block property value
+                             (fn [] (select-item property type value opts))
+                             select-opts
+                             (assoc opts :editing? editing?))
         (case type
           (:date :datetime)
           (property-value-date-picker block property value (merge opts {:editing? editing?}))
@@ -985,7 +982,7 @@
                 [(property-value-date-picker block property nil {:toggle-fn toggle-fn})]))
              (if date?
                (property-value-date-picker block property nil {:toggle-fn toggle-fn})
-               (property-empty-text-value))))]))))
+               (property-empty-text-value property opts))))]))))
 
 (rum/defc multiple-values < rum/reactive db-mixins/query
   [block property opts schema]
@@ -1033,7 +1030,7 @@
                      (properties-cp {} block {:selected? false
                                               :class-schema? true})
 
-                     (and multiple-values? (= type :default) (not closed-values?))
+                     (and multiple-values? (contains? #{:default :url} type) (not closed-values?))
                      (property-normal-block-value block property v)
 
                      multiple-values?
@@ -1060,7 +1057,7 @@
                           (interpose [:span.opacity-50.text-sm " > "]
                                      (concat
                                       (map (fn [{title :block/title :as ancestor}]
-                                             [:a {:on-click #(route-handler/redirect-to-page! (:block/uuid ancestor))} title])
+                                             [:a.whitespace-nowrap {:on-click #(route-handler/redirect-to-page! (:block/uuid ancestor))} title])
                                            page-ancestors)
                                       [value-cp]))]
                          value-cp)))]]

@@ -1,13 +1,4 @@
 .cp__page {
-  &-inner-wrap {
-    &.is-node-page:not([data-ready]) {
-      .ls-page-blocks,
-      .ls-page-appendix-els {
-        @apply invisible;
-      }
-    }
-  }
-
   &-publish-actions {
     background-color: var(--ls-primary-background-color);
     padding: 50px 0;
@@ -139,6 +130,10 @@ html.is-native-iphone-without-notch {
     .block-ref, .page-ref, a.tag,
     .bullet-container.cursor) {
   cursor: e-resize;
+}
+
+.ls-all-pages {
+  max-width: 1400px;
 }
 
 .add-button-link {
