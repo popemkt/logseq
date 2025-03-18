@@ -64,7 +64,7 @@
   {:doc "Validate a DB graph's datascript schema"
    :requires ([babashka.fs :as fs])
    :task (apply shell {:dir "deps/db" :extra-env {"ORIGINAL_PWD" (fs/cwd)}}
-                "yarn -s nbb-logseq script/validate_client_db.cljs"
+                "yarn -s nbb-logseq script/validate_db.cljs"
                 *command-line-args*)}
 
   dev:db-query
@@ -75,19 +75,25 @@
 
   dev:db-transact
   {:doc "Transact against a DB graph's datascript db"
-   :task (apply shell {:dir "deps/outliner"} "yarn -s nbb-logseq script/transact.cljs" *command-line-args*)}
+   :requires ([babashka.fs :as fs])
+   :task (apply shell {:dir "deps/outliner" :extra-env {"ORIGINAL_PWD" (fs/cwd)}}
+                "yarn -s nbb-logseq script/transact.cljs" *command-line-args*)}
 
   dev:db-create
   {:doc "Create a DB graph given a sqlite.build EDN file"
    :requires ([babashka.fs :as fs])
    :task (apply shell {:dir "deps/db" :extra-env {"ORIGINAL_PWD" (fs/cwd)}}
-                "yarn -s nbb-logseq -cp src:../outliner/src script/create_graph.cljs" *command-line-args*)}
+                "yarn -s nbb-logseq -cp src:../outliner/src:script script/create_graph.cljs" *command-line-args*)}
 
   dev:db-import
   {:doc "Import a file graph to db graph"
    :requires ([babashka.fs :as fs])
    :task (apply shell {:dir "deps/graph-parser" :extra-env {"ORIGINAL_PWD" (fs/cwd)}}
                 "yarn -s nbb-logseq -cp src:../outliner/src script/db_import.cljs" *command-line-args*)}
+
+  dev:db-import-many
+  {:doc "Import multiple file graphs to db graphs"
+   :task logseq.tasks.dev/db-import-many}
 
   dev:db-datoms
   {:doc "Write db's datoms to a file"

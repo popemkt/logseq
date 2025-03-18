@@ -1,17 +1,22 @@
 (ns logseq.shui.ui
-  (:require [logseq.shui.util :as util]
+  (:require [logseq.shui.base.core :as base-core]
+            [logseq.shui.dialog.core :as dialog-core]
+            [logseq.shui.form.core :as form-core]
             [logseq.shui.icon.v2 :as icon-v2]
-            [logseq.shui.shortcut.v1 :as shui.shortcut.v1]
-            [logseq.shui.toaster.core :as toaster-core]
+            [logseq.shui.popup.core :as popup-core]
             [logseq.shui.select.core :as select-core]
             [logseq.shui.select.multi :as select-multi]
-            [logseq.shui.dialog.core :as dialog-core]
-            [logseq.shui.popup.core :as popup-core]
-            [logseq.shui.base.core :as base-core]
-            [logseq.shui.form.core :as form-core]
-            [logseq.shui.table.core :as table-core]))
+            [logseq.shui.shortcut.v1 :as shui.shortcut.v1]
+            [logseq.shui.table.core :as table-core]
+            [logseq.shui.toaster.core :as toaster-core]
+            [logseq.shui.util :as util]))
 
 (def button base-core/button)
+(def button-icon base-core/button-icon)
+(def button-ghost-icon base-core/button-ghost-icon)
+(def button-outline-icon base-core/button-outline-icon)
+(def button-secondary-icon base-core/button-secondary-icon)
+(def button-group (util/lsui-wrap "ButtonGroup"))
 (def link base-core/link)
 (def trigger-as base-core/trigger-as)
 (def trigger-child-wrap base-core/trigger-child-wrap)
@@ -22,6 +27,10 @@
 (def alert-title (util/lsui-wrap "AlertTitle"))
 (def alert-description (util/lsui-wrap "AlertDescription"))
 (def slider (util/lsui-wrap "Slider"))
+(def slider-track (util/lsui-wrap "SliderTrack"))
+(def slider-range (util/lsui-wrap "SliderRange"))
+(def slider-thumb (util/lsui-wrap "SliderThumb"))
+(def separator (util/lsui-wrap "Separator"))
 (def badge (util/lsui-wrap "Badge"))
 (def skeleton (util/lsui-wrap "Skeleton"))
 (def calendar (util/lsui-wrap "Calendar"))
@@ -64,6 +73,7 @@
 (def select-group select-core/select-group)
 (def select-value select-core/select-value)
 (def select-trigger select-core/select-trigger)
+(def select-icon select-core/select-icon)
 (def select-content select-core/select-content)
 (def select-label select-core/select-label)
 (def select-item select-core/select-item)
@@ -102,6 +112,12 @@
 (def context-menu-sub-content (util/lsui-wrap "ContextMenuSubContent"))
 (def context-menu-sub-trigger (util/lsui-wrap "ContextMenuSubTrigger"))
 (def context-menu-radio-group (util/lsui-wrap "ContextMenuRadioGroup"))
+
+;; tabs
+(def tabs (util/lsui-wrap "Tabs"))
+(def tabs-list (util/lsui-wrap "TabsList"))
+(def tabs-trigger (util/lsui-wrap "TabsTrigger"))
+(def tabs-content (util/lsui-wrap "TabsContent"))
 
 (def dialog dialog-core/dialog)
 (def dialog-portal dialog-core/dialog-portal)

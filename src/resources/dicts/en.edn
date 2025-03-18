@@ -156,6 +156,7 @@
  :page/page-already-exists "Page “{1}” already exists!"
  :page/whiteboard-to-journal-error "Whiteboard pages cannot be renamed to journal titles!"
  :page/convert-to-tag "Convert to Tag"
+ :page/convert-tag-to-page "Convert Tag to Page"
  :file/name "File name"
  :file/last-modified-at "Last modified at"
  :file/no-data "No data"
@@ -190,6 +191,7 @@
  :asset/delete "Delete image"
  :asset/copy "Copy image"
  :asset/maximize "Maximize image"
+ :asset/ref-block "Asset ref block"
  :asset/confirm-delete "Are you sure you want to delete this {1}?"
  :asset/physical-delete "Remove the file too (notice it can't be restored)"
  :color/gray "Gray"
@@ -246,7 +248,7 @@
  :settings-page/export-theme "Export theme"
  :settings-page/show-brackets "Show brackets"
  :settings-page/wide-mode "Wide mode"
- :settings-page/editor-font "Editor font"
+ :settings-page/editor-font "Font"
  :settings-page/accent-color "Accent color"
  :settings-page/accent-color-alert "Choosing an accent color may override any theme you have selected."
  :settings-page/spell-checker "Spell checker"
@@ -470,7 +472,7 @@
  :export-save-to-file "Save to file"
  :all-graphs "All graphs"
  :all-pages "All pages"
- ;; E.g. 1 Page or 2 Pages
+  ;; E.g. 1 Page or 2 Pages
  :all-pages/table-title (fn [total] (str total (if (= total 1) " Page" " Pages")))
  :all-pages/failed-to-delete-pages "These pages had their content deleted but were unable to be deleted: {1}. See javascript console for more details."
  :all-whiteboards "All whiteboards"
@@ -526,6 +528,7 @@
  :plugin/uninstall "Uninstall"
  :plugin/marketplace "Marketplace"
  :plugin/downloads "Downloads"
+ :plugin/popular "Popular"
  :plugin/stars "Stars"
  :plugin/title "Title ({1})"
  :plugin/all "All"
@@ -551,6 +554,7 @@
  :plugin/checking-for-updates "Checking for plugin updates ..."
  :plugin/list-of-updates "Plugin Updates: "
  :plugin/auto-check-for-updates "Auto check for updates"
+ :plugin/load-from-web-url "Load plugin from web url"
  :plugin.install-from-file/menu-title "Install from plugins.edn"
  :plugin.install-from-file/title "Install plugins from plugins.edn"
  :plugin.install-from-file/notice "The following plugins will replace your plugins:"
@@ -621,8 +625,6 @@
  ;; E.g. 1 node or 2 nodes
  :views.table/live-query-title (fn [total] (str "Live query (" total ")"))
  :views.table/default-title (fn [total] (str total (if (<= total 1) " Node" " Nodes")))
- :views.table/tagged-nodes (fn [total] (str total (if (<= total 1) " tagged node" " tagged Nodes")))
- :views.table/property-nodes (fn [total] (str total (if (<= total 1) " node with this property" " nodes with this property")))
 
  ;; Commands are nested for now to stay in sync with the shortcuts system.
  ;; Other languages should not nest keys under :commands
@@ -782,16 +784,23 @@
   :editor/copy-current-file "Copy current file"
   :editor/copy-page-url "Copy page url"
   :ui/toggle-wide-mode "Toggle wide mode"
+  :ui/highlight-recent-blocks "Toggle highlight recent blocks"
   :editor/toggle-display-all-properties "Toggle display all properties"
   :ui/select-theme-color "Select available theme colors"
   :ui/goto-plugins "Go to plugins dashboard"
   :ui/install-plugins-from-file "Install plugins from plugins.edn"
+  :ui/install-plugin-from-github "Install plugin from GitHub release"
   :editor/toggle-open-blocks "Toggle open blocks (collapse or expand all blocks)"
   :ui/clear-all-notifications "Clear all notifications"
   :git/commit "Create git commit with message"
+  :misc/export-block-data "Export block EDN data"
+  :misc/export-page-data "Export page EDN data"
+  :misc/export-graph-ontology-data "Export graph's tags and properties EDN data"
+  :misc/import-edn-data "Import EDN data"
   :dev/show-block-data "(Dev) Show block data"
   :dev/show-block-ast "(Dev) Show block AST"
   :dev/show-page-data "(Dev) Show page data"
   :dev/show-page-ast "(Dev) Show page AST"
   :dev/replace-graph-with-db-file "(Dev) Replace graph with its db.sqlite file"
+  :dev/validate-db "(Dev) Validate current graph"
   :window/close "Close window"}}

@@ -6,19 +6,20 @@
             [frontend.components.file-based.datetime :as datetime-comp]
             [frontend.components.search :as search]
             [frontend.components.svg :as svg]
-            [frontend.components.title :as title]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
             [frontend.date :as date]
             [frontend.db :as db]
             [frontend.db.model :as db-model]
             [frontend.extensions.zotero :as zotero]
+            [frontend.handler.block :as block-handler]
             [frontend.handler.editor :as editor-handler :refer [get-state]]
             [frontend.handler.editor.lifecycle :as lifecycle]
             [frontend.handler.page :as page-handler]
             [frontend.handler.paste :as paste-handler]
             [frontend.handler.property.util :as pu]
             [frontend.handler.search :as search-handler]
+            [frontend.hooks :as hooks]
             [frontend.mixins :as mixins]
             [frontend.search :refer [fuzzy-search]]
             [frontend.state :as state]
@@ -29,9 +30,10 @@
             [goog.dom :as gdom]
             [goog.string :as gstring]
             [logseq.common.util :as common-util]
+            [logseq.common.util.page-ref :as page-ref]
             [logseq.db :as ldb]
+            [logseq.db.frontend.class :as db-class]
             [logseq.graph-parser.property :as gp-property]
-            [logseq.shui.popup.core :as shui-popup]
             [logseq.shui.ui :as shui]
             [promesa.core :as p]
             [react-draggable]
@@ -145,7 +147,8 @@
                                       (editor-handler/get-matched-classes q)
                                       (editor-handler/<get-matched-blocks q {:nlp-pages? true}))]
                        (set-matched-pages! result))))]
-    (rum/use-effect! search-f [(mixins/use-debounce 50 q)])
+    (hooks/use-effect! search-f [(hooks/use-debounced-value q 50)])
+
     (let [matched-pages' (if (string/blank? q)
                            (if db-tag?
                              (db-model/get-all-classes (state/get-current-repo) {:except-root-class? true})
@@ -156,7 +159,11 @@
                            ;; reorder, shortest and starts-with first.
                            (let [matched-pages-with-new-page
                                  (fn [partial-matched-pages]
-                                   (if (or (db/page-exists? q (if db-tag? "class" "page"))
+                                   (if (or (db/page-exists? q (if db-tag?
+                                                                #{:logseq.class/Tag}
+                                                                ;; Page existence here should be the same as entity-util/page?.
+                                                                ;; Don't show 'New page' if a page has any of these tags
+                                                                db-class/page-classes))
                                            (and db-tag? (some ldb/class? (:block/_alias (db/get-page q)))))
                                      partial-matched-pages
                                      (if db-tag?
@@ -215,7 +222,7 @@
                                             (if (ldb/class? target)
                                               (str (:block/title block) " -> alias: " (:block/title target))
                                               (:block/title block)))
-                                          (title/block-unique-title block))]
+                                          (block-handler/block-unique-title block))]
                               (search-handler/highlight-exact-query title q))]]))
          :empty-placeholder [:div.text-gray-500.text-sm.px-4.py-2 (if db-tag?
                                                                     "Search for a tag"
@@ -331,22 +338,33 @@
            (when (>= (count edit-content) current-pos)
              (subs edit-content pos current-pos)))]
     (when input
-      (block-search-auto-complete edit-block input id q format selected-text))))
+      (let [db? (config/db-based-graph? (state/get-current-repo))
+            embed? (and db? (= @commands/*current-command "Block embed"))
+            page (when embed? (page-ref/get-page-name edit-content))
+            embed-block-id (when (and embed? page (common-util/uuid-string? page))
+                             (uuid page))]
+        (if embed-block-id
+          (let [f (block-on-chosen-handler true input id q format nil)
+                block (db/entity embed-block-id)]
+            (when block (f block))
+            nil)
+          (block-search-auto-complete edit-block input id q format selected-text))))))
 
 (rum/defc template-search-aux
   [id q]
-  (let [[matched-templates set-matched-templates!] (rum/use-state nil)]
-    (rum/use-effect! (fn []
-                       (p/let [result (editor-handler/<get-matched-templates q)]
-                         (set-matched-templates! result)))
-                     [q])
+  (let [db-based? (config/db-based-graph?)
+        [matched-templates set-matched-templates!] (rum/use-state nil)]
+    (hooks/use-effect! (fn []
+                         (p/let [result (editor-handler/<get-matched-templates q)]
+                           (set-matched-templates! result)))
+                       [q])
     (ui/auto-complete
      matched-templates
      {:on-chosen   (editor-handler/template-on-chosen-handler id)
       :on-enter    (fn [_state] (state/clear-editor-action!))
       :empty-placeholder [:div.text-gray-500.px-4.py-2.text-sm "Search for a template"]
-      :item-render (fn [[template _block-db-id]]
-                     template)
+      :item-render (fn [template]
+                     (if db-based? (:block/title template) (:template template)))
       :class       "black"})))
 
 (rum/defc template-search < rum/reactive
@@ -365,31 +383,35 @@
 (rum/defc property-search
   [id]
   (let [input (gdom/getElement id)
-        [matched-properties set-matched-properties!] (rum/use-state nil)]
+        [matched-properties set-matched-properties!] (rum/use-state nil)
+        [q set-q!] (rum/use-state "")]
     (when input
-      (let [q (or (:searching-property (editor-handler/get-searching-property input))
-                  "")]
-        (rum/use-effect!
-         (fn []
-           (p/let [matched-properties (editor-handler/<get-matched-properties q)]
-             (set-matched-properties! matched-properties)))
-         [q])
-        (let [q-property (string/replace (string/lower-case q) #"\s+" "-")
-              non-exist-handler (fn [_state]
-                                  ((editor-handler/property-on-chosen-handler id q-property) nil))]
-          (ui/auto-complete
-           matched-properties
-           {:on-chosen (editor-handler/property-on-chosen-handler id q-property)
-            :on-enter non-exist-handler
-            :empty-placeholder [:div.px-4.py-2.text-sm (str "Create a new property: " q-property)]
-            :header [:div.px-4.py-2.text-sm.font-medium "Matched properties: "]
-            :item-render (fn [property] property)
-            :class       "black"}))))))
+      (hooks/use-effect!
+       (fn []
+         (.addEventListener input "input" (fn [_e]
+                                            (set-q! (or (:searching-property (editor-handler/get-searching-property input)) "")))))
+       [])
+      (hooks/use-effect!
+       (fn []
+         (p/let [matched-properties (editor-handler/<get-matched-properties q)]
+           (set-matched-properties! matched-properties)))
+       [q])
+      (let [q-property (string/replace (string/lower-case q) #"\s+" "-")
+            non-exist-handler (fn [_state]
+                                ((editor-handler/property-on-chosen-handler id q-property) nil))]
+        (ui/auto-complete
+         matched-properties
+         {:on-chosen (editor-handler/property-on-chosen-handler id q-property)
+          :on-enter non-exist-handler
+          :empty-placeholder [:div.px-4.py-2.text-sm (str "Create a new property: " q-property)]
+          :header [:div.px-4.py-2.text-sm.font-medium "Matched properties: "]
+          :item-render (fn [property] property)
+          :class       "black"})))))
 
 (rum/defc property-value-search-aux
   [id property q]
   (let [[values set-values!] (rum/use-state nil)]
-    (rum/use-effect!
+    (hooks/use-effect!
      (fn []
        (p/let [result (editor-handler/get-matched-property-values property q)]
          (set-values! result)))
@@ -423,7 +445,7 @@
 
 (rum/defc code-block-mode-keyup-listener
   [_q _edit-content last-pos current-pos]
-  (rum/use-effect!
+  (hooks/use-effect!
    (fn []
      (when (< current-pos last-pos)
        (state/clear-editor-action!)))
@@ -613,11 +635,6 @@
          [:span {:id (str "mock-text_" idx)
                  :key idx} c])))])
 
-(defn- exist-editor-commands-popup?
-  []
-  (some->> (shui-popup/get-popups)
-           (some #(some-> % (:id) (str) (string/starts-with? ":editor.commands")))))
-
 (defn- open-editor-popup!
   [id content opts]
   (let [input (state/get-input)
@@ -643,7 +660,7 @@
 
 (rum/defc shui-editor-popups
   [id format action _data]
-  (rum/use-effect!
+  (hooks/use-effect!
    (fn []
      (let [pid (case action
                  :commands
@@ -670,8 +687,10 @@
                  :input
                  (open-editor-popup! :input
                                      (editor-input id
+                      ;; on-submit
                                                    (fn [command m]
                                                      (editor-handler/handle-command-input command id format m))
+                      ;; on-cancel
                                                    (fn []
                                                      (editor-handler/handle-command-input-close id)))
                                      {:content-props {:onOpenAutoFocus #()}})
@@ -713,7 +732,7 @@
   (let [action (state/get-editor-action)
         [_id config] (:rum/args state)]
     (cond
-      (and (= type :esc) (exist-editor-commands-popup?))
+      (and (= type :esc) (editor-handler/editor-commands-popup-exists?))
       nil
 
       (or (contains?

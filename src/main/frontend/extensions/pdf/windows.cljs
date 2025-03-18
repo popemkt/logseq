@@ -1,8 +1,8 @@
 (ns frontend.extensions.pdf.windows
-  (:require [frontend.state :as state]
-            [rum.core :as rum]
-            [cljs-bean.core :as bean]
-            [frontend.storage :as storage]))
+  (:require [cljs-bean.core :as bean]
+            [frontend.state :as state]
+            [frontend.storage :as storage]
+            [rum.core :as rum]))
 
 (def *active-win (atom nil))
 (def *exit-pending? (atom false))
@@ -11,7 +11,7 @@
   [^js doc]
   (when-let [styles (keep #(when (some-> % (.-href) (.endsWith "style.css"))
                              (.-href %))
-                      (seq js/document.styleSheets))]
+                          (seq js/document.styleSheets))]
     (doseq [r styles]
       (let [^js link (js/document.createElement "link")]
         (set! (.-rel link) "stylesheet")
@@ -93,6 +93,7 @@
                   (.appendChild (.-head doc) base)
                   (set! (.-title doc) (or (:filename pdf-current) "Logseq"))
                   (set! (.-dataset doc-el) -theme (str theme-mode))
+                  (set! (.-dataset doc-el) -color (or (some-> (state/sub :ui/radix-color) (name)) "logseq"))
                   (resolve-classes! doc)
                   (resolve-styles! doc)
                   (.appendChild (.-body doc) main)
@@ -110,7 +111,7 @@
                 (state/set-state! :pdf/system-win? true)
                 ;; NOTE: must do ipc in new window
                 (some-> (.-apis win)
-                  (.doAction (bean/->js [:window/open-blank-callback :pdf]))))))]
+                        (.doAction (bean/->js [:window/open-blank-callback :pdf]))))))]
 
       (js/setTimeout
        (fn []

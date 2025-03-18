@@ -7,10 +7,10 @@
             [cljs-time.format :as tf]
             [cljs-time.local :as tl]
             [frontend.state :as state]
-            [logseq.common.util.date-time :as date-time-util]
             [goog.object :as gobj]
             [lambdaisland.glogi :as log]
-            [logseq.common.date :as common-date]))
+            [logseq.common.date :as common-date]
+            [logseq.common.util.date-time :as date-time-util]))
 
 (defn nld-parse
   [s]
@@ -34,7 +34,7 @@
   [input]
   (try
     (->> (cond->> input
-          (string? input) (tf/parse (tf/formatters :date-time-no-ms)))
+           (string? input) (tf/parse (tf/formatters :date-time-no-ms)))
          (t/to-default-time-zone)
          (tf/unparse (tf/formatter "MMM do, yyyy")))
     (catch :default _e
@@ -58,12 +58,12 @@
   ([date]
    (let [formatter (state/get-date-formatter)]
      (try
-      (date-time-util/format date formatter)
-      (catch :default e
-        (log/error :parse-journal-date {:message  "Failed to parse date to journal name."
-                                        :date date
-                                        :format formatter})
-        (throw e))))))
+       (date-time-util/format date formatter)
+       (catch :default e
+         (log/error :parse-journal-date {:message  "Failed to parse date to journal name."
+                                         :date date
+                                         :format formatter})
+         (throw e))))))
 
 (defn journal-name-s [s]
   (try
@@ -73,17 +73,20 @@
                                       :date-str s})
       nil)))
 
+(defn start-of-day [date]
+  (t/date-time (t/year date) (t/month date) (t/day date)))
+
 (defn today
   []
   (journal-name))
 
 (defn tomorrow
   []
-  (journal-name (t/plus (t/today) (t/days 1))))
+  (journal-name (t/plus (start-of-day (tl/local-now)) (t/days 1))))
 
 (defn yesterday
   []
-  (journal-name (t/minus (t/today) (t/days 1))))
+  (journal-name (t/minus (start-of-day (tl/local-now)) (t/days 1))))
 
 (defn get-local-date
   []
@@ -133,12 +136,7 @@
    journal-title
    (date-time-util/safe-journal-title-formatters (state/get-date-formatter))))
 
-(defn journal-day->ts
-  "journal-day format yyyyMMdd"
-  [day]
-  (when day
-    (-> (tf/parse (tf/formatter "yyyyMMdd") (str day))
-        (tc/to-long))))
+(def journal-day->utc-ms date-time-util/journal-day->ms)
 
 (defn journal-title->long
   [journal-title]
@@ -170,7 +168,7 @@
 
 (defn js-date->journal-title
   [date]
-  (journal-name (tc/to-local-date date)))
+  (journal-name (t/to-default-time-zone date)))
 
 (defn js-date->goog-date
   [d]
@@ -213,8 +211,6 @@
    "Next Friday"
    "Next Saturday"
    "Next Sunday"])
-
-
 
 (comment
   (def default-formatter (tf/formatter "MMM do, yyyy"))

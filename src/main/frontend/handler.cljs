@@ -1,45 +1,46 @@
 (ns frontend.handler
   "Main ns that handles application startup. Closest ns that we have to a
   system. Contains a couple of small system components"
-  (:require [electron.ipc :as ipc]
+  (:require [cljs-bean.core :as bean]
+            [electron.ipc :as ipc]
             [electron.listener :as el]
             [frontend.components.block :as block]
+            [frontend.components.content :as cp-content]
             [frontend.components.editor :as editor]
             [frontend.components.page :as page]
             [frontend.components.reference :as reference]
             [frontend.components.whiteboard :as whiteboard]
             [frontend.config :as config]
             [frontend.context.i18n :as i18n]
-            [frontend.db.restore :as db-restore]
             [frontend.db.react :as react]
+            [frontend.db.restore :as db-restore]
             [frontend.error :as error]
             [frontend.handler.command-palette :as command-palette]
             [frontend.handler.events :as events]
             [frontend.handler.file-based.events]
-            [frontend.handler.file :as file-handler]
+            [frontend.handler.file-based.file :as file-handler]
             [frontend.handler.global-config :as global-config-handler]
             [frontend.handler.notification :as notification]
             [frontend.handler.page :as page-handler]
             [frontend.handler.plugin-config :as plugin-config-handler]
             [frontend.handler.repo :as repo-handler]
             [frontend.handler.repo-config :as repo-config-handler]
+            [frontend.handler.test :as test]
             [frontend.handler.ui :as ui-handler]
             [frontend.handler.user :as user-handler]
             [frontend.idb :as idb]
+            [frontend.mobile.core :as mobile]
             [frontend.mobile.util :as mobile-util]
             [frontend.modules.instrumentation.core :as instrument]
             [frontend.modules.shortcut.core :as shortcut]
+            [frontend.persist-db :as persist-db]
+            [frontend.persist-db.browser :as db-browser]
             [frontend.state :as state]
             [frontend.util :as util]
             [frontend.util.persist-var :as persist-var]
             [goog.object :as gobj]
             [lambdaisland.glogi :as log]
-            [promesa.core :as p]
-            [frontend.mobile.core :as mobile]
-            [cljs-bean.core :as bean]
-            [frontend.handler.test :as test]
-            [frontend.persist-db.browser :as db-browser]
-            [frontend.persist-db :as persist-db]))
+            [promesa.core :as p]))
 
 (defn- set-global-error-notification!
   []
@@ -95,8 +96,8 @@
            (page-handler/init-commands!)
 
            (watch-for-date!)
-           (when (util/electron?) (file-handler/watch-for-current-graph-dir!))
-           (state/pub-event! [:graph/restored (state/get-current-repo)])))
+           (when (and (not (config/db-based-graph? repo)) (util/electron?))
+             (file-handler/watch-for-current-graph-dir!))))
         (p/catch (fn [error]
                    (log/error :exception error))))))
 
@@ -127,6 +128,7 @@
   (state/set-component! :block/inline-text block/inline-text)
   (state/set-component! :block/asset-cp block/asset-cp)
   (state/set-component! :editor/box editor/box)
+  (state/set-component! :selection/context-menu cp-content/custom-context-menu-content)
   (command-palette/register-global-shortcut-commands))
 
 (defn- get-system-info
@@ -137,11 +139,12 @@
 
 (defn start!
   [render]
+
+  (idb/start)
   (test/setup-test!)
   (get-system-info)
   (set-global-error-notification!)
 
-  (set! js/window.onhashchange #(state/hide-custom-context-menu!)) ;; close context menu when page navs
   (register-components-fns!)
   (user-handler/restore-tokens-from-localstorage)
   (state/set-db-restoring! true)
@@ -157,7 +160,6 @@
       (p/catch (fn [_e]
                  (notification/show! "Sorry, it seems that your browser doesn't support IndexedDB, we recommend to use latest Chrome(Chromium) or Firefox(Non-private mode)." :error false)
                  (state/set-indexedb-support! false))))
-  (idb/start)
 
   (react/run-custom-queries-when-idle!)
 

@@ -796,10 +796,8 @@ html[data-theme=dark] {
 .block-content {
   &[data-type=annotation] {
     .prefix-link {
-      display: inline-flex;
-      align-items: center;
-      padding-right: 4px;
-      cursor: alias;
+      @apply inline-flex items-center pr-1 cursor-alias;
+
       color: var(--ls-link-ref-text-color);
 
       &:before {
@@ -809,41 +807,31 @@ html[data-theme=dark] {
 
     [data-hl-type=area] {
       .prefix-link {
-        padding-top: 5px;
-        display: block;
+        @apply block mt-[1px];
       }
 
       .hl-page {
-        display: inline-flex;
-        justify-content: space-between;
-        width: 85%;
+        @apply inline-flex justify-between w-[85%];
 
         > label {
-          flex: 1;
-          cursor: text;
+          @apply flex-1 cursor-text;
         }
       }
     }
 
     .hl-area {
-      @apply relative inline-block cursor-text border rounded-md overflow-hidden mt-1;
+      @apply relative block cursor-text mt-1;
 
-      .actions {
-        @apply absolute right-1 top-1 flex opacity-0 transition-opacity;
-      }
+      > .asset-container {
+        @apply mt-0 border rounded-md overflow-hidden;
 
-      &:hover {
-        .actions {
-          @apply opacity-100;
+        > .asset-action-bar {
+          @apply top-1 right-1;
         }
       }
 
       img {
-        margin: 0;
-        box-shadow: none;
-        max-width: 100%;
-        max-height: 420px;
-        cursor: alias;
+        @apply cursor-alias;
       }
     }
   }

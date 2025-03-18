@@ -1,24 +1,25 @@
 (ns logseq.graph-parser.block
-  "Given mldoc ast, prepares block data in preparation for db transaction"
+  "Given mldoc ast, prepares block data in preparation for db transaction.
+   Used by file and DB graphs"
   (:require [clojure.set :as set]
             [clojure.string :as string]
             [clojure.walk :as walk]
             [datascript.core :as d]
             [datascript.impl.entity :as de]
             [logseq.common.config :as common-config]
+            [logseq.common.date :as common-date]
             [logseq.common.util :as common-util]
             [logseq.common.util.block-ref :as block-ref]
             [logseq.common.util.date-time :as date-time-util]
             [logseq.common.util.page-ref :as page-ref]
             [logseq.common.uuid :as common-uuid]
             [logseq.db :as ldb]
-            [logseq.db.frontend.order :as db-order]
+            [logseq.db.common.order :as db-order]
+            [logseq.db.frontend.class :as db-class]
             [logseq.graph-parser.mldoc :as gp-mldoc]
             [logseq.graph-parser.property :as gp-property]
             [logseq.graph-parser.text :as text]
-            [logseq.graph-parser.utf8 :as utf8]
-            [logseq.db.frontend.class :as db-class]
-            [logseq.common.date :as common-date]))
+            [logseq.graph-parser.utf8 :as utf8]))
 
 (defn heading-block?
   [block]
@@ -190,8 +191,7 @@
                    ;; get links ast
                    (map last)
                    (mapcat (fn [value]
-                             (let [f (or (:extract-refs-from-property-value-fn user-config) extract-refs-from-property-value)]
-                               (f value (get user-config :format :markdown)))))
+                             (extract-refs-from-property-value value (get user-config :format :markdown))))
                    ;; comma separated collections
                    (concat (->> (map second properties)
                                 (filter coll?)
@@ -286,14 +286,18 @@
 
 (defn- convert-page-if-journal-impl
   "Convert journal file name to user' custom date format"
-  [original-page-name date-formatter]
+  [original-page-name date-formatter & {:keys [export-to-db-graph?]}]
   (when original-page-name
     (let [page-name (common-util/page-name-sanity-lc original-page-name)
           day (when date-formatter
-                (date-time-util/journal-title->int page-name (date-time-util/safe-journal-title-formatters date-formatter)))]
+                (date-time-util/journal-title->int
+                 page-name
+                 ;; When exporting, only use the configured date-formatter. Allowing for other date formatters allows
+                 ;; for page names to change which breaks looking up journal refs for unconfigured journal pages
+                 (if export-to-db-graph? [date-formatter] (date-time-util/safe-journal-title-formatters date-formatter))))]
       (if day
-        (let [original-page-name (date-time-util/int->journal-title day date-formatter)]
-          [original-page-name (common-util/page-name-sanity-lc original-page-name) day])
+        (let [original-page-name' (date-time-util/int->journal-title day date-formatter)]
+          [original-page-name' (common-util/page-name-sanity-lc original-page-name') day])
         [original-page-name page-name day]))))
 
 (def convert-page-if-journal (memoize convert-page-if-journal-impl))
@@ -306,7 +310,7 @@
    {:keys [with-timestamp? page-uuid from-page class? skip-existing-page-check?]}]
   (let [db-based? (ldb/db-based-graph? db)
         original-page-name (common-util/remove-boundary-slashes original-page-name)
-        [original-page-name' page-name journal-day] (convert-page-if-journal original-page-name date-formatter)
+        [original-page-name' page-name journal-day] (convert-page-if-journal original-page-name date-formatter {:export-to-db-graph? @*export-to-db-graph?})
         namespace? (and (or (not db-based?) @*export-to-db-graph?)
                         (not (boolean (text/get-nested-page-name original-page-name')))
                         (text/namespace-page? original-page-name'))
@@ -320,8 +324,8 @@
                :block/title original-page-name'}
               (when (and original-page-name
                          (not= (string/lower-case original-page-name)
-                               (string/lower-case original-page-name')))
-
+                               (string/lower-case original-page-name'))
+                         (not @*export-to-db-graph?))
                 {:block.temp/original-page-name original-page-name})
               (if (and class? page-entity (:db/ident page-entity))
                 {:block/uuid (:block/uuid page-entity)
@@ -347,10 +351,11 @@
                   {:block/created-at current-ms
                    :block/updated-at current-ms}))
               (if journal-day
-                (cond-> {:block/type "journal"
-                         :block/journal-day journal-day}
+                (cond-> {:block/journal-day journal-day}
                   db-based?
-                  (assoc :block/tags [:logseq.class/Journal]))
+                  (assoc :block/tags [:logseq.class/Journal])
+                  (not db-based?)
+                  (assoc :block/type "journal"))
                 {}))]
     [page page-entity]))
 
@@ -368,11 +373,13 @@
     as there's no chance to introduce timestamps via editing in page
    `skip-existing-page-check?`: if true, allows pages to have the same name"
   [original-page-name db with-timestamp? date-formatter
-   & {:keys [page-uuid class?] :as options}]
+   & {:keys [page-uuid class? created-by] :as options}]
   (when-not (and db (common-util/uuid-string? original-page-name)
                  (not (ldb/page? (d/entity db [:block/uuid (uuid original-page-name)]))))
-    (let [original-page-name (-> (string/trim original-page-name)
-                                 sanitize-hashtag-name)
+    (let [db-based? (ldb/db-based-graph? db)
+          original-page-name (cond-> (string/trim original-page-name)
+                               db-based?
+                               sanitize-hashtag-name)
           [page _page-entity] (cond
                                 (and original-page-name (string? original-page-name))
                                 (page-name-string->map original-page-name db date-formatter
@@ -388,8 +395,13 @@
                                                  nil)]
                                   [page nil]))]
       (when page
-        (let [type (if class? "class" (or (:block/type page) "page"))]
-          (assoc page :block/type type))))))
+        (if db-based?
+          (let [tags (if class? [:logseq.class/Tag]
+                         (or (:block/tags page)
+                             [:logseq.class/Page]))]
+            (cond-> (assoc page :block/tags tags)
+              created-by (assoc :logseq.property/created-by created-by)))
+          (assoc page :block/type (or (:block/type page) "page")))))))
 
 (defn- db-namespace-page?
   "Namespace page that're not journal pages"
@@ -448,7 +460,7 @@
        (when-not (and (vector? form)
                       (= (first form) "Custom")
                       (= (second form) "query"))
-         (when-let [page (get-page-reference form (:format block))]
+         (when-let [page (get-page-reference form (get block :format :markdown))]
            (when-let [page' (when-not (db-namespace-page? db-based? page)
                               page)]
              (swap! *refs conj page')))
@@ -517,7 +529,7 @@
         content (when content
                   (let [content (text/remove-level-spaces content format block-pattern)]
                     (if (or (:pre-block? block)
-                            (= (:format block) :org))
+                            (= (get block :format :markdown) :org))
                       content
                       (gp-mldoc/remove-indentation-spaces content (inc (:level block)) false))))]
     (if (= format :org)
@@ -549,7 +561,7 @@
 (defn- macro->block
   "macro: {:name \"\" arguments [\"\"]}"
   [macro]
-  {:block/uuid (random-uuid)
+  {:block/uuid (common-uuid/gen-uuid)
    :block/type "macro"
    :block/properties {:logseq.macro-name (:name macro)
                       :logseq.macro-arguments (:arguments macro)}})
@@ -614,7 +626,7 @@
     properties))
 
 (defn- construct-block
-  [block properties timestamps body encoded-content format pos-meta {:keys [block-pattern db date-formatter parse-block remove-properties?]}]
+  [block properties timestamps body encoded-content format pos-meta {:keys [block-pattern db date-formatter parse-block remove-properties? db-graph-mode? export-to-db-graph?]}]
   (let [id (get-custom-id-or-new-id properties)
         ref-pages-in-properties (->> (:page-refs properties)
                                      (remove string/blank?))
@@ -647,16 +659,19 @@
                 block)
         title (cond->> (get-block-content encoded-content block format pos-meta block-pattern)
                 remove-properties?
-                (gp-property/remove-properties (:format block)))
+                (gp-property/remove-properties (get block :format :markdown)))
         block (assoc block :block/title title)
         block (if (seq timestamps)
                 (merge block (timestamps->scheduled-and-deadline timestamps))
                 block)
+        db-based? (or db-graph-mode? export-to-db-graph?)
         block (-> block
                   (assoc :body body)
-                  (with-page-block-refs db date-formatter {:parse-block parse-block})
-                  (update :tags (fn [tags] (map #(assoc % :block/format format) tags)))
-                  (update :refs (fn [refs] (map #(if (map? %) (assoc % :block/format format) %) refs))))
+                  (with-page-block-refs db date-formatter {:parse-block parse-block}))
+        block (if db-based? block
+                  (-> block
+                      (update :tags (fn [tags] (map #(assoc % :block/format format) tags)))
+                      (update :refs (fn [refs] (map #(if (map? %) (assoc % :block/format format) %) refs)))))
         block (update block :refs concat (:block-refs properties))
         {:keys [created-at updated-at]} (:properties properties)
         block (cond-> block
@@ -679,7 +694,7 @@
                              (let [replace-str (re-pattern
                                                 (str
                                                  "\n*\\s*"
-                                                 (if (= :markdown (:block/format block))
+                                                 (if (= :markdown (get block :block/format :markdown))
                                                    (str "id" gp-property/colons " " (:block/uuid block))
                                                    (str (gp-property/colons-org "id") " " (:block/uuid block)))))]
                                (string/replace-first c replace-str ""))))))

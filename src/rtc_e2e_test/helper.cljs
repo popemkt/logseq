@@ -1,15 +1,16 @@
 (ns helper
   (:require [cljs.test :as t :refer [is]]
-            [datascript.transit :as dt]
             [const]
             [datascript.core :as d]
-            [frontend.common.missionary-util :as c.m]
+            [datascript.transit :as dt]
+            [fixture]
+            [frontend.common.missionary :as c.m]
             [frontend.worker.rtc.client-op :as client-op]
             [frontend.worker.rtc.core :as rtc.core]
             [frontend.worker.rtc.log-and-state :as rtc-log-and-state]
             [frontend.worker.state :as worker-state]
             [logseq.db :as ldb]
-            [logseq.db.frontend.order :as db-order]
+            [logseq.db.common.order :as db-order]
             [logseq.outliner.batch-tx :as batch-tx]
             [meander.epsilon :as me]
             [missionary.core :as m]))
@@ -41,7 +42,7 @@
                                 (not= "deleting" (:graph-status graph)))
                               graphs)]
       (doseq [graph test-graphs]
-        (m/? (rtc.core/new-task--delete-graph const/test-token (:graph-uuid graph)))
+        (m/? (rtc.core/new-task--delete-graph const/test-token (:graph-uuid graph) fixture/graph-schema-version))
         (log :deleted-graph (:graph-name graph) (:graph-uuid graph))))))
 
 (def new-task--get-remote-example-graph-uuid
@@ -69,8 +70,10 @@
 (defn new-task--download-graph
   [graph-uuid graph-name]
   (m/sp
-    (let [download-info-uuid (m/? (rtc.core/new-task--request-download-graph const/test-token graph-uuid))
-          result (m/? (rtc.core/new-task--wait-download-info-ready const/test-token download-info-uuid graph-uuid 60000))
+    (let [download-info-uuid (m/? (rtc.core/new-task--request-download-graph
+                                   const/test-token graph-uuid fixture/graph-schema-version))
+          result (m/? (rtc.core/new-task--wait-download-info-ready
+                       const/test-token download-info-uuid graph-uuid fixture/graph-schema-version 60000))
           {:keys [_download-info-uuid
                   download-info-s3-url
                   _download-info-tx-instant
@@ -91,11 +94,11 @@
   #_:clj-kondo/ignore
   (me/find
    client-op
-    [?op-type _ {:block-uuid ?block-uuid :av-coll [[!a !v _ !add] ...]}]
-    [?op-type ?block-uuid (map vector !a !v !add)]
+   [?op-type _ {:block-uuid ?block-uuid :av-coll [[!a !v _ !add] ...]}]
+   [?op-type ?block-uuid (map vector !a !v !add)]
 
-    [?op-type _ {:block-uuid ?block-uuid}]
-    [?op-type ?block-uuid]))
+   [?op-type _ {:block-uuid ?block-uuid}]
+   [?op-type ?block-uuid]))
 
 (defn new-task--wait-all-client-ops-sent
   [& {:keys [timeout] :or {timeout 10000}}]
@@ -103,7 +106,7 @@
     (let [r (m/? (m/timeout
                   (m/reduce (fn [_ v]
                               (when (and (= :rtc.log/push-local-update (:type v))
-                                         (empty? (client-op/get-all-ops const/downloaded-test-repo)))
+                                         (empty? (client-op/get-all-block-ops const/downloaded-test-repo)))
                                 (is (nil? (:ex-data v)))
                                 (reduced v)))
                             rtc-log-and-state/rtc-log-flow)
@@ -124,17 +127,15 @@
                     :block/title "message-page"
                     :block/created-at 1725024677501
                     :block/updated-at 1725024677501
-                    :block/type "page"
-                    :block/format :markdown}
+                    :block/type "page"}
                    {:block/uuid (random-uuid)
                     :block/parent "page"
                     :block/order min-order
                     :block/title (dt/write-transit-str message)
                     :block/page "page"
-                    :block/format :markdown
                     :block/updated-at 1724836490810
                     :block/created-at 1724836490810}]]
-      (batch-tx/with-batch-tx-mode conn {:e2e-test const/downloaded-test-repo :skip-store-conn true}
+      (batch-tx/with-batch-tx-mode conn {:e2e-test const/downloaded-test-repo :frontend.worker.pipeline/skip-store-conn true}
         (d/transact! conn tx-data))
       (m/? (new-task--wait-all-client-ops-sent))
       (log :sent-message message))))
@@ -186,7 +187,7 @@
 (defn transact!
   [conn tx-data]
   {:pre [(seq tx-data)]}
-  (batch-tx/with-batch-tx-mode conn {:e2e-test const/downloaded-test-repo :skip-store-conn true}
+  (batch-tx/with-batch-tx-mode conn {:e2e-test const/downloaded-test-repo :frontend.worker.pipeline/skip-store-conn true}
     (d/transact! conn tx-data)))
 
 (def new-task--stop-rtc

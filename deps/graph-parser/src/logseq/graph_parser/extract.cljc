@@ -1,23 +1,24 @@
 (ns logseq.graph-parser.extract
-  "Handles extraction of blocks, pages and mldoc ast in preparation for db
-  transaction"
+  "For file graphs, handles extraction of blocks, pages and mldoc ast in
+  preparation for db transaction"
   ;; Disable clj linters since we don't support clj
   #?(:clj {:clj-kondo/config {:linters {:unresolved-namespace {:level :off}
                                         :unresolved-symbol {:level :off}}}})
-  (:require [clojure.set :as set]
+  (:require #?(:org.babashka/nbb [logseq.common.log :as log]
+               :default [lambdaisland.glogi :as log])
+            [clojure.set :as set]
             [clojure.string :as string]
             [clojure.walk :as walk]
             [datascript.core :as d]
-            [logseq.graph-parser.text :as text]
-            [logseq.common.util :as common-util]
-            [logseq.graph-parser.mldoc :as gp-mldoc]
-            [logseq.graph-parser.block :as gp-block]
-            [logseq.graph-parser.property :as gp-property]
             [logseq.common.config :as common-config]
-            #?(:org.babashka/nbb [logseq.common.log :as log]
-               :default [lambdaisland.glogi :as log])
+            [logseq.common.util :as common-util]
+            [logseq.db :as ldb]
+            [logseq.graph-parser.block :as gp-block]
+            [logseq.graph-parser.mldoc :as gp-mldoc]
+            [logseq.graph-parser.property :as gp-property]
+            [logseq.graph-parser.text :as text]
             [logseq.graph-parser.whiteboard :as gp-whiteboard]
-            [logseq.db :as ldb]))
+            [medley.core :as medley]))
 
 (defn- filepath->page-name
   [filepath]
@@ -166,7 +167,7 @@
                   :block/file {:file/path (common-util/path-normalize file)}))
                 (extract-page-alias-and-tags page-name properties))]
     (cond->
-      page-m
+     page-m
 
       (seq valid-properties)
       (assoc :block/properties valid-properties
@@ -190,6 +191,31 @@
           (log/error :gp-extract/attach-block-ids-not-match "attach-block-ids-if-match: block-ids provided, but doesn't match the number of blocks, ignoring")))
       blocks))
 
+(defn- build-pages-aux
+  [db page-map ref-pages date-formatter format]
+  (let [namespace-pages (let [page (:block/title page-map)]
+                          (when (text/namespace-page? page)
+                            (->> (common-util/split-namespace-pages page)
+                                 (map (fn [page]
+                                        (-> (gp-block/page-name->map page db true date-formatter)
+                                            (assoc :block/format format)))))))
+        pages (->> (concat
+                    [page-map]
+                    @ref-pages
+                    namespace-pages)
+                     ;; remove block references
+                   (remove vector?)
+                   (remove nil?)
+                   (filter :block/name))
+        pages (common-util/distinct-by :block/name pages)
+        pages (remove nil? pages)]
+    (map (fn [page]
+           (let [page-id (or (when db
+                               (:block/uuid (ldb/get-page db (:block/name page))))
+                             (d/squuid))]
+             (assoc page :block/uuid page-id)))
+         pages)))
+
 ;; TODO: performance improvement
 (defn- extract-pages-and-blocks
   "uri-encoded? - if is true, apply URL decode on the file path
@@ -198,7 +224,7 @@
      :resolve-uuid-fn - Optional fn which is called to resolve uuids of each block. Enables diff-merge
        (2 ways diff) based uuid resolution upon external editing.
        returns a list of the uuids, given the receiving ast, or nil if not able to resolve.
-       Implemented in file-common-handler/diff-merge-uuids for IoC
+       Implemented in reset-file-handler/diff-merge-uuids-2ways for IoC
        Called in gp-extract/extract as AST is being parsed and properties are extracted there"
   [format ast properties file content {:keys [date-formatter db filename-format extracted-block-ids resolve-uuid-fn]
                                        :or {extracted-block-ids (atom #{})
@@ -206,8 +232,7 @@
                                        :as options}]
   (assert db "Datascript DB is required")
   (try
-    (let [db-based? (ldb/db-based-graph? db)
-          page (get-page-name file ast false filename-format)
+    (let [page (get-page-name file ast false filename-format)
           [page page-name _journal-day] (gp-block/convert-page-if-journal page date-formatter)
           options' (assoc options :page-name page-name)
           ;; In case of diff-merge (2way) triggered, use the uuids to override the ones extracted from the AST
@@ -227,9 +252,9 @@
                               (swap! ref-pages set/union (set block-ref-pages)))
                             (-> block
                                 (dissoc :ref-pages)
-                                (assoc :block/format format
-                                       :block/page [:block/name page-name]
-                                       :block/refs block-ref-pages)))))
+                                (assoc :block/page [:block/name page-name]
+                                       :block/refs block-ref-pages
+                                       :block/format format)))))
                       blocks)
           [properties invalid-properties properties-text-values]
           (if (:block/pre-block? (first blocks))
@@ -238,29 +263,7 @@
              (:block/properties-text-values (first blocks))]
             [properties [] {}])
           page-map (build-page-map properties invalid-properties properties-text-values file page page-name (assoc options' :from-page page))
-          namespace-pages (when (or (not db-based?) (:export-to-db-graph? options))
-                            (let [page (:block/title page-map)]
-                              (when (text/namespace-page? page)
-                                (->> (common-util/split-namespace-pages page)
-                                     (map (fn [page]
-                                            (-> (gp-block/page-name->map page db true date-formatter)
-                                                (assoc :block/format format))))))))
-          pages (->> (concat
-                      [page-map]
-                      @ref-pages
-                      namespace-pages)
-                     ;; remove block references
-                     (remove vector?)
-                     (remove nil?)
-                     (filter :block/name))
-          pages (common-util/distinct-by :block/name pages)
-          pages (remove nil? pages)
-          pages (map (fn [page]
-                       (let [page-id (or (when db
-                                           (:block/uuid (ldb/get-page db (:block/name page))))
-                                         (d/squuid))]
-                         (assoc page :block/uuid page-id)))
-                     pages)
+          pages (build-pages-aux db page-map ref-pages date-formatter format)
           blocks (->> (remove nil? blocks)
                       (map (fn [b] (dissoc b :block.temp/ast-title :block.temp/ast-body :block/level :block/children :block/meta))))]
       [pages blocks])
@@ -271,7 +274,7 @@
   "Extracts pages, blocks and ast from given file"
   [file-path content {:keys [user-config verbose] :or {verbose true} :as options}]
   (if (string/blank? content)
-    []
+    {}
     (let [format (common-util/get-format file-path)
           _ (when verbose (println "Parsing start: " file-path))
           ast (gp-mldoc/->edn content (gp-mldoc/default-config format
@@ -310,9 +313,9 @@
         blocks (map
                 (fn [block]
                   (-> block
-                      (common-util/dissoc-in [:block/parent :block/name])
+                      (medley/dissoc-in [:block/parent :block/name])
                       ;; :block/left here for backward compatibility
-                      (common-util/dissoc-in [:block/left :block/name])))
+                      (medley/dissoc-in [:block/left :block/name])))
                 blocks)
         serialized-page (first pages)
         ;; whiteboard edn file should normally have valid :block/title, :block/name, :block/uuid

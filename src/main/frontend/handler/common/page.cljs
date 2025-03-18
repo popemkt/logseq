@@ -3,26 +3,26 @@
   and favorite fns. This ns should be agnostic of file or db concerns but there
   is still some file-specific tech debt to remove from create!"
   (:require [clojure.string :as string]
-            [frontend.db :as db]
-            [frontend.handler.config :as config-handler]
-            [frontend.handler.route :as route-handler]
-            [frontend.state :as state]
-            [logseq.common.util :as common-util]
-            [logseq.common.config :as common-config]
-            [frontend.handler.ui :as ui-handler]
-            [frontend.config :as config]
-            [frontend.fs :as fs]
-            [promesa.core :as p]
-            [frontend.handler.block :as block-handler]
-            [logseq.db :as ldb]
-            [frontend.db.conn :as conn]
             [datascript.core :as d]
-            [frontend.modules.outliner.ui :as ui-outliner-tx]
-            [frontend.modules.outliner.op :as outliner-op]
+            [frontend.config :as config]
+            [frontend.db :as db]
+            [frontend.db.conn :as conn]
+            [frontend.fs :as fs]
+            [frontend.handler.block :as block-handler]
+            [frontend.handler.config :as config-handler]
             [frontend.handler.db-based.editor :as db-editor-handler]
-            [logseq.db.frontend.content :as db-content]
+            [frontend.handler.notification :as notification]
+            [frontend.handler.route :as route-handler]
+            [frontend.handler.ui :as ui-handler]
+            [frontend.handler.user :as user]
+            [frontend.modules.outliner.op :as outliner-op]
+            [frontend.modules.outliner.ui :as ui-outliner-tx]
+            [frontend.state :as state]
+            [logseq.common.config :as common-config]
+            [logseq.common.util :as common-util]
             [logseq.common.util.page-ref :as page-ref]
-            [frontend.handler.notification :as notification]))
+            [logseq.db :as ldb]
+            [promesa.core :as p]))
 
 (defn- wrap-tags
   "Tags might have multiple words"
@@ -54,30 +54,30 @@
              has-tags? (and db-based? (seq (:block/tags parsed-result)))
              title' (if has-tags?
                       (some-> (first
-                               (or (common-util/split-first (str "#" db-content/page-ref-special-chars) (:block/title parsed-result))
-                                   (common-util/split-first (str "#" page-ref/left-brackets db-content/page-ref-special-chars) (:block/title parsed-result))))
+                               (common-util/split-first (str "#" page-ref/left-brackets) (:block/title parsed-result)))
                               string/trim)
                       title)]
        (if (and has-tags? (nil? title'))
          (notification/show! "Page name can't include \"#\"." :warning)
          (when-not (string/blank? title')
-           (p/let [options' (if db-based?
-                              (cond->
-                               (update options :tags concat (:block/tags parsed-result))
+           (p/let [current-user-id (user/user-uuid)
+                   options' (if db-based?
+                              (cond-> (update options :tags concat (:block/tags parsed-result))
                                 (nil? (:split-namespace? options))
-                                (assoc :split-namespace? true))
+                                (assoc :split-namespace? true)
+                                current-user-id
+                                (assoc :created-by current-user-id))
                               options)
                    result (ui-outliner-tx/transact!
                            {:outliner-op :create-page}
                            (outliner-op/create-page! title' options'))
-                   [_page-name page-uuid] (ldb/read-transit-str result)]
+                   [_page-name page-uuid] (ldb/read-transit-str result)
+                   page (db/get-page (or page-uuid title'))]
              (when redirect?
-               (route-handler/redirect-to-page! page-uuid))
-             (let [page (db/get-page (or page-uuid title'))]
+               (route-handler/redirect-to-page! page-uuid)
                (when-let [first-block (ldb/get-first-child @conn (:db/id page))]
-                 (block-handler/edit-block! first-block :max {:container-id :unknown-container}))
-               page))))))))
-
+                 (block-handler/edit-block! first-block :max {:container-id :unknown-container})))
+             page)))))))
 
 ;; favorite fns
 ;; ============
@@ -129,16 +129,13 @@
 (defn <db-favorite-page!
   [page-block-uuid]
   {:pre [(uuid? page-block-uuid)]}
-  (let [favorites-page (db/get-page common-config/favorites-page-name)]
-    (when (d/entity (conn/get-db) [:block/uuid page-block-uuid])
-      (p/do!
-       (when-not favorites-page (ldb/create-favorites-page!
- (state/get-current-repo)))
-       (ui-outliner-tx/transact!
-        {:outliner-op :insert-blocks}
-        (outliner-op/insert-blocks! [(ldb/build-favorite-tx page-block-uuid)]
-                                    (db/get-page common-config/favorites-page-name)
-                                    {}))))))
+  (when (d/entity (conn/get-db) [:block/uuid page-block-uuid])
+    (p/do!
+     (ui-outliner-tx/transact!
+      {:outliner-op :insert-blocks}
+      (outliner-op/insert-blocks! [(ldb/build-favorite-tx page-block-uuid)]
+                                  (db/get-page common-config/favorites-page-name)
+                                  {})))))
 
 (defn <db-unfavorite-page!
   [page-block-uuid]
@@ -148,9 +145,7 @@
      {:outliner-op :delete-blocks}
      (outliner-op/delete-blocks! [block] {}))))
 
-
 ;; favorites fns end ================
-
 
 (defn <delete!
   "Deletes a page. If delete is successful calls ok-handler. Otherwise calls error-handler
@@ -183,7 +178,6 @@
 
 ;; other fns
 ;; =========
-
 
 (defn after-page-deleted!
   [repo page-name file-path tx-meta]

@@ -24,7 +24,6 @@
             [frontend.handler.notification :as notification]
             [frontend.handler.plugin :as plugin-handler]
             [frontend.handler.property :as property-handler]
-            [frontend.handler.property.util :as pu]
             [frontend.handler.ui :as ui-handler]
             [frontend.mobile.util :as mobile-util]
             [frontend.modules.outliner.op :as outliner-op]
@@ -41,12 +40,12 @@
             [logseq.common.config :as common-config]
             [logseq.common.path :as path]
             [logseq.common.util :as common-util]
-            [logseq.common.util.block-ref :as block-ref]
             [logseq.common.util.page-ref :as page-ref]
             [logseq.db :as ldb]
             [logseq.graph-parser.db :as gp-db]
             [logseq.graph-parser.text :as text]
-            [promesa.core :as p]))
+            [promesa.core :as p]
+            [frontend.handler.file-based.page-property :as file-page-property]))
 
 (def <create! page-common-handler/<create!)
 (def <delete! page-common-handler/<delete!)
@@ -170,8 +169,10 @@
     (state/set-journals-length! (+ (:journals-length @state/state) 7))))
 
 (defn update-public-attribute!
-  [page value]
-  (property-handler/add-page-property! page (pu/get-pid :logseq.property/public) value))
+  [repo page value]
+  (if (config/db-based-graph? repo)
+    (db-property-handler/set-block-property! [:block/uuid (:block/uuid page)] :logseq.property/publishing-public? value)
+    (file-page-property/add-property! page :public value)))
 
 (defn get-page-ref-text
   [page]
@@ -362,11 +363,7 @@
                                               [page (db/get-page page)])))
                                         [chosen' chosen-result])
             ref-text (if (and (de/entity? chosen-result) (not (ldb/page? chosen-result)))
-                       (cond
-                         db-based?
-                         (page-ref/->page-ref (:block/uuid chosen-result))
-                         :else
-                         (block-ref/->block-ref (:block/uuid chosen-result)))
+                       (page-ref/->page-ref (:block/uuid chosen-result))
                        (get-page-ref-text chosen'))
             result (when db-based?
                      (when-not (de/entity? chosen-result)
@@ -430,7 +427,6 @@
                           (<create! title {:redirect? false
                                            :split-namespace? false
                                            :create-first-block? (not template)
-                                           :journal? true
                                            :today-journal? true})
                           (state/pub-event! [:journal/insert-template today-page])
                           (ui-handler/re-render-root!)

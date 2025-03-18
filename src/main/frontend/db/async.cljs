@@ -1,23 +1,25 @@
 (ns frontend.db.async
   "Async queries"
-  (:require [promesa.core :as p]
-            [frontend.state :as state]
-            [frontend.config :as config]
-            [frontend.db.utils :as db-utils]
-            [frontend.db.async.util :as db-async-util]
-            [frontend.db.file-based.async :as file-async]
-            [frontend.db :as db]
-            [frontend.db.model :as db-model]
-            [frontend.persist-db.browser :as db-browser]
-            [datascript.core :as d]
-            [frontend.db.react :as react]
-            [frontend.date :as date]
+  (:require [cljs-time.coerce :as tc]
             [cljs-time.core :as t]
             [cljs-time.format :as tf]
-            [logseq.db :as ldb]
-            [frontend.util :as util]
+            [datascript.core :as d]
+            [frontend.config :as config]
+            [frontend.date :as date]
+            [frontend.db :as db]
+            [frontend.db.async.util :as db-async-util]
+            [frontend.db.file-based.async :as file-async]
+            [frontend.db.model :as db-model]
+            [frontend.db.react :as react]
+            [frontend.db.utils :as db-utils]
             [frontend.handler.file-based.property.util :as property-util]
-            [logseq.db.frontend.property :as db-property]))
+            [frontend.persist-db.browser :as db-browser]
+            [frontend.state :as state]
+            [frontend.util :as util]
+            [logseq.db :as ldb]
+            [logseq.db.frontend.property :as db-property]
+            [logseq.db.frontend.rules :as rules]
+            [promesa.core :as p]))
 
 (def <q db-async-util/<q)
 (def <pull db-async-util/<pull)
@@ -51,28 +53,34 @@
 
 (defn <db-based-get-all-properties
   "Return seq of all property names except for private built-in properties."
-  [graph]
-  (p/let [result (<q graph
-                     {:transact-db? false}
-                     '[:find [(pull ?e [:block/uuid :db/ident :block/title :block/schema]) ...]
-                       :where
-                       [?e :block/type "property"]
-                       [?e :block/title]])]
-    (->> result
-         ;; remove private built-in properties
-         (remove #(and (:db/ident %)
-                       (db-property/logseq-property? (:db/ident %))
-                       (not (ldb/public-built-in-property? %))
-                       (not= (:db/ident %) :logseq.property/icon))))))
+  [graph & {:keys [remove-built-in-property? remove-non-queryable-built-in-property?]
+            :or {remove-built-in-property? true
+                 remove-non-queryable-built-in-property? false}}]
+  (let [result (->> (d/datoms (db/get-db graph) :avet :block/tags :logseq.class/Property)
+                    (map (fn [datom] (db/entity (:e datom))))
+                    (sort-by (juxt ldb/built-in? :block/title)))]
+    (cond->> result
+      remove-built-in-property?
+      ;; remove private built-in properties
+      (remove (fn [p]
+                (let [ident (:db/ident p)]
+                  (and (ldb/built-in? p)
+                       (not (ldb/public-built-in-property? p))
+                       (not= ident :logseq.property/icon)))))
+      remove-non-queryable-built-in-property?
+      (remove (fn [p]
+                (let [ident (:db/ident p)]
+                  (and (ldb/built-in? p)
+                       (not (:queryable? (db-property/built-in-properties ident))))))))))
 
 (defn <get-all-properties
   "Returns all public properties as property maps including their
   :block/title and :db/ident. For file graphs the map only contains
   :block/title"
-  []
+  [& {:as opts}]
   (when-let [graph (state/get-current-repo)]
     (if (config/db-based-graph? graph)
-      (<db-based-get-all-properties graph)
+      (<db-based-get-all-properties graph opts)
       (p/let [properties (file-async/<file-based-get-all-properties graph)
               hidden-properties (set (map name (property-util/hidden-properties)))]
         (remove #(hidden-properties (:block/title %)) properties)))))
@@ -87,15 +95,20 @@
   "For db graphs, returns property value ids for given property db-ident.
    Separate from file version because values are lazy loaded"
   [graph property-id]
-  (let [empty-id (:db/id (db/entity :logseq.property/empty-placeholder))]
-    (<q graph {:transact-db? false}
-        '[:find [?v ...]
-          :in $ ?property-id ?empty-id
-          :where
-          [?b ?property-id ?v]
-          [(not= ?v ?empty-id)]]
-        property-id
-        empty-id)))
+  (let [default-value-id (:db/id (:logseq.property/default-value (db/entity property-id)))
+        empty-id (:db/id (db/entity :logseq.property/empty-placeholder))]
+    (p/let [result (<q graph {:transact-db? false}
+                       '[:find [?v ...]
+                         :in $ ?property-id ?empty-id
+                         :where
+                         [?b ?property-id ?v]
+                         [(not= ?v ?empty-id)]]
+                       property-id
+                       empty-id)]
+      (if default-value-id
+        ;; put default value the first
+        (concat [default-value-id] result)
+        result))))
 
 (comment
   (defn <get-block-property-value-entity
@@ -107,7 +120,7 @@
                          [?b ?property-id ?vid]
                          [(not= ?vid :logseq.property/empty-placeholder)]
                          (or
-                          [?vid :property.value/content ?value]
+                          [?vid :logseq.property/value ?value]
                           [?vid :block/title ?value])]
                        property-id
                        value)]
@@ -217,33 +230,52 @@
     (let [future-days (state/get-scheduled-future-days)
           date-format (tf/formatter "yyyyMMdd")
           current-day (tf/parse date-format (str date))
-          future-day (some->> (t/plus current-day (t/days future-days))
+          future-date (t/plus current-day (t/days future-days))
+          future-day (some->> future-date
                               (tf/unparse date-format)
-                              (parse-long))]
-      (when future-day
-        (when-let [repo (state/get-current-repo)]
-          (p/let [result (<q repo {}
-                             '[:find [(pull ?block ?block-attrs) ...]
-                               :in $ ?day ?future ?block-attrs
-                               :where
-                               (or
-                                [?block :block/scheduled ?d]
-                                [?block :block/deadline ?d])
-                               [(get-else $ ?block :block/repeated? false) ?repeated]
-                               [(get-else $ ?block :block/marker "NIL") ?marker]
-                               [(not= ?marker "DONE")]
-                               [(not= ?marker "CANCELED")]
-                               [(not= ?marker "CANCELLED")]
-                               [(<= ?d ?future)]
-                               (or-join [?repeated ?d ?day]
-                                        [(true? ?repeated)]
-                                        [(>= ?d ?day)])]
-                             date
-                             future-day
-                             db-model/file-graph-block-attrs)]
-            (->> result
-                 db-model/sort-by-order-recursive
-                 db-utils/group-by-page)))))))
+                              (parse-long))
+          start-time (date/journal-day->utc-ms date)
+          future-time (tc/to-long future-date)]
+      (when-let [repo (and future-day (state/get-current-repo))]
+        (p/let [result
+                (if (config/db-based-graph? repo)
+                  (<q repo {}
+                      '[:find [(pull ?block ?block-attrs) ...]
+                        :in $ ?start-time ?end-time ?block-attrs
+                        :where
+                        (or [?block :logseq.task/scheduled ?n]
+                            [?block :logseq.task/deadline ?n])
+                        [(>= ?n ?start-time)]
+                        [(<= ?n ?end-time)]
+                        [?block :logseq.task/status ?status]
+                        [?status :db/ident ?status-ident]
+                        [(not= ?status-ident :logseq.task/status.done)]
+                        [(not= ?status-ident :logseq.task/status.canceled)]]
+                      start-time
+                      future-time
+                      '[*])
+                  (<q repo {}
+                      '[:find [(pull ?block ?block-attrs) ...]
+                        :in $ ?day ?future ?block-attrs
+                        :where
+                        (or
+                         [?block :block/scheduled ?d]
+                         [?block :block/deadline ?d])
+                        [(get-else $ ?block :block/repeated? false) ?repeated]
+                        [(get-else $ ?block :block/marker "NIL") ?marker]
+                        [(not= ?marker "DONE")]
+                        [(not= ?marker "CANCELED")]
+                        [(not= ?marker "CANCELLED")]
+                        [(<= ?d ?future)]
+                        (or-join [?repeated ?d ?day]
+                                 [(true? ?repeated)]
+                                 [(>= ?d ?day)])]
+                      date
+                      future-day
+                      db-model/file-graph-block-attrs))]
+          (->> result
+               db-model/sort-by-order-recursive
+               db-utils/group-by-page))))))
 
 (defn <get-tag-pages
   [graph tag-id]
@@ -259,9 +291,11 @@
   [graph property-ident]
   (<q graph {:transact-db? true}
       '[:find [(pull ?b [*]) ...]
-        :in $ ?property-ident
+        :in $ % ?prop
         :where
-        [?b ?property-ident]]
+        (has-property-or-default-value? ?b ?prop)]
+      (rules/extract-rules rules/db-query-dsl-rules [:has-property-or-default-value]
+                           {:deps rules/rules-dependencies})
       property-ident))
 
 (defn <get-tag-objects
@@ -276,20 +310,15 @@
         class-ids)))
 
 (defn <get-views
-  [graph class-id]
+  [graph class-id view-feature-type]
   (<q graph {:transact-db? true}
       '[:find [(pull ?b [*]) ...]
-        :in $ ?class-id
+        :in $ ?class-id ?view-feature-type
         :where
-        [?b :logseq.property/view-for ?class-id]]
-      class-id))
-
-(defn <get-tags
-  [graph]
-  (<q graph {:transact-db? false}
-      '[:find [(pull ?tag [:db/id :block/title])]
-        :where
-        [?tag :block/type "class"]]))
+        [?b :logseq.property/view-for ?class-id]
+        [?b :logseq.property.view/feature-type ?view-feature-type]]
+      class-id
+      view-feature-type))
 
 (defn <get-asset-with-checksum
   [graph checksum]
@@ -312,6 +341,46 @@
                        [?b :logseq.property/asset ?pdf-id]]
                      pdf-id)]
     result))
+
+(defn <get-block-properties-history
+  [graph block-id]
+  (p/let [result (<q graph {:transact-db? true}
+                     '[:find [(pull ?b [*]) ...]
+                       :in $ ?block-id
+                       :where
+                       [?b :logseq.property.history/block ?block-id]]
+                     block-id)]
+    (->> (sort-by :block/created-at result)
+         (map (fn [b] (db/entity (:db/id b)))))))
+
+(defn <task-spent-time
+  [graph block-id]
+  (p/let [history (<get-block-properties-history graph block-id)
+          status-history (filter
+                          (fn [b] (= :logseq.task/status (:db/ident (:logseq.property.history/property b))))
+                          history)]
+    (when (seq status-history)
+      (let [time (loop [[last-item item & others] status-history
+                        time 0]
+                   (if item
+                     (let [last-status (:db/ident (:logseq.property.history/ref-value last-item))
+                           this-status (:db/ident (:logseq.property.history/ref-value item))]
+                       (if (and (= this-status :logseq.task/status.doing)
+                                (empty? others))
+                         (-> (+ time (- (tc/to-long (t/now)) (:block/created-at item)))
+                             (quot 1000))
+                         (let [time' (if (or
+                                          (= last-status :logseq.task/status.doing)
+                                          (and
+                                           (not (contains? #{:logseq.task/status.canceled
+                                                             :logseq.task/status.backlog
+                                                             :logseq.task/status.done} last-status))
+                                           (= this-status :logseq.task/status.done)))
+                                       (+ time (- (:block/created-at item) (:block/created-at last-item)))
+                                       time)]
+                           (recur (cons item others) time'))))
+                     (quot time 1000)))]
+        [status-history time]))))
 
 (comment
   (defn <fetch-all-pages

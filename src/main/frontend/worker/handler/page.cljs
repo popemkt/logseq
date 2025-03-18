@@ -1,15 +1,15 @@
 (ns frontend.worker.handler.page
   "Page operations"
-  (:require [logseq.db :as ldb]
-            [logseq.graph-parser.db :as gp-db]
-            [logseq.graph-parser.block :as gp-block]
-            [logseq.db.sqlite.util :as sqlite-util]
-            [datascript.core :as d]
+  (:require [datascript.core :as d]
+            [frontend.worker.handler.page.db-based.page :as db-worker-page]
+            [frontend.worker.handler.page.file-based.page :as file-worker-page]
             [logseq.common.config :as common-config]
             [logseq.common.util :as common-util]
+            [logseq.db :as ldb]
             [logseq.db.frontend.content :as db-content]
-            [frontend.worker.handler.page.db-based.page :as db-worker-page]
-            [frontend.worker.handler.page.file-based.page :as file-worker-page]))
+            [logseq.db.sqlite.util :as sqlite-util]
+            [logseq.graph-parser.block :as gp-block]
+            [logseq.graph-parser.db :as gp-db]))
 
 (defn rtc-create-page!
   [conn config title {:keys [uuid]}]
@@ -17,10 +17,9 @@
   (let [date-formatter    (common-config/get-date-formatter config)
         title (db-worker-page/sanitize-title title)
         page-name (common-util/page-name-sanity-lc title)
-        page              (-> (gp-block/page-name->map title @conn true date-formatter
-                                                       {:page-uuid uuid
-                                                        :skip-existing-page-check? true})
-                              (assoc :block/format :markdown))
+        page              (gp-block/page-name->map title @conn true date-formatter
+                                                   {:page-uuid uuid
+                                                    :skip-existing-page-check? true})
         result            (ldb/transact! conn [page] {:persist-op? false
                                                       :outliner-op :create-page})]
     [result page-name (:block/uuid page)]))
@@ -30,11 +29,12 @@
 
    * :create-first-block?      - when true, create an empty block if the page is empty.
    * :uuid                     - when set, use this uuid instead of generating a new one.
-   * :class?                   - when true, adds a :block/type 'class'
-   * :whiteboard?              - when true, adds a :block/type 'whiteboard'
+   * :class?                   - when true, adds a :block/tags ':logseq.class/Tag'
+   * :whiteboard?              - when true, adds a :block/tags ':logseq.class/Whiteboard'
    * :tags                     - tag uuids that are added to :block/tags
    * :persist-op?              - when true, add an update-page op
    * :properties               - properties to add to the page
+   * :created-by               - when set, set :logseq.property/created-by, only for db-based-graphs
   TODO: Add other options"
   [repo conn config title & {:as options}]
   (if (ldb/db-based-graph? @conn)
@@ -46,7 +46,7 @@
   [repo page-entity]
   (when (sqlite-util/db-based-graph? repo)
     (let [refs (:block/_refs page-entity)
-          id-ref->page #(db-content/special-id-ref->page % [page-entity])]
+          id-ref->page #(db-content/content-id-ref->page % [page-entity])]
       (when (seq refs)
         (let [tx-data (mapcat (fn [{:block/keys [raw-title] :as ref}]
                                 ;; block content
@@ -86,7 +86,14 @@
                 file-path (:file/path file)
                 delete-file-tx (when file
                                  [[:db.fn/retractEntity [:file/path file-path]]])
+                delete-property-tx (when (ldb/property? page)
+                                     (concat
+                                      (let [datoms (d/datoms @conn :avet (:db/ident page))]
+                                        (map (fn [d] [:db/retract (:e d) (:a d)]) datoms))
+                                      (map (fn [d] [:db/retractEntity (:e d)])
+                                           (d/datoms @conn :avet :logseq.property.history/property (:db/ident page)))))
                 delete-page-tx (concat (db-refs->page repo page)
+                                       delete-property-tx
                                        [[:db.fn/retractEntity (:db/id page)]])
                 restore-class-parent-tx (when db-based?
                                           (->> (filter (fn [p] (ldb/class? p)) (:logseq.property/_parent page))

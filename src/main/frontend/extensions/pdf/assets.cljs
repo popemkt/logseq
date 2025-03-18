@@ -13,6 +13,7 @@
             [frontend.handler.page :as page-handler]
             [frontend.handler.assets :as assets-handler]
             [frontend.handler.notification :as notification]
+            [frontend.handler.route :as route-handler]
             [frontend.handler.property.util :as pu]
             [frontend.ui :as ui]
             [frontend.context.i18n :refer [t]]
@@ -244,7 +245,7 @@
 (defn- db-based-persist-hl-area-image
   [repo png]
   (let [file (js/File. #js [png] "pdf area highlight.png")]
-    (editor-handler/db-based-save-assets! repo [file])))
+    (editor-handler/db-based-save-assets! repo [file] {:pdf-area? true})))
 
 (defn- persist-hl-area-image
   [repo-url repo-dir current new-hl old-hl png]
@@ -413,24 +414,38 @@
         (p/let [asset-path (assets-handler/<make-asset-url asset-path')]
           (reset! *src asset-path)))
       (when @*src
-        [:span.hl-area
-         [:span.actions
-          (when-not config/publishing?
-            [:button.asset-action-btn.px-1
-             {:title         (t :asset/copy)
-              :tabIndex      "-1"
-              :on-pointer-down util/stop
-              :on-click      (fn [e]
-                               (util/stop e)
-                               (-> (util/copy-image-to-clipboard (common-config/remove-asset-protocol @*src))
-                                   (p/then #(notification/show! "Copied!" :success))))}
-             (ui/icon "copy")])
+        (let [asset-block (some-> block (:logseq.property.pdf/hl-image))
+              resize-metadata (some-> asset-block :logseq.property.asset/resize-metadata)
+              style (when-let [w (:width resize-metadata)] {:style {:width w}})]
+          [:div.hl-area style
+           [:div.asset-container
+            {:style {:width (if style "100%" "auto")}}
+            [:span.asset-action-bar
+             (when-let [asset-uuid (and (config/db-based-graph?)
+                                     (some-> asset-block (:block/uuid)))]
+               [:button.asset-action-btn
+                {:title (t :asset/ref-block)
+                 :tabIndex "-1"
+                 :on-pointer-down util/stop
+                 :on-click (fn [] (route-handler/redirect-to-page! asset-uuid))}
+                (ui/icon "file-symlink")])
 
-          [:button.asset-action-btn.px-1
-           {:title         (t :asset/maximize)
-            :tabIndex      "-1"
-            :on-pointer-down util/stop
-            :on-click      open-lightbox}
+             (when-not config/publishing?
+               [:button.asset-action-btn
+                {:title (t :asset/copy)
+                 :tabIndex "-1"
+                 :on-pointer-down util/stop
+                 :on-click (fn [e]
+                             (util/stop e)
+                             (-> (util/copy-image-to-clipboard (common-config/remove-asset-protocol @*src))
+                               (p/then #(notification/show! "Copied!" :success))))}
+                (ui/icon "copy")])
 
-           (ui/icon "maximize")]]
-         [:img {:src @*src}]]))))
+             [:button.asset-action-btn
+              {:title (t :asset/maximize)
+               :tabIndex "-1"
+               :on-pointer-down util/stop
+               :on-click open-lightbox}
+
+              (ui/icon "maximize")]]
+            [:img.w-full {:src @*src}]]])))))

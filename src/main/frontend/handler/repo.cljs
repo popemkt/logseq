@@ -1,31 +1,31 @@
 (ns frontend.handler.repo
   "System-component-like ns that manages user's repos/graphs"
   (:refer-clojure :exclude [clone])
-  (:require [clojure.string :as string]
+  (:require [borkdude.rewrite-edn :as rewrite]
+            [cljs-bean.core :as bean]
+            [clojure.string :as string]
+            [electron.ipc :as ipc]
             [frontend.config :as config]
             [frontend.date :as date]
             [frontend.db :as db]
+            [frontend.db.persist :as db-persist]
             [frontend.db.restore :as db-restore]
-            [frontend.handler.repo-config :as repo-config-handler]
             [frontend.handler.common.config-edn :as config-edn-common-handler]
-            [frontend.handler.route :as route-handler]
-            [frontend.handler.ui :as ui-handler]
-            [frontend.handler.notification :as notification]
             [frontend.handler.global-config :as global-config-handler]
             [frontend.handler.graph :as graph-handler]
+            [frontend.handler.notification :as notification]
+            [frontend.handler.repo-config :as repo-config-handler]
+            [frontend.handler.route :as route-handler]
+            [frontend.handler.ui :as ui-handler]
             [frontend.idb :as idb]
+            [frontend.mobile.util :as mobile-util]
+            [frontend.persist-db :as persist-db]
             [frontend.search :as search]
             [frontend.state :as state]
             [frontend.util :as util]
             [frontend.util.fs :as util-fs]
             [frontend.util.text :as text-util]
-            [frontend.persist-db :as persist-db]
-            [promesa.core :as p]
-            [frontend.db.persist :as db-persist]
-            [electron.ipc :as ipc]
-            [cljs-bean.core :as bean]
-            [frontend.mobile.util :as mobile-util]
-            [borkdude.rewrite-edn :as rewrite]))
+            [promesa.core :as p]))
 
 ;; Project settings should be checked in two situations:
 ;; 1. User changes the config.edn directly in logseq.com (fn: alter-file)
@@ -48,12 +48,12 @@
            (do
              (state/set-current-repo! nil)
              (when-let [graph (:url (first (state/get-repos)))]
-              (notification/show! (str "Removed graph "
-                                       (pr-str (text-util/get-graph-name-from-path url))
-                                       ". Redirecting to graph "
-                                       (pr-str (text-util/get-graph-name-from-path graph)))
-                                  :success)
-              (state/pub-event! [:graph/switch graph {:persist? false}])))
+               (notification/show! (str "Removed graph "
+                                        (pr-str (text-util/get-graph-name-from-path url))
+                                        ". Redirecting to graph "
+                                        (pr-str (text-util/get-graph-name-from-path graph)))
+                                   :success)
+               (state/pub-event! [:graph/switch graph {:persist? false}])))
            (notification/show! (str "Removed graph " (pr-str (text-util/get-graph-name-from-path url))) :success)))))))
 
 (defn start-repo-db-if-not-exists!
@@ -66,10 +66,10 @@
 (defn restore-and-setup-repo!
   "Restore the db of a graph from the persisted data, and setup. Create a new
   conn, or replace the conn in state with a new one."
-  [repo]
+  [repo & {:as opts}]
   (p/do!
    (state/set-db-restoring! true)
-   (db-restore/restore-graph! repo)
+   (db-restore/restore-graph! repo opts)
    (repo-config-handler/restore-repo-config! repo)
    (when (config/global-config-enabled?)
      (global-config-handler/restore-global-config!))
@@ -95,14 +95,14 @@
     (state/reset-parsing-state!)
     (let [dir (config/get-repo-dir repo)]
       (when-not (state/unlinked-dir? dir)
-       (route-handler/redirect-to-home!)
-       (let [local? (config/local-file-based-graph? repo)]
-         (if local?
-           (nfs-rebuild-index! repo ok-handler)
-           (rebuild-index! repo))
-         (js/setTimeout
-          (route-handler/redirect-to-home!)
-          500))))))
+        (route-handler/redirect-to-home!)
+        (let [local? (config/local-file-based-graph? repo)]
+          (if local?
+            (nfs-rebuild-index! repo ok-handler)
+            (rebuild-index! repo))
+          (js/setTimeout
+           (route-handler/redirect-to-home!)
+           500))))))
 
 (defn get-repos
   []
@@ -128,7 +128,7 @@
 (defn combine-local-&-remote-graphs
   [local-repos remote-repos]
   (when-let [repos' (seq (concat (map (fn [{:keys [sync-meta metadata] :as repo}]
-                                        (let [graph-id (or (:kv/value metadata) (second sync-meta))]
+                                        (let [graph-id (some-> (or (:kv/value metadata) (second sync-meta)) str)]
                                           (if graph-id (assoc repo :GraphUUID graph-id) repo)))
                                       local-repos)
                                  (some->> remote-repos
@@ -146,8 +146,8 @@
 (defn get-detail-graph-info
   [url]
   (when-let [graphs (seq (and url (combine-local-&-remote-graphs
-                                    (state/get-repos)
-                                    (state/get-remote-file-graphs))))]
+                                   (state/get-repos)
+                                   (state/get-remote-file-graphs))))]
     (first (filter #(when-let [url' (:url %)]
                       (= url url')) graphs))))
 

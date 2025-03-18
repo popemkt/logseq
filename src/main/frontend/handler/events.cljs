@@ -14,12 +14,13 @@
             [frontend.components.cmdk.core :as cmdk]
             [frontend.components.diff :as diff]
             [frontend.components.encryption :as encryption]
+            [frontend.components.file-based.git :as git-component]
             [frontend.components.file-sync :as file-sync]
-            [frontend.components.git :as git-component]
             [frontend.components.plugins :as plugin]
             [frontend.components.property.dialog :as property-dialog]
             [frontend.components.repo :as repo]
             [frontend.components.select :as select]
+            [frontend.components.selection :as selection]
             [frontend.components.settings :as settings]
             [frontend.components.shell :as shell]
             [frontend.components.user.login :as login]
@@ -39,13 +40,15 @@
             [frontend.fs.nfs :as nfs]
             [frontend.fs.sync :as sync]
             [frontend.fs.watcher-handler :as fs-watcher]
+            [frontend.handler.assets :as assets-handler]
             [frontend.handler.code :as code-handler]
             [frontend.handler.common.page :as page-common-handler]
             [frontend.handler.db-based.property :as db-property-handler]
             [frontend.handler.db-based.rtc :as rtc-handler]
+            [frontend.handler.db-based.rtc-flows :as rtc-flows]
             [frontend.handler.editor :as editor-handler]
             [frontend.handler.export :as export]
-            [frontend.handler.file :as file-handler]
+            [frontend.handler.file-based.file :as file-handler]
             [frontend.handler.file-based.nfs :as nfs-handler]
             [frontend.handler.file-sync :as file-sync-handler]
             [frontend.handler.graph :as graph-handler]
@@ -118,7 +121,7 @@
           (let [status (if (user-handler/alpha-or-beta-user?) :welcome :unavailable)]
             (when (and (= status :welcome) (user-handler/logged-in?))
               (enable-beta-features!)
-              (async/<! (rtc-handler/<get-remote-graphs))
+              (async/<! (p->c (rtc-handler/<get-remote-graphs)))
               (async/<! (file-sync-handler/load-session-graphs))
               (p/let [repos (repo-handler/refresh-repos!)]
                 (when-let [repo (state/get-current-repo)]
@@ -174,9 +177,9 @@
          (repo-config-handler/restore-repo-config! graph)
          (when-not (= :draw (state/get-current-route))
            (route-handler/redirect-to-home!))
-         (state/pub-event! [:graph/ready graph])
-         (if db-based?
-           (rtc-handler/<rtc-start! graph)
+         (when-not db-based?
+           ;; graph-switch will trigger a rtc-start automatically
+           ;; (rtc-handler/<rtc-start! graph)
            (file-sync-restart!))
          (when-let [dir-name (and (not db-based?) (config/get-repo-dir graph))]
            (fs/watch-dir! dir-name))
@@ -247,8 +250,9 @@
                (p/catch (fn [^js e]
                           (notification/show! (str e) :error)
                           (js/console.error e)))))))))
-    (shui/dialog-open!
-     (file-sync/pick-dest-to-sync-panel graph))))
+    (when (:GraphName graph)
+      (shui/dialog-open!
+       (file-sync/pick-dest-to-sync-panel graph)))))
 
 (defmethod handle :graph/pick-page-histories [[_ graph-uuid page-name]]
   (shui/dialog-open!
@@ -314,7 +318,7 @@
     (if (gdom/getElement popup-id)
       (shui/popup-hide! popup-id)
       (shui/popup-show!
-       (gdom/getElement "dots-menu")
+       (js/document.querySelector ".toolbar-dots-btn")
        (fn []
          (settings/appearance))
        {:id popup-id
@@ -411,6 +415,10 @@
 (defmethod handle :go/plugins-from-file [[_ plugins]]
   (plugin/open-plugins-from-file-modal! plugins))
 
+(defmethod handle :go/install-plugin-from-github [[_]]
+  (shui/dialog-open!
+   (plugin/install-from-github-release-container)))
+
 (defmethod handle :go/plugins-settings [[_ pid nav? title]]
   (when pid
     (state/set-state! :plugin/focused-settings pid)
@@ -419,7 +427,7 @@
 
 (defmethod handle :go/proxy-settings [[_ agent-opts]]
   (shui/dialog-open!
-   (plugin/user-proxy-settings-panel agent-opts)
+   (plugin/user-proxy-settings-container agent-opts)
    {:id :https-proxy-panel :center? true :class "lg:max-w-2xl"}))
 
 (defmethod handle :redirect-to-home [_]
@@ -716,8 +724,9 @@
   (file-sync-stop!))
 
 (defmethod handle :graph/restored [[_ graph]]
+  (when graph (assets-handler/ensure-assets-dir! graph))
   (mobile/init!)
-  (rtc-handler/<rtc-start! graph)
+  (rtc-flows/trigger-rtc-start graph)
   (fsrs/update-due-cards-count)
   (when-not (mobile-util/native-ios?)
     (state/pub-event! [:graph/ready graph])))
@@ -919,11 +928,15 @@
   (when-let [blocks (and block (db-model/get-block-immediate-children (state/get-current-repo) (:block/uuid block)))]
     (editor-handler/toggle-blocks-as-own-order-list! blocks)))
 
-(defn- editor-new-property [block target opts]
+(defn- editor-new-property [block target {:keys [selected-blocks] :as opts}]
   (let [editing-block (state/get-edit-block)
         pos (state/get-edit-pos)
-        edit-block-or-selected (if editing-block
+        edit-block-or-selected (cond
+                                 editing-block
                                  [editing-block]
+                                 (seq selected-blocks)
+                                 selected-blocks
+                                 :else
                                  (seq (keep #(db/entity [:block/uuid %]) (state/get-selection-block-ids))))
         current-block (when-let [s (state/get-current-page)]
                         (when (util/uuid-string? s)
@@ -1037,10 +1050,10 @@
 (defmethod handle :rtc/log [[_ data]]
   (state/set-state! :rtc/log data))
 
-(defmethod handle :rtc/download-remote-graph [[_ graph-name graph-uuid]]
+(defmethod handle :rtc/download-remote-graph [[_ graph-name graph-uuid graph-schema-version]]
   (->
    (p/do!
-    (rtc-handler/<rtc-download-graph! graph-name graph-uuid 60000))
+    (rtc-handler/<rtc-download-graph! graph-name graph-uuid graph-schema-version 60000))
    (p/catch (fn [e]
               (println "RTC download graph failed, error:")
               (js/console.error e)))))
@@ -1060,6 +1073,24 @@
 
 (defmethod handle :editor/run-query-command [_]
   (editor-handler/run-query-command!))
+
+(defmethod handle :editor/show-action-bar []
+  (let [selection (state/get-selection-blocks)
+        first-visible-block (some #(when (util/el-visible-in-viewport? % true) %) selection)]
+    (when first-visible-block
+      (shui/popup-hide! :selection-action-bar)
+      (shui/popup-show!
+       first-visible-block
+       (fn []
+         (selection/action-bar))
+       {:id :selection-action-bar
+        :content-props {:side "top"
+                        :class "!py-0 !px-0 !border-none"}
+        :auto-side? false
+        :align :start}))))
+
+(defmethod handle :editor/hide-action-bar []
+  (shui/popup-hide! :selection-action-bar))
 
 (defn run!
   []

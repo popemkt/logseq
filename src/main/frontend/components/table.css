@@ -1,20 +1,22 @@
 .ls-table {
+  .asset-container {
+    @apply my-1;
+  }
+
   img {
-    max-height: 48px;
-    min-width: 120px;
-    overflow-y: hidden;
+    @apply max-h-[200px] !max-w-[80px] overflow-hidden;
+  }
+
+  a.tag {
+    @apply text-sm whitespace-nowrap;
   }
 
   .ls-block {
     @apply w-full py-0;
   }
 
-  .block-control, .block-control-wrap {
-    @apply h-5 min-h-[20px];
-  }
-
-  .block-main-container, .block-content {
-    @apply min-h-[20px];
+  .block-main-content, .block-head-wrap {
+    @apply min-h-[24px];
   }
 
   .property-value-inner {
@@ -25,6 +27,10 @@
     > .relative {
       @apply pt-[34px] pb-[38px];
     }
+  }
+
+  .ls-table-row {
+    @apply min-h-[33px];
   }
 
   .ls-table-header {
@@ -43,11 +49,16 @@
       @apply fixed overflow-hidden;
 
       min-width: unset;
-      top: 40px !important;
+      /* default app head height */
+      top: 48px !important;
     }
 
     .ls-table-header-cell {
       position: relative;
+
+      > .ui__button {
+        @apply overflow-hidden;
+      }
     }
   }
 
@@ -105,13 +116,17 @@ html.is-resizing-buf {
 
   th, td {
     @apply p-1.5 border border-collapse;
-
-    &[data-key=":block"] {
-      @apply whitespace-normal;
-    }
   }
 }
 
 .markdown-table {
   width: 98%;
+}
+
+.sticky-columns {
+    @apply sticky left-0 z-[8] bg-gray-01;
+}
+
+.table-action-bar {
+    z-index: 100;
 }

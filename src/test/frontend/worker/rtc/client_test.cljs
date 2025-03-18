@@ -1,12 +1,12 @@
 (ns frontend.worker.rtc.client-test
   (:require
    [cljs.test :refer [deftest is testing]]
-   [frontend.worker.rtc.client :as subject]
-   [logseq.db.frontend.schema :as db-schema]
    [datascript.core :as d]
-   [logseq.db :as ldb]))
+   [frontend.worker.rtc.client :as subject]
+   [logseq.db :as ldb]
+   [logseq.db.frontend.schema :as db-schema]))
 
-(def empty-db (d/empty-db db-schema/schema-for-db-based-graph))
+(def empty-db (d/empty-db db-schema/schema))
 
 (deftest local-block-ops->remote-ops-test
   (testing "user.class/yyy creation"
@@ -14,7 +14,6 @@
           db (d/db-with empty-db [{:block/uuid block-uuid,
                                    :block/updated-at 1720017595873,
                                    :block/created-at 1720017595872,
-                                   :block/format :markdown,
                                    :db/ident :user.class/yyy,
                                    :block/type "class",
                                    :block/name "yyy",
@@ -41,15 +40,33 @@
   (testing "user.property/xxx creation"
     (let [block-uuid (random-uuid)
           block-order "b0P"
-          db (d/db-with empty-db [{:db/index true
+          db (d/db-with empty-db [{:block/uuid #uuid "00000002-5389-0208-3000-000000000000",
+                                   :block/updated-at 1741424828774,
+                                   :block/created-at 1741424828774,
+                                   :logseq.property/built-in? true,
+                                   :block/tags [2],
+                                   :block/title "Tag",
+                                   :db/id 2,
+                                   :db/ident :logseq.class/Tag,
+                                   :block/name "tag"}
+                                  {:block/uuid #uuid "00000002-1038-7670-4800-000000000000",
+                                   :block/updated-at 1741424828774,
+                                   :block/created-at 1741424828774,
+                                   :logseq.property/built-in? true,
+                                   :block/tags [2]
+                                   :block/title "Property",
+                                   :db/id 3,
+                                   :db/ident :logseq.class/Property,
+                                   :block/name "property"}
+                                  {:db/index true
                                    :block/uuid block-uuid
                                    :db/valueType :db.type/ref
                                    :block/updated-at 1716880036491
                                    :block/created-at 1716880036491
-                                   :block/schema {:type :number}
-                                   :block/format :markdown
+                                   :logseq.property/type :number
                                    :db/cardinality :db.cardinality/one
                                    :db/ident :user.property/xxx,
+                                   :block/tags [3]
                                    :block/type "property",
                                    :block/order block-order,
                                    :block/name "xxx",

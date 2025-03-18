@@ -1,25 +1,26 @@
 (ns ^:no-doc frontend.handler.paste
-  (:require [frontend.state :as state]
-            [frontend.db :as db]
-            [frontend.format.block :as block]
-            [logseq.common.util :as common-util]
-            [logseq.graph-parser.block :as gp-block]
-            [logseq.common.util.block-ref :as block-ref]
+  (:require ["/frontend/utils" :as utils]
             [clojure.string :as string]
-            [frontend.util :as util]
-            [frontend.handler.editor :as editor-handler]
-            [frontend.extensions.html-parser :as html-parser]
-            [goog.object :as gobj]
-            [frontend.mobile.util :as mobile-util]
-            [frontend.util.thingatpt :as thingatpt]
-            ["/frontend/utils" :as utils]
             [frontend.commands :as commands]
-            [frontend.util.text :as text-util]
-            [frontend.format.mldoc :as mldoc]
-            [lambdaisland.glogi :as log]
-            [promesa.core :as p]
             [frontend.config :as config]
-            [logseq.db.frontend.content :as db-content]))
+            [frontend.db :as db]
+            [frontend.extensions.html-parser :as html-parser]
+            [frontend.format.block :as block]
+            [frontend.format.mldoc :as mldoc]
+            [frontend.handler.editor :as editor-handler]
+            [frontend.handler.notification :as notification]
+            [frontend.mobile.util :as mobile-util]
+            [frontend.state :as state]
+            [frontend.util :as util]
+            [frontend.util.text :as text-util]
+            [frontend.util.thingatpt :as thingatpt]
+            [goog.object :as gobj]
+            [lambdaisland.glogi :as log]
+            [logseq.common.util :as common-util]
+            [logseq.common.util.block-ref :as block-ref]
+            [logseq.db.frontend.content :as db-content]
+            [logseq.graph-parser.block :as gp-block]
+            [promesa.core :as p]))
 
 (defn- paste-text-parseable
   [format text]
@@ -37,8 +38,8 @@
                              (-> block
                                  (dissoc :block/tags)
                                  (update :block/title (fn [title]
-                                                        (let [title' (db-content/replace-tags-with-page-refs title refs)]
-                                                          (db-content/refs->special-id-ref title' refs)))))))))]
+                                                        (let [title' (db-content/replace-tags-with-id-refs title refs)]
+                                                          (db-content/title-ref->id-ref title' refs)))))))))]
       (editor-handler/paste-blocks blocks' {:keep-uuid? true}))))
 
 (defn- paste-segmented-text
@@ -104,8 +105,8 @@
                                 (.getType ^js (first clipboard-items)
                                           "web application/logseq"))))
           blocks-str (when blocks-blob (.text blocks-blob))]
-         (when blocks-str
-           (common-util/safe-read-map-string blocks-str))))
+    (when blocks-str
+      (common-util/safe-read-map-string blocks-str))))
 
 (defn- markdown-blocks?
   [text]
@@ -189,22 +190,38 @@
   ;; todo: logseq/whiteboard-shapes is now text/html
   [input text e html]
   (util/stop e)
-  (->
-   (p/let [{:keys [graph blocks]} (get-copied-blocks)]
-     (if (and (seq blocks) (= graph (state/get-current-repo)))
+  (let [repo (state/get-current-repo)]
+    (->
+     (p/let [{:keys [graph blocks embed-block?]} (get-copied-blocks)]
+       (if (and (seq blocks) (= graph repo))
        ;; Handle internal paste
-       (let [revert-cut-txs (get-revert-cut-txs blocks)
-             keep-uuid? (= (state/get-block-op-type) :cut)
-             blocks (if (config/db-based-graph? (state/get-current-repo))
-                      (map (fn [b] (dissoc b :block/properties)) blocks)
-                      blocks)]
-         (editor-handler/paste-blocks blocks {:revert-cut-txs revert-cut-txs
-                                              :keep-uuid? keep-uuid?}))
-       (paste-copied-text input text html)))
-   (p/catch (fn [error]
-              (log/error :msg "Paste failed" :exception error)
-              (state/pub-event! [:capture-error {:error error
-                                                 :payload {:type ::paste-copied-blocks-or-text}}])))))
+         (let [revert-cut-txs (get-revert-cut-txs blocks)
+               keep-uuid? (= (state/get-block-op-type) :cut)
+               blocks (if (config/db-based-graph? (state/get-current-repo))
+                        (map (fn [b] (dissoc b :block/properties)) blocks)
+                        blocks)]
+           (if embed-block?
+             (when-let [block-id (:block/uuid (first blocks))]
+               (when-let [current-block (state/get-edit-block)]
+                 (cond
+                   (some #(= block-id (:block/uuid %)) (db/get-block-parents repo (:block/uuid current-block) {}))
+                   (notification/show! "Can't embed parent block as its own property" :error)
+
+                   :else
+                   (p/do!
+                    (editor-handler/api-insert-new-block! ""
+                                                          {:block-uuid (:block/uuid current-block)
+                                                           :sibling? true
+                                                           :replace-empty-target? true
+                                                           :other-attrs {:block/link (:db/id (db/entity [:block/uuid block-id]))}})
+                    (state/clear-edit!)))))
+             (editor-handler/paste-blocks blocks {:revert-cut-txs revert-cut-txs
+                                                  :keep-uuid? keep-uuid?})))
+         (paste-copied-text input text html)))
+     (p/catch (fn [error]
+                (log/error :msg "Paste failed" :exception error)
+                (state/pub-event! [:capture-error {:error error
+                                                   :payload {:type ::paste-copied-blocks-or-text}}]))))))
 
 (defn paste-text-in-one-block-at-point
   []
@@ -235,7 +252,9 @@
       (loop [files files]
         (when-let [file (first files)]
           (when-let [block (state/get-edit-block)]
-            (editor-handler/upload-asset! id #js[file] (:block/format block) editor-handler/*asset-uploading? true))
+            (editor-handler/upload-asset! id #js[file]
+                                          (get block :block/format :markdown)
+                                          editor-handler/*asset-uploading? true))
           (recur (rest files))))
       (util/stop e))))
 

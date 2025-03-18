@@ -72,7 +72,7 @@
 }
 
 .block-content-or-editor-inner {
-  @apply flex flex-1 flex-col w-full;
+  @apply flex flex-1 flex-col w-full pr-1;
 }
 
 .block-head-wrap {
@@ -94,10 +94,14 @@
   .icon-cp-container {
     @apply inline-flex items-center pr-0.5;
   }
+
+  .block-title-wrap.as-heading {
+    @apply inline text-[length:inherit];
+  }
 }
 
 .breadcrumb {
-  @apply flex flex-row items-center;
+  @apply flex flex-row items-center flex-wrap;
 
   .asset-container > img {
     height: 18px;
@@ -241,7 +245,11 @@
   @apply w-full inline;
 
   > .ui__checkbox {
-    @apply relative top-[2px];
+    @apply relative top-0.5;
+
+    &.checked {
+      @apply top-1;
+    }
 
     > span {
       @apply h-full;
@@ -271,6 +279,10 @@
       .ui__icon.ti svg {
         @apply w-5 h-5;
       }
+    }
+
+    &.as-inline {
+      @apply inline;
     }
   }
 
@@ -371,7 +383,7 @@
 }
 
 .page-reference {
-  @apply inline rounded transition-[background];
+  @apply rounded transition-[background];
 
   .bracket {
     @apply opacity-30;
@@ -379,6 +391,10 @@
 
   &:hover {
     background: var(--lx-accent-04-alpha, var(--ls-secondary-background-color, hsl(var(--primary)/.4)));
+  }
+
+  .asset-block-wrap {
+    @apply inline-block;
   }
 }
 
@@ -486,7 +502,7 @@
 
     .block-content-or-editor-wrap {
       .positioned-properties {
-        @apply relative top-[3px];
+        @apply relative top-[2px];
       }
     }
   }
@@ -504,6 +520,14 @@
   }
 }
 
+.block-main-content {
+  &:hover {
+    & > .db-page-title-actions {
+      @apply delay-300 transition-opacity opacity-100;
+    }
+  }
+}
+
 .ls-block {
   @apply relative py-0.5 transition-[background-color] mx-auto;
 
@@ -514,38 +538,41 @@
 
 .ls-block h1,
 .editor-inner .h1.uniline-block {
-  font-size: 2em;
+  font-size: 2rem;
   min-height: 1.5em;
+  line-height: 1.38em;
 }
 
 .ls-block h2,
 .editor-inner .h2.uniline-block {
-  font-size: 1.5em;
+  font-size: 1.5rem;
   min-height: 1.5em;
+  line-height: 1.38em;
 }
 
 .ls-block h3,
 .editor-inner .h3.uniline-block {
-  font-size: 1.2em;
+  font-size: 1.2rem;
   min-height: 1.2em;
+  line-height: 1.15em;
 }
 
 .ls-block h4,
 .editor-inner .h4.uniline-block {
-  font-size: 1em;
+  font-size: 1rem;
   min-height: 1em;
 }
 
 .ls-block h5,
 .editor-inner .h5.uniline-block {
-  font-size: 0.83em;
+  font-size: 0.83rem;
   min-height: 0.83em;
 }
 
 .ls-block h6,
 .editor-inner .h6.uniline-block {
-  font-size: 0.75em;
-  min-height: 0.75em;
+  font-size: 0.75rem;
+  min-height: 0.75rem;
 }
 
 .ls-block :is(h1, h2, h3, h4, h5, h6),
@@ -557,6 +584,11 @@
 .ls-block :is(h1, h2),
 .editor-inner .uniline-block:is(.h1, .h2) {
   @apply border-b border-gray-06 mt-1 mb-2 pb-1;
+}
+
+.editor-inner textarea.uniline-block:is(.h1, .h2) {
+  border-bottom-style: solid;
+  border-bottom-color: transparent;
 }
 
 .block-ref .ls-block :is(h1, h2),
@@ -921,7 +953,7 @@ html.is-mac {
 
 .positioned-properties.block-right {
   button {
-    @apply whitespace-nowrap mr-0.5;
+    @apply whitespace-nowrap;
   }
 
   .block-title-wrap {
@@ -933,24 +965,31 @@ html.is-mac {
   .block-content.inline {
     @apply flex;
   }
+
+  .property-k {
+    color: var(--ls-primary-text-color);
+  }
 }
 
 .block-tags {
   @apply flex flex-row flex-wrap self-start items-center;
   min-height: 24px;
   max-width: 256px;
-  margin-right: -16px;
 }
 
 .block-tag {
-  @apply pr-1 flex flex-row items-center gap-1;
+  @apply flex flex-row items-center;
 }
 
 .block-tag a.tag {
   @apply flex text-sm font-normal items-center opacity-70;
 }
 
-.block-tag a.tag:hover {
+.block-tag a.hash-symbol {
+    @apply text-sm text-sm font-normal opacity-70;
+}
+
+.block-tag a.tag:hover, .block-tag a.hash-symbol:hover {
   @apply opacity-100;
 }
 
@@ -958,10 +997,6 @@ html.is-mac {
   @apply whitespace-nowrap overflow-hidden;
   max-width: 160px;
   text-overflow: ellipsis;
-}
-
-.ls-table a.tag {
-  @apply text-sm;
 }
 
 .block-content-wrapper svg, .view-actions svg {
@@ -990,11 +1025,11 @@ html.is-mac {
 }
 
 .ls-page-title .block-tags {
-  @apply relative -right-1 min-h-full;
+  @apply relative min-h-full;
 }
 
 .ls-code-editor-wrap {
-  @apply relative w-full;
+  @apply relative w-full overflow-hidden rounded;
 
   .extensions__code-lang {
     @apply hidden;
@@ -1032,4 +1067,14 @@ html.is-mac {
       @apply opacity-100;
     }
   }
+}
+
+.recent-block {
+  transition: background-color 0.2s cubic-bezier(0, 1, 0, 1);
+  background-color: var(--ls-secondary-background-color, var(--rx-gray-03));
+}
+
+.aspect-video {
+  aspect-ratio: 16 / 9;
+  height: auto;
 }

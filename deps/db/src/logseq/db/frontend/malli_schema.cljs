@@ -1,16 +1,15 @@
 (ns logseq.db.frontend.malli-schema
   "Malli schemas and fns for logseq.db.frontend.*"
-  (:require [clojure.walk :as walk]
-            [clojure.set :as set]
+  (:require [clojure.set :as set]
             [clojure.string :as string]
-            [logseq.db.frontend.schema :as db-schema]
-            [logseq.db.frontend.property.type :as db-property-type]
             [datascript.core :as d]
-            [logseq.db.frontend.property :as db-property]
+            [logseq.db.common.order :as db-order]
             [logseq.db.frontend.class :as db-class]
             [logseq.db.frontend.entity-plus :as entity-plus]
             [logseq.db.frontend.entity-util :as entity-util]
-            [logseq.db.frontend.order :as db-order]))
+            [logseq.db.frontend.property :as db-property]
+            [logseq.db.frontend.property.type :as db-property-type]
+            [logseq.db.frontend.schema :as db-schema]))
 
 ;; :db/ident malli schemas
 ;; =======================
@@ -41,15 +40,12 @@
                             {:error/message "should be a valid user property namespace"}
                             user-property?]])
 
-(def property-ident
-  [:or internal-property-ident user-property-ident])
-
 (def logseq-ident-namespaces
   "Set of all namespaces Logseq uses for :db/ident except for
   db-attribute-ident. It's important to grow this list purposefully and have it
   start with 'logseq' to allow for users and 3rd party plugins to provide their
   own namespaces to core concepts."
-  (into db-property/logseq-property-namespaces #{"logseq.class" "logseq.kv"}))
+  (into db-property/logseq-property-namespaces #{db-class/logseq-class "logseq.kv"}))
 
 (def logseq-ident
   [:and :keyword [:fn
@@ -74,19 +70,28 @@
          (= :logseq.property/empty-placeholder (:db/ident (d/entity db property-val))))
     (= :logseq.property/empty-placeholder property-val)))
 
+(defn internal-ident?
+  "Determines if given ident is created by Logseq. All Logseq internal idents
+   must start with 'block' or 'logseq' to keep Logseq internals from leaking
+   across namespaces and to allow for users and 3rd party plugins to choose
+   any other namespace"
+  [ident]
+  (or (contains? db-property/db-attribute-properties ident)
+      (contains? logseq-ident-namespaces (namespace ident))))
+
 (defn validate-property-value
   "Validates the property value in a property tuple. The property value is
   expected to be a coll if the property has a :many cardinality. validate-fn is
   a fn that is called directly on each value to return a truthy value.
   validate-fn varies by property type"
-  [db validate-fn [{:block/keys [schema] :as property} property-val] & {:keys [new-closed-value?]}]
+  [db validate-fn [property property-val] & {:keys [new-closed-value?]}]
   ;; For debugging
-  ;; (when (not (string/starts-with? (namespace (:db/ident property)) "logseq.")) (prn :validate-val (dissoc property :property/closed-values) property-val))
-  (let [validate-fn' (if (db-property-type/property-types-with-db (:type schema))
+  ;; (when (not (internal-ident? (:db/ident property))) (prn :validate-val (dissoc property :property/closed-values) property-val))
+  (let [validate-fn' (if (db-property-type/property-types-with-db (:logseq.property/type property))
                        (fn [value]
                          (validate-fn db value {:new-closed-value? new-closed-value?}))
                        validate-fn)
-        validate-fn'' (if (and (db-property-type/closed-value-property-types (:type schema))
+        validate-fn'' (if (and (db-property-type/closed-value-property-types (:logseq.property/type property))
                                ;; new closed values aren't associated with the property yet
                                (not new-closed-value?)
                                (seq (:property/closed-values property)))
@@ -101,45 +106,56 @@
           ;; also valid if value is empty-placeholder
           (empty-placeholder-value? db property property-val)))))
 
-(defn update-properties-in-schema
-  "Needs to be called on the DB schema to add the datascript db to it"
-  [db-schema db]
-  (walk/postwalk (fn [e]
-                   (let [meta' (meta e)]
-                     (if (:add-db meta') (partial e db) e)))
-                 db-schema))
-
 (def required-properties
   "Set of properties required by a schema and that are validated directly in a schema instead
    of validate-property-value"
   (set/union
    (set (get-in db-class/built-in-classes [:logseq.class/Asset :schema :required-properties]))
-   #{:logseq.property/created-from-property}))
+   #{:logseq.property/created-from-property :logseq.property/value
+     :logseq.property.history/scalar-value :logseq.property.history/block
+     :logseq.property.history/property :logseq.property.history/ref-value}))
+
+(defn- property-entity->map
+  "Provide the minimal number of property attributes to validate the property
+  and to reduce noise in error messages. The resulting map should be the same as
+  what the frontend property since they both call validate-property-value"
+  [property]
+  ;; use explicit call to be nbb compatible
+  (let [closed-values (entity-plus/lookup-kv-then-entity property :property/closed-values)]
+    (cond-> (select-keys property [:db/ident :db/valueType :db/cardinality :logseq.property/type])
+      (seq closed-values)
+      (assoc :property/closed-values closed-values))))
 
 (defn update-properties-in-ents
   "Prepares properties in entities to be validated by DB schema"
   [db ents]
-  (mapv
-   (fn [ent]
-     (reduce (fn [m [k v]]
-               (if-let [property (and (db-property/property? k)
-                                      ;; This allows schemas like property-value-block to require properties in
-                                      ;; their schema that they depend on
-                                      (not (contains? required-properties k))
-                                      (d/entity db k))]
-                 (update m :block/properties (fnil conj [])
-                         ;; use explicit call to be nbb compatible
-                         [(let [closed-values (entity-plus/lookup-kv-then-entity property :property/closed-values)]
-                            (cond-> (assoc (select-keys property [:db/ident :db/valueType :db/cardinality])
-                                           :block/schema
-                                           (select-keys (:block/schema property) [:type]))
-                              (seq closed-values)
-                              (assoc :property/closed-values closed-values)))
-                          v])
-                 (assoc m k v)))
-             {}
-             ent))
-   ents))
+  ;; required-properties allows schemas like property-value-block to require
+  ;; properties in their schema that they depend on
+  (let [exceptions-to-block-properties (-> required-properties
+                                           (into db-property/schema-properties)
+                                           (conj :block/tags))
+        page-class-id (:db/id (d/entity db :logseq.class/Page))
+        all-page-class-ids (set (map #(:db/id (d/entity db %)) db-class/page-classes))]
+    (mapv
+     (fn [ent]
+       (reduce (fn [m [k v]]
+                 (if-let [property (and (db-property/property? k)
+                                        (not (contains? exceptions-to-block-properties k))
+                                        (d/entity db k))]
+                   (update m :block/properties (fnil conj [])
+                           [(property-entity->map property) v])
+                   (if (= :block/tags k)
+                     ;; Provides additional options map to validation for data about current entity being tagged
+                     (let [property (d/entity db :block/tags)]
+                       (assoc m k [(property-entity->map property)
+                                   v
+                                   (merge (select-keys ent [:logseq.property/built-in?])
+                                          {:page-class-id page-class-id
+                                           :all-page-class-ids all-page-class-ids})]))
+                     (assoc m k v))))
+               {}
+               ent))
+     ents)))
 
 (defn datoms->entity-maps
   "Returns entity maps for given :eavt datoms indexed by db/id. Optional keys:
@@ -179,29 +195,31 @@
 (defn datoms->entities
   "Returns a vec of entity maps given :eavt datoms"
   [datoms]
-  (mapv (fn [[db-id m]] (with-meta m {:db/id db-id}))
+  (mapv (fn [[db-id m]] (assoc m :db/id db-id))
         (datoms->entity-maps datoms)))
 
-(defn internal-ident?
-  "Determines if given ident is created by Logseq"
-  [ident]
-  (or (contains? db-property/db-attribute-properties ident)
-      (contains? logseq-ident-namespaces (namespace ident))))
+(assert (every? #(re-find #"^(block|logseq\.)" (namespace %)) db-property/db-attribute-properties)
+        "All db-attribute idents start with an internal namespace")
+(assert (every? #(re-find #"^logseq\." %) logseq-ident-namespaces)
+        "All logseq idents start with an internal namespace")
 
 ;; Main malli schemas
 ;; ==================
 ;; These schemas should be data vars to remain as simple and reusable as possible
 
+(def ^:dynamic *db-for-validate-fns*
+  "Used by validate-fns which need db as input"
+  nil)
+
 (def property-tuple
-  "A tuple of a property map and a property value. This schema
-   has 1 metadata hook which is used to inject a datascript db later"
+  "A tuple of a property map and a property value"
   (into
-   [:multi {:dispatch #(-> % first :block/schema :type)}]
+   [:multi {:dispatch #(-> % first :logseq.property/type)}]
    (map (fn [[prop-type value-schema]]
           [prop-type
            (let [schema-fn (if (vector? value-schema) (last value-schema) value-schema)]
-             [:fn (with-meta (fn [db tuple]
-                               (validate-property-value db schema-fn tuple)) {:add-db true})])])
+             [:fn (fn [tuple]
+                    (validate-property-value *db-for-validate-fns* schema-fn tuple))])])
         db-property-type/built-in-validation-schemas)))
 
 (def block-properties
@@ -210,16 +228,33 @@
   property with its property value that is valid for its type"
   [:sequential property-tuple])
 
+(def block-tags
+  [:and
+   ;; FIXME: Display error message instead of 'unknown error'
+   property-tuple
+   ;; Important to keep data integrity of built-in entities. Ensure UI doesn't accidentally modify them
+   [:fn {:error/message "should only have one tag for a built-in entity"}
+    (fn [[_k v opts]]
+      (if (:logseq.property/built-in? opts)
+        (= 1 (count v))
+        true))]
+   ;; Ensure use of :logseq.class/Page is consistent and simple. Doing so reduces complexity elsewhere
+   ;; and allows for Page to exist as its own public concept later
+   [:fn {:error/message "should not have other built-in page tags when tagged with #Page"}
+    (fn [[_k v {:keys [page-class-id all-page-class-ids]}]]
+      (if (contains? v page-class-id)
+        (empty? (set/intersection (disj v page-class-id) all-page-class-ids))
+        true))]])
+
 (def page-or-block-attrs
   "Common attributes for page and normal blocks"
   [[:block/uuid :uuid]
    [:block/created-at :int]
    [:block/updated-at :int]
-   [:block/format [:enum :markdown]]
    ;; Injected by update-properties-in-ents
    [:block/properties {:optional true} block-properties]
+   [:block/tags {:optional true} block-tags]
    [:block/refs {:optional true} [:set :int]]
-   [:block/tags {:optional true} [:set :int]]
    [:block/tx-id {:optional true} :int]
    [:block/collapsed? {:optional true} :boolean]])
 
@@ -227,12 +262,7 @@
   "Common attributes for pages"
   [[:block/name :string]
    [:block/title :string]
-   [:block/type [:enum "page" "class" "property" "whiteboard" "journal" "hidden"]]
-   [:block/alias {:optional true} [:set :int]]
-    ;; TODO: Should this be here or in common?
-   [:block/path-refs {:optional true} [:set :int]]
-   ;; file-based
-   [:block/namespace {:optional true} :int]])
+   [:block/path-refs {:optional true} [:set :int]]])
 
 (def property-attrs
   "Common attributes for properties"
@@ -240,7 +270,7 @@
    [:db/valueType {:optional true} [:enum :db.type/ref]]
    [:db/cardinality {:optional true} [:enum :db.cardinality/many :db.cardinality/one]]
    [:block/order {:optional true} block-order]
-   [:property/schema.classes {:optional true} [:set :int]]])
+   [:logseq.property/classes {:optional true} [:set :int]]])
 
 (def normal-page
   (vec
@@ -255,58 +285,37 @@
   (vec
    (concat
     [:map
-     [:block/schema
-      {:optional true}
-      [:map
-       [:properties {:optional true} [:vector property-ident]]]]
      [:db/ident class-ident]]
     page-attrs
     page-or-block-attrs)))
 
 (def property-common-schema-attrs
   "Property :schema attributes common to all properties"
-  [[:hide? {:optional true} :boolean]
-   [:position {:optional true} [:enum :properties :block-left :block-right :block-below]]])
+  [[:logseq.property/hide? {:optional true} :boolean]
+   [:logseq.property/public? {:optional true} :boolean]
+   [:logseq.property/ui-position {:optional true} [:enum :properties :block-left :block-right :block-below]]])
 
 (def internal-property
   (vec
    (concat
     [:map
      [:db/ident internal-property-ident]
-     [:block/schema
-      (vec
-       (concat
-        [:map
-         [:type (apply vector :enum (into db-property-type/internal-built-in-property-types
-                                          db-property-type/user-built-in-property-types))]
-         [:public? {:optional true} :boolean]
-         [:view-context {:optional true} [:enum :page :block :class :property :never]]
-         [:shortcut {:optional true} :string]]
-        property-common-schema-attrs))]]
+     [:logseq.property/type (apply vector :enum (into db-property-type/internal-built-in-property-types
+                                                      db-property-type/user-built-in-property-types))]
+     [:logseq.property/view-context {:optional true} [:enum :page :block :class :property :never]]]
+    property-common-schema-attrs
     property-attrs
     page-attrs
     page-or-block-attrs)))
-
-(def user-property-schema
-  (into
-   [:multi {:dispatch :type}]
-   (map
-    (fn [prop-type]
-      [prop-type
-       (vec
-        (concat
-         [:map
-          ;; Once a schema is defined it must have :type as this is an irreversible decision
-          [:type :keyword]]
-         property-common-schema-attrs))])
-    db-property-type/user-built-in-property-types)))
 
 (def user-property
   (vec
    (concat
     [:map
-     [:db/ident user-property-ident]
-     [:block/schema user-property-schema]]
+     ;; class-ident allows for a class to be used as a property
+     [:db/ident [:or user-property-ident class-ident]]
+     [:logseq.property/type (apply vector :enum db-property-type/user-built-in-property-types)]]
+    property-common-schema-attrs
     property-attrs
     page-attrs
     page-or-block-attrs)))
@@ -323,7 +332,8 @@
    (concat
     [:map
      ;; pages from :default property uses this but closed-value pages don't
-     [:block/order {:optional true} block-order]]
+     [:block/order {:optional true} block-order]
+     [:logseq.property/hide? [:enum true]]]
     page-attrs
     page-or-block-attrs)))
 
@@ -355,20 +365,39 @@
   (vec
    (concat
     [:map]
-    [[:property.value/content [:or :string :double :boolean]]
+    [[:logseq.property/value [:or :string :double :boolean]]
      [:logseq.property/created-from-property :int]]
     (remove #(#{:block/title :logseq.property/created-from-property} (first %)) block-attrs)
     page-or-block-attrs)))
+
+(def property-history-block*
+  [:map
+   [:block/uuid :uuid]
+   [:block/created-at :int]
+   [:block/updated-at {:optional true} :int]
+   [:logseq.property.history/block :int]
+   [:logseq.property.history/property :int]
+   [:logseq.property.history/ref-value {:optional true} :int]
+   [:logseq.property.history/scalar-value {:optional true} :any]
+   [:block/tx-id {:optional true} :int]])
+
+(def property-history-block
+  "A closed value for a property with closed/allowed values"
+  [:and property-history-block*
+   [:fn {:error/message ":logseq.property.history/ref-value or :logseq.property.history/scalar-value required"
+         :error/path [:logseq.property.history/ref-value]}
+    (fn [m]
+      (or (:logseq.property.history/ref-value m)
+          (some? (:logseq.property.history/scalar-value m))))]])
 
 (def closed-value-block*
   (vec
    (concat
     [:map]
-    [[:block/type [:= "closed value"]]
-     ;; for built-in properties
+    [;; for built-in properties
      [:db/ident {:optional true} logseq-property-ident]
      [:block/title {:optional true} :string]
-     [:property.value/content {:optional true} [:or :string :double]]
+     [:logseq.property/value {:optional true} [:or :string :double]]
      [:logseq.property/created-from-property :int]
      [:block/closed-value-property {:optional true} [:set :int]]]
     (remove #(#{:block/title :logseq.property/created-from-property} (first %)) block-attrs)
@@ -377,10 +406,10 @@
 (def closed-value-block
   "A closed value for a property with closed/allowed values"
   [:and closed-value-block*
-   [:fn {:error/message ":block/title or :property.value/content required"
-         :error/path [:property.value/content]}
+   [:fn {:error/message ":block/title or :logseq.property/value required"
+         :error/path [:logseq.property/value]}
     (fn [m]
-      (or (:block/title m) (:property.value/content m)))]])
+      (or (:block/title m) (:logseq.property/value m)))]])
 
 (def normal-block
   "A block with content and no special type or tag behavior"
@@ -394,9 +423,7 @@
   "A block has content and a page"
   [:or
    normal-block
-   closed-value-block
-   whiteboard-block
-   property-value-block])
+   whiteboard-block])
 
 (def asset-block
   "A block tagged with #Asset"
@@ -414,6 +441,9 @@
   [:map
    [:block/uuid :uuid]
    [:block/tx-id {:optional true} :int]
+   ;; App doesn't use timestamps but migrations may
+   [:block/created-at {:optional true} :int]
+   [:block/updated-at {:optional true} :int]
    [:file/content :string]
    [:file/path :string]
    [:file/size {:optional true} :int]
@@ -432,35 +462,52 @@
    [:db/ident [:= :logseq.property/empty-placeholder]]
    [:block/tx-id {:optional true} :int]])
 
+(defn entity-dispatch-key [db ent]
+  (let [d (if (:block/uuid ent) (d/entity db [:block/uuid (:block/uuid ent)]) ent)
+        ;; order matters as some block types are a subset of others e.g. :whiteboard
+        dispatch-key (cond
+                       (entity-util/property? d)
+                       :property
+                       (entity-util/class? d)
+                       :class
+                       (entity-util/hidden? d)
+                       :hidden
+                       (entity-util/whiteboard? d)
+                       :normal-page
+                       (entity-util/page? d)
+                       :normal-page
+                       (entity-util/asset? d)
+                       :asset-block
+                       (:file/path d)
+                       :file-block
+                       (:logseq.property.history/block d)
+                       :property-history-block
+
+                       (:block/closed-value-property d)
+                       :closed-value-block
+
+                       (and (:logseq.property/created-from-property d)
+                            (:logseq.property/value d))
+                       :property-value-block
+
+                       (:block/uuid d)
+                       :block
+                       (= (:db/ident d) :logseq.property/empty-placeholder)
+                       :property-value-placeholder
+                       (:db/ident d)
+                       :db-ident-key-value)]
+    dispatch-key))
+
 (def Data
   (into
-   [:multi {:dispatch (fn [d]
-                        ;; order matters as some block types are a subset of others e.g. :whiteboard
-                        (cond
-                          (entity-util/property? d)
-                          :property
-                          (entity-util/class? d)
-                          :class
-                          (entity-util/hidden? d)
-                          :hidden
-                          (entity-util/whiteboard? d)
-                          :normal-page
-                          (entity-util/page? d)
-                          :normal-page
-                          (entity-util/asset? d)
-                          :asset-block
-                          (:file/path d)
-                          :file-block
-                          (:block/uuid d)
-                          :block
-                          (= (:db/ident d) :logseq.property/empty-placeholder)
-                          :property-value-placeholder
-                          (:db/ident d)
-                          :db-ident-key-value))}]
+   [:multi {:dispatch (fn [d] (entity-dispatch-key *db-for-validate-fns* d))}]
    {:property property-page
     :class class-page
     :hidden hidden-page
     :normal-page normal-page
+    :property-history-block property-history-block
+    :closed-value-block closed-value-block
+    :property-value-block property-value-block
     :block block
     :asset-block asset-block
     :file-block file-block
@@ -468,7 +515,7 @@
     :property-value-placeholder property-value-placeholder}))
 
 (def DB
-  "Malli schema for entities from schema/schema-for-db-based-graph. In order to
+  "Malli schema for entities from db-schema/schema. In order to
   thoroughly validate properties, the entities and this schema should be
   prepared with update-properties-in-ents and update-properties-in-schema
   respectively"
@@ -479,6 +526,7 @@
 (let [malli-many-ref-attrs (->> (concat property-attrs page-attrs block-attrs page-or-block-attrs (rest closed-value-block*))
                                 (filter #(= (last %) [:set :int]))
                                 (map first)
+                                (into db-property/public-db-attribute-properties)
                                 set)]
   (when-let [undeclared-ref-attrs (seq (remove malli-many-ref-attrs db-schema/card-many-ref-type-attributes))]
     (throw (ex-info (str "The malli DB schema is missing the following cardinality-many ref attributes from datascript's schema: "
@@ -488,16 +536,15 @@
 (let [malli-one-ref-attrs (->> (concat property-attrs page-attrs block-attrs page-or-block-attrs (rest normal-page))
                                (filter #(= (last %) :int))
                                (map first)
-                               set)
-      attrs-to-ignore #{:block/file}]
-  (when-let [undeclared-ref-attrs (seq (remove (some-fn malli-one-ref-attrs attrs-to-ignore) db-schema/card-one-ref-type-attributes))]
+                               set)]
+  (when-let [undeclared-ref-attrs (seq (remove malli-one-ref-attrs db-schema/card-one-ref-type-attributes))]
     (throw (ex-info (str "The malli DB schema is missing the following cardinality-one ref attributes from datascript's schema: "
                          (string/join ", " undeclared-ref-attrs))
                     {}))))
 
 (let [malli-non-ref-attrs (->> (concat property-attrs page-attrs block-attrs page-or-block-attrs (rest normal-page))
                                (concat (rest file-block) (rest property-value-block)
-                                       (rest db-ident-key-val) (rest class-page))
+                                       (rest db-ident-key-val) (rest internal-property))
                                (remove #(= (last %) [:set :int]))
                                (map first)
                                set)]

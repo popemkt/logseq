@@ -11,6 +11,7 @@
             ["sanitize-filename" :as sanitizeFilename]
             ["check-password-strength" :refer [passwordStrength]]
             ["path-complete-extname" :as pathCompleteExtname]
+            ["semver" :as semver]
             [frontend.loader :refer [load]]
             [cljs-bean.core :as bean]
             [cljs-time.coerce :as tc]
@@ -22,12 +23,14 @@
             [goog.dom :as gdom]
             [goog.object :as gobj]
             [goog.string :as gstring]
+            [goog.functions :as gfun]
             [goog.userAgent]
             [promesa.core :as p]
             [rum.core :as rum]
             [clojure.core.async :as async]
             [frontend.pubsub :as pubsub]
-            [datascript.impl.entity :as de]))
+            [datascript.impl.entity :as de]
+            [logseq.common.config :as common-config]))
   #?(:cljs (:import [goog.async Debouncer]))
   (:require
    [clojure.pprint]
@@ -50,6 +53,7 @@
      (-namespace [_] nil)))
 
 #?(:cljs (defonce ^js node-path utils/nodePath))
+#?(:cljs (defonce ^js sem-ver semver))
 #?(:cljs (defonce ^js full-path-extname pathCompleteExtname))
 #?(:cljs (defn app-scroll-container-node
            ([]
@@ -146,8 +150,8 @@
    (do
      (def nfs? (and (not (electron?))
                     (not (mobile-util/native-platform?))))
-     (def web-platform? nfs?)))
-
+     (def web-platform? nfs?)
+     (def plugin-platform? (or (and web-platform? (not common-config/PUBLISHING)) (electron?)))))
 #?(:cljs
    (defn file-protocol?
      []
@@ -304,20 +308,8 @@
        x)))
 
 #?(:cljs
-   (defn debounce
-     "Returns a function that will call f only after threshold has passed without new calls
-      to the function. Calls prep-fn on the args in a sync way, which can be used for things like
-      calling .persist on the event object to be able to access the event attributes in f"
-     ([threshold f] (debounce threshold f (constantly nil)))
-     ([threshold f prep-fn]
-      (let [t (atom nil)]
-        (fn [& args]
-          (when @t (js/clearTimeout @t))
-          (apply prep-fn args)
-          (reset! t (js/setTimeout #(do
-                                      (reset! t nil)
-                                      (apply f args))
-                                   threshold)))))))
+   (def debounce gfun/debounce))
+
 #?(:cljs
    (defn cancelable-debounce
      "Create a stateful debounce function with specified interval
@@ -815,7 +807,7 @@
 
 #?(:cljs
    (defn copy-to-clipboard!
-     [text & {:keys [graph html blocks owner-window]}]
+     [text & {:keys [graph html blocks embed-block? owner-window]}]
      (let [blocks (map (fn [block] (if (de/entity? block)
                                      (-> (into {} block)
                                          ;; FIXME: why :db/id is not included?
@@ -828,6 +820,7 @@
                    :blocks (when (and graph (seq blocks))
                              (pr-str
                               {:graph graph
+                               :embed-block? embed-block?
                                :blocks (mapv #(dissoc % :block.temp/fully-loaded? %) blocks)}))}))]
        (if owner-window
          (utils/writeClipboard data owner-window)

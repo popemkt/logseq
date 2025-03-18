@@ -3,25 +3,26 @@
    [clojure.set :as set]
    [clojure.string :as string]
    [clojure.walk :as walk]
+   [datascript.impl.entity :as de]
+   [dommy.core :as dom]
+   [frontend.config :as config]
    [frontend.db :as db]
-   [logseq.db :as ldb]
    [frontend.db.model :as db-model]
+   [frontend.handler.file-based.property.util :as property-util]
+   [frontend.handler.property.util :as pu]
    [frontend.mobile.haptics :as haptics]
-   [logseq.outliner.core :as outliner-core]
-   [frontend.modules.outliner.ui :as ui-outliner-tx]
    [frontend.modules.outliner.op :as outliner-op]
-   [logseq.outliner.op]
+   [frontend.modules.outliner.ui :as ui-outliner-tx]
    [frontend.state :as state]
    [frontend.util :as util]
    [frontend.util.file-based.drawer :as drawer]
    [goog.dom :as gdom]
-   [logseq.graph-parser.block :as gp-block]
-   [logseq.db.sqlite.util :as sqlite-util]
-   [frontend.config :as config]
-   [frontend.handler.file-based.property.util :as property-util]
-   [frontend.handler.property.util :as pu]
-   [dommy.core :as dom]
    [goog.object :as gobj]
+   [logseq.db :as ldb]
+   [logseq.db.sqlite.util :as sqlite-util]
+   [logseq.graph-parser.block :as gp-block]
+   [logseq.outliner.core :as outliner-core]
+   [logseq.outliner.op]
    [promesa.core :as p]))
 
 ;;  Fns
@@ -116,8 +117,7 @@
 (defn get-idx-of-order-list-block
   [block order-list-type]
   (let [order-block-fn? (fn [block]
-                          (let [properties (:block/properties block)
-                                type (pu/lookup properties :logseq.property/order-list-type)]
+                          (let [type (pu/lookup block :logseq.property/order-list-type)]
                             (= type order-list-type)))
         prev-block-fn   #(some-> (db/entity (:db/id %)) ldb/get-left-sibling)
         prev-block      (prev-block-fn block)]
@@ -145,8 +145,7 @@
 
 (defn attach-order-list-state
   [config block]
-  (let [properties (:block/properties block)
-        type (pu/lookup properties :logseq.property/order-list-type)
+  (let [type (pu/lookup block :logseq.property/order-list-type)
         own-order-list-type  (some-> type str string/lower-case)
         own-order-list-index (some->> own-order-list-type (get-idx-of-order-list-block block))]
     (assoc config :own-order-list-type own-order-list-type
@@ -188,6 +187,32 @@
     (-> (property-util/remove-built-in-properties format content)
         (drawer/remove-logbook))))
 
+(defn block-unique-title
+  "Multiple pages/objects may have the same `:block/title`.
+   Notice: this doesn't prevent for pages/objects that have the same tag or created by different clients."
+  [block]
+  (let [block-e (cond
+                  (de/entity? block)
+                  block
+                  (uuid? (:block/uuid block))
+                  (db/entity [:block/uuid (:block/uuid block)])
+                  :else
+                  block)
+        tags (remove (fn [t]
+                       (or (some-> (:block/raw-title block-e) (ldb/inline-tag? t))
+                           (ldb/private-tags (:db/ident t))))
+                     (map (fn [tag] (if (number? tag) (db/entity tag) tag)) (:block/tags block)))]
+    (if (seq tags)
+      (str (:block/title block)
+           " "
+           (string/join
+            ", "
+            (keep (fn [tag]
+                    (when-let [title (:block/title tag)]
+                      (str "#" title)))
+                  tags)))
+      (:block/title block))))
+
 (defn edit-block!
   [block pos & {:keys [_container-id custom-content tail-len save-code-editor?]
                 :or {tail-len 0
@@ -215,7 +240,7 @@
 
                           :else
                           (subs content 0 pos))
-             content (sanity-block-content repo (:block/format block) content)]
+             content (sanity-block-content repo (get block :block/format :markdown) content)]
          (state/clear-selection!)
          (edit-block-aux repo block content text-range (assoc opts :pos pos)))))))
 

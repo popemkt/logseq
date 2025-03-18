@@ -1,7 +1,8 @@
 (ns logseq.shui.table.core
   "Table"
-  (:require [logseq.shui.table.impl :as impl]
+  (:require [clojure.set :as set]
             [dommy.core :refer-macros [sel1]]
+            [logseq.shui.table.impl :as impl]
             [rum.core :as rum]))
 
 (defn- get-head-container
@@ -27,15 +28,39 @@
   [row-selection rows]
   (boolean
    (or
-    (seq (:selected-ids row-selection))
+    (and (seq (:selected-ids row-selection))
+         (some (:selected-ids row-selection) (map :db/id rows)))
     (and (seq (:exclude-ids row-selection))
          (not= (count rows) (count (:exclude-ids row-selection)))))))
 
+(defn- select-all?
+  [row-selection rows]
+  (and (seq (:selected-ids row-selection))
+       (set/subset? (set (map :db/id rows))
+                    (:selected-ids row-selection))))
+
 (defn- toggle-selected-all!
-  [value set-row-selection!]
-  (if value
-    (set-row-selection! {:selected-all? value})
-    (set-row-selection! {})))
+  [table value set-row-selection!]
+  (let [group-by-property (get-in table [:state :group-by-property])
+        row-selection (get-in table [:state :row-selection])]
+    (cond
+      (and group-by-property value)
+      (let [new-selection (update row-selection :selected-ids
+                                  (fn [ids]
+                                    (set/union (set ids) (set (map :db/id (:rows table))))))]
+        (set-row-selection! new-selection))
+
+      value
+      (set-row-selection! {:selected-all? value})
+
+      group-by-property
+      (let [new-selection (update row-selection :selected-ids
+                                  (fn [ids]
+                                    (set/difference (set ids) (set (map :db/id (:rows table))))))]
+        (set-row-selection! new-selection))
+
+      :else
+      (set-row-selection! {}))))
 
 (defn- set-conj
   [col item]
@@ -51,18 +76,20 @@
                         (update row-selection :selected-ids (if value set-conj disj) id))]
     (set-row-selection! new-selection)))
 
-(defn- column-toggle-sorting!
-  [column set-sorting! sorting {:keys [sort-by-one-column?]
-                                :or {sort-by-one-column? true}}]
+(defn- column-set-sorting!
+  [column set-sorting! sorting asc?]
   (let [id (:id column)
         existing-column (some (fn [item] (when (= (:id item) id) item)) sorting)
-        value (if existing-column
-                (mapv (fn [item] (when (= (:id item) id) (update item :asc? not))) sorting)
-                (conj (if (vector? sorting) sorting (vec sorting)) {:id id :asc? true}))
-        value' (if sort-by-one-column?
-                 (filterv (fn [item] (when (= (:id item) id) item)) value)
-                 value)]
-    (set-sorting! value')))
+        value (->> (if existing-column
+                     (if (nil? asc?)
+                       (remove (fn [item] (= (:id item) id)) sorting)
+                       (map (fn [item] (if (= (:id item) id) (assoc item :asc? asc?) item)) sorting))
+                     (when-not (nil? asc?)
+                       (conj (if (vector? sorting) sorting (vec sorting)) {:id id :asc? asc?})))
+                   (remove nil?)
+                   vec)]
+    (set-sorting! value)
+    value))
 
 (defn get-selection-rows
   [row-selection rows]
@@ -94,12 +121,14 @@
            ;; fns
            :column-visible? (fn [column] (impl/column-visible? column visible-columns))
            :column-toggle-visibility (fn [column v] (set-visible-columns! (assoc visible-columns (impl/column-id column) v)))
-           :selected-all? (:selected-all? row-selection)
+           :selected-all? (or (:selected-all? row-selection)
+                              (select-all? row-selection filtered-rows))
            :selected-some? (select-some? row-selection filtered-rows)
            :row-selected? (fn [row] (row-selected? row row-selection))
            :row-toggle-selected! (fn [row value] (row-toggle-selected! row value set-row-selection! row-selection))
-           :toggle-selected-all! (fn [value] (toggle-selected-all! value set-row-selection!))
-           :column-toggle-sorting! (fn [column & {:as option}] (column-toggle-sorting! column set-sorting! sorting option)))))
+           :toggle-selected-all! (fn [table value]
+                                   (toggle-selected-all! table value set-row-selection!))
+           :column-set-sorting! (fn [sorting column asc?] (column-set-sorting! column set-sorting! sorting asc?)))))
 
 (defn- get-prop-and-children
   [prop-and-children]
@@ -164,63 +193,66 @@
    (fn []
      (let [^js target (rum/deref target-ref)
            ^js container (or (.closest target ".sidebar-item-list") (get-main-scroll-container))
-           ^js target-cls (.-classList target)
            ^js table (.closest target ".ls-table-rows")
-           ^js table-footer (some-> table (.querySelector ".ls-table-footer"))
-           ^js page-el (.closest target ".page-inner")
-           *ticking? (volatile! false)
-           *el-top (volatile! (-> target (.getBoundingClientRect) (.-top)))
-           head-top (-> (get-head-container) (js/getComputedStyle) (.-height) (js/parseInt))
-           update-target-top! (fn []
-                                (when (not (.contains target-cls "ls-fixed"))
-                                  (vreset! *el-top (+ (-> target (.getBoundingClientRect) (.-top))
-                                                      (.-scrollTop container)))))
-           update-footer! (fn []
-                            (when table-footer
-                              (set! (. (.-style table-footer) -width) (str (.-scrollWidth table) "px"))))
-           update-target! (fn []
-                            (if (.contains target-cls "ls-fixed")
-                              (let [^js rect (-> table (.getBoundingClientRect))
-                                    width (.-clientWidth table)
-                                    left (.-left rect)]
-                                (set! (. (.-style target) -width) (str width "px"))
-                                (set! (. (.-style target) -left) (str left "px")))
-                              (do
-                                (set! (. (.-style target) -width) "auto")
-                                (set! (. (.-style target) -left) "0px")))
-                             ;; update scroll
-                            (set! (. target -scrollLeft) (.-scrollLeft table)))
-            ;; target observer
-           target-observe! (fn []
-                             (let [scroll-top (js/parseInt (.-scrollTop container))
-                                   table-in-top (+ scroll-top head-top)
-                                   table-bottom (.-bottom (.getBoundingClientRect table))
-                                   fixed? (and (> table-bottom (+ head-top 90))
-                                               (> table-in-top @*el-top))]
-                               (if fixed?
-                                 (.add target-cls "ls-fixed")
-                                 (.remove target-cls "ls-fixed"))
-                               (update-target!)))
-           target-observe-handle! (fn [^js _e]
-                                    (when (not @*ticking?)
-                                      (js/window.requestAnimationFrame
-                                       #(do (target-observe!) (vreset! *ticking? false)))
-                                      (vreset! *ticking? true)))
-           resize-observer (js/ResizeObserver. update-target!)
-           page-resize-observer (js/ResizeObserver. (fn [] (update-target-top!)))]
-        ;; events
-       (.observe resize-observer container)
-       (.observe resize-observer table)
-       (some->> page-el (.observe page-resize-observer))
-       (.addEventListener container "scroll" target-observe-handle!)
-       (.addEventListener table "scroll" update-target!)
-       (.addEventListener table "resize" update-target!)
-       (update-footer!)
+           refs-table? (.closest table ".references")]
+       (when (not refs-table?)
+         (let [^js target-cls (.-classList target)
+               ^js table-footer (some-> table (.querySelector ".ls-table-footer"))
+               ^js page-el (.closest target ".page-inner")
+               *ticking? (volatile! false)
+               *el-top (volatile! (-> target (.getBoundingClientRect) (.-top)))
+               head-height (-> (get-head-container) (.-offsetHeight))
+               update-target-top! (fn []
+                                    (when (not (.contains target-cls "ls-fixed"))
+                                      (vreset! *el-top (+ (-> target (.getBoundingClientRect) (.-top))
+                                                         (.-scrollTop container)))))
+               update-footer! (fn []
+                                (let [tw (.-scrollWidth table)]
+                                  (when (and table-footer (number? tw) (> tw 0))
+                                    (set! (. (.-style table-footer) -width) (str tw "px")))))
+               update-target! (fn []
+                                (if (.contains target-cls "ls-fixed")
+                                  (let [^js rect (-> table (.getBoundingClientRect))
+                                        width (.-clientWidth table)
+                                        left (.-left rect)]
+                                    (set! (. (.-style target) -width) (str width "px"))
+                                    (set! (. (.-style target) -left) (str left "px")))
+                                  (do
+                                    (set! (. (.-style target) -width) "auto")
+                                    (set! (. (.-style target) -left) "0px")))
+                                ;; update scroll
+                                (set! (. target -scrollLeft) (.-scrollLeft table)))
+               ;; target observer
+               target-observe! (fn []
+                                 (let [scroll-top (js/parseInt (.-scrollTop container))
+                                       table-in-top (+ scroll-top head-height)
+                                       table-bottom (.-bottom (.getBoundingClientRect table))
+                                       fixed? (and (> table-bottom (+ head-height 90))
+                                                (> table-in-top @*el-top))]
+                                   (if fixed?
+                                     (.add target-cls "ls-fixed")
+                                     (.remove target-cls "ls-fixed"))
+                                   (update-target!)))
+               target-observe-handle! (fn [^js _e]
+                                        (when (not @*ticking?)
+                                          (js/window.requestAnimationFrame
+                                            #(do (target-observe!) (vreset! *ticking? false)))
+                                          (vreset! *ticking? true)))
+               resize-observer (js/ResizeObserver. update-target!)
+               page-resize-observer (js/ResizeObserver. (fn [] (update-target-top!)))]
+           ;; events
+           (.observe resize-observer container)
+           (.observe resize-observer table)
+           (some->> page-el (.observe page-resize-observer))
+           (.addEventListener container "scroll" target-observe-handle!)
+           (.addEventListener table "scroll" update-target!)
+           (.addEventListener table "resize" update-target!)
+           (update-footer!)
 
-        ;; teardown
-       #(do (.removeEventListener container "scroll" target-observe!)
-            (.disconnect resize-observer)
-            (.disconnect page-resize-observer))))
+           ;; teardown
+           #(do (.removeEventListener container "scroll" target-observe!)
+              (.disconnect resize-observer)
+              (.disconnect page-resize-observer))))))
    []))
 
 (rum/defc table-header < rum/static
@@ -237,7 +269,7 @@
 
 (rum/defc table-footer
   [children]
-  [:div.ls-table-footer
+  [:div.ls-table-footer.fade-in.faster
    children])
 
 (rum/defc table-row < rum/static

@@ -3,36 +3,45 @@
   select-config to add a new use or select-type for this component. To use the
   new select-type, create an event that calls `select/dialog-select!` with the
   select-type. See the :graph/open command for a full example."
-  (:require [frontend.modules.shortcut.core :as shortcut]
+  (:require [clojure.string :as string]
+            [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
+            [frontend.handler.common.developer :as dev-common-handler]
+            [frontend.handler.repo :as repo-handler]
+            [frontend.modules.shortcut.core :as shortcut]
             [frontend.search :as search]
             [frontend.state :as state]
             [frontend.ui :as ui]
-            [logseq.shui.ui :as shui]
             [frontend.util :as util]
             [frontend.util.text :as text-util]
-            [rum.core :as rum]
-            [frontend.config :as config]
-            [frontend.handler.repo :as repo-handler]
-            [frontend.handler.common.developer :as dev-common-handler]
+            [logseq.shui.ui :as shui]
             [reitit.frontend.easy :as rfe]
-            [clojure.string :as string]))
+            [rum.core :as rum]))
 
 (rum/defc render-item < rum/reactive
   [result chosen? multiple-choices? *selected-choices]
   (let [value (if (map? result) (or (:label result)
                                     (:value result)) result)
-        selected-choices (rum/react *selected-choices)]
-    [:div.flex.flex-row.justify-between.w-full {:class (when chosen? "chosen")}
-     [:div.flex.flex-row.items-center.gap-1
-      (when multiple-choices?
-        (ui/checkbox {:checked (boolean (selected-choices (:value result)))
-                      :on-click (fn [e]
-                                  (.preventDefault e))}))
-      value]
-     (when (and (map? result) (:id result))
-       [:div.tip.flex
-        [:code.opacity-20.bg-transparent (:id result)]])]))
+        header (:header result)
+        selected-choices (rum/react *selected-choices)
+        row [:div.flex.flex-row.justify-between.w-full
+             {:class (when chosen? "chosen")
+              :on-pointer-down util/stop-propagation}
+             [:div.flex.flex-row.items-center.gap-1
+              (when multiple-choices?
+                (ui/checkbox {:checked (boolean (selected-choices (:value result)))
+                              :on-click (fn [e]
+                                          (.preventDefault e))
+                              :disabled (:disabled? result)}))
+              value]
+             (when (and (map? result) (:id result))
+               [:div.tip.flex
+                [:code.opacity-20.bg-transparent (:id result)]])]]
+    (if header
+      [:div.flex.flex-col.gap-1
+       header
+       row]
+      row)))
 
 (rum/defcs ^:large-vars/cleanup-todo select
   "Provides a select dropdown powered by a fuzzy search. Takes the following options:
@@ -61,7 +70,7 @@
    :will-unmount (fn [state]
                    (shui/dialog-close! :ls-select-modal)
                    state)}
-  [state {:keys [items limit on-chosen empty-placeholder
+  [state {:keys [items limit on-chosen empty-placeholder grouped?
                  prompt-key input-default-placeholder close-modal?
                  extract-fn extract-chosen-fn host-opts on-input input-opts
                  item-cp transform-fn tap-*input-val
@@ -127,11 +136,13 @@
                                                     (reset! input v)
                                                     (and (fn? on-input) (on-input v))))}
                                   input-opts')]])
-        results-container [:div.py-1
+        results-container [:div
+                           {:class (when (seq search-result) "py-1")}
                            [:div.item-results-wrap
                             (ui/auto-complete
                              search-result
-                             {:item-render       (or item-cp (fn [result chosen?]
+                             {:grouped? grouped?
+                              :item-render       (or item-cp (fn [result chosen?]
                                                                (render-item result chosen? multiple-choices? *selected-choices)))
                               :class             "cp__select-results"
                               :on-chosen         (fn [raw-chosen e]

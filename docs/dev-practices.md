@@ -358,14 +358,14 @@ docs](https://github.com/logseq/bb-tasks#logseqbb-tasksnbbwatch) for more info.
 These tasks are specific to database graphs. For these tasks there is a one time setup:
 
 ```sh
-  $ cd deps/db && yarn install && cd ../outliner && yarn install && cd ../..
+  $ cd deps/db && yarn install && cd ../outliner && yarn install && cd ../graph-parser && yarn install && cd ../..
 ```
 
 * `dev:validate-db` - Validates a DB graph's datascript schema
 
   ```sh
   # One or more graphs can be validated e.g.
-  $ bb dev:validate-db test-db schema -c -g
+  $ bb dev:validate-db test-db schema
   Read graph test-db with 1572 datoms, 220 entities and 13 properties
   Valid!
   Read graph schema with 26105 datoms, 2320 entities and 3168 properties
@@ -377,7 +377,7 @@ These tasks are specific to database graphs. For these tasks there is a one time
   ```sh
   $ bb dev:db-query woot '[:find (pull ?b [*]) :where (block-content ?b "Dogma")]'
   DB contains 833 datoms
-  [{:block/tx-id 536870923, :block/link #:db{:id 100065}, :block/uuid #uuid "65565c26-f972-4400-bce4-a15df488784d", :block/updated-at 1700158508564, :block/order "a0", :block/refs [#:db{:id 100064}], :block/created-at 1700158502056, :block/format :markdown, :block/tags [#:db{:id 100064}], :block/title "Dogma #~^65565c2a-b1c5-4dc8-a0f0-81b786bc5c6d", :db/id 100090, :block/path-refs [#:db{:id 100051} #:db{:id 100064}], :block/parent #:db{:id 100051}, :block/page #:db{:id 100051}}]
+  [{:block/tx-id 536870923, :block/link #:db{:id 100065}, :block/uuid #uuid "65565c26-f972-4400-bce4-a15df488784d", :block/updated-at 1700158508564, :block/order "a0", :block/refs [#:db{:id 100064}], :block/created-at 1700158502056, :block/format :markdown, :block/tags [#:db{:id 100064}], :block/title "Dogma #[[65565c2a-b1c5-4dc8-a0f0-81b786bc5c6d]]", :db/id 100090, :block/path-refs [#:db{:id 100051} #:db{:id 100064}], :block/parent #:db{:id 100051}, :block/page #:db{:id 100051}}]
   ```
 
 * `dev:db-transact` - Run a `d/transact!` against the queried results of a DB graph
@@ -412,6 +412,24 @@ These tasks are specific to database graphs. For these tasks there is a one time
 
   Finally, upload this created graph with the dev command: `Replace graph with
   its db.sqlite file`. You'll be switched to the graph and you can use it!
+
+* `dev:db-import` and `dev:db-import-many` - Imports a file graph to DB graph, for one or many graphs
+
+  ```sh
+  # Import the local test graph with the debug option
+  $ bb dev:db-import deps/graph-parser/test/resources/exporter-test-graph test-file-graph -d
+  Importing 43 files ...
+  ...
+
+  # Import and validate multiple file graphs and write them to ./out/
+  $ bb dev:db-import-many /path/to/foo /path/to/bar -d
+  Importing ./out/foo ...
+  Importing 321 files ...
+  Valid!
+  Importing ./out/bar ...
+  Importing 542 files ...
+  Valid!
+  ```
 
 * `dev:db-datoms` and `dev:diff-datoms` - Save a db's datoms to file and diff two datom files
 

@@ -1,60 +1,64 @@
 (ns ^:no-doc logseq.api
   (:require [cljs-bean.core :as bean]
             [cljs.reader]
-            [goog.object :as gobj]
-            [datascript.core :as d]
-            [frontend.db.conn :as conn]
-            [logseq.common.util :as common-util]
-            [logseq.sdk.core]
-            [logseq.sdk.git]
-            [logseq.sdk.experiments]
-            [logseq.sdk.utils :as sdk-utils]
-            [logseq.sdk.ui :as sdk-ui]
-            [logseq.sdk.assets :as sdk-assets]
             [clojure.string :as string]
+            [datascript.core :as d]
             [electron.ipc :as ipc]
             [frontend.commands :as commands]
             [frontend.config :as config]
-            [frontend.handler.config :as config-handler]
-            [frontend.handler.recent :as recent-handler]
-            [frontend.handler.route :as route-handler]
             [frontend.db :as db]
             [frontend.db.async :as db-async]
+            [frontend.db.conn :as conn]
             [frontend.db.model :as db-model]
             [frontend.db.query-custom :as query-custom]
             [frontend.db.query-dsl :as query-dsl]
-            [frontend.db.utils :as db-utils]
             [frontend.db.query-react :as query-react]
+            [frontend.db.utils :as db-utils]
             [frontend.fs :as fs]
+            [frontend.handler.code :as code-handler]
+            [frontend.handler.command-palette :as palette-handler]
+            [frontend.handler.common.page :as page-common-handler]
+            [frontend.handler.common.plugin :as plugin-common-handler]
+            [frontend.handler.config :as config-handler]
+            [frontend.handler.db-based.property :as db-property-handler]
             [frontend.handler.dnd :as editor-dnd-handler]
             [frontend.handler.editor :as editor-handler]
             [frontend.handler.export :as export-handler]
             [frontend.handler.page :as page-handler]
             [frontend.handler.plugin :as plugin-handler]
-            [frontend.handler.common.plugin :as plugin-common-handler]
             [frontend.handler.property :as property-handler]
-            [frontend.handler.db-based.property :as db-property-handler]
-            [logseq.outliner.core :as outliner-core]
+            [frontend.handler.recent :as recent-handler]
+            [frontend.handler.route :as route-handler]
+            [frontend.handler.search :as search-handler]
+            [frontend.handler.shell :as shell]
+            [frontend.idb :as idb]
+            [frontend.loader :as loader]
+            [frontend.modules.layout.core]
             [frontend.modules.outliner.tree :as outliner-tree]
-            [frontend.handler.command-palette :as palette-handler]
-            [frontend.modules.shortcut.core :as st]
             [frontend.modules.shortcut.config :as shortcut-config]
+            [frontend.modules.shortcut.core :as st]
             [frontend.state :as state]
             [frontend.util :as util]
             [frontend.util.cursor :as cursor]
-            [frontend.loader :as loader]
-            [goog.dom :as gdom]
-            [lambdaisland.glogi :as log]
-            [promesa.core :as p]
-            [reitit.frontend.easy :as rfe]
             [frontend.version :as fv]
-            [frontend.handler.shell :as shell]
-            [frontend.modules.layout.core]
-            [frontend.handler.code :as code-handler]
-            [frontend.handler.search :as search-handler]
+            [goog.date :as gdate]
+            [goog.dom :as gdom]
+            [goog.object :as gobj]
+            [lambdaisland.glogi :as log]
             [logseq.api.block :as api-block]
+            [logseq.common.util :as common-util]
+            [logseq.common.util.date-time :as date-time-util]
             [logseq.db :as ldb]
-            [logseq.db.frontend.property.util :as db-property-util]))
+            [logseq.db.common.property-util :as db-property-util]
+            [logseq.outliner.core :as outliner-core]
+            [logseq.sdk.assets :as sdk-assets]
+            [logseq.sdk.core]
+            [logseq.sdk.experiments]
+            [logseq.sdk.git]
+            [logseq.sdk.ui :as sdk-ui]
+            [logseq.sdk.utils :as sdk-utils]
+            [promesa.core :as p]
+            [reitit.frontend.easy :as rfe]))
 
 ;; Alert: this namespace shouldn't invoke any reactive queries
 
@@ -82,16 +86,9 @@
   [k]
   (if (string? k)
     (-> k (string/trim)
-        (string/replace #"^\:+" "")
+        (string/replace #"^[:_]+" "")
         (string/lower-case))
     k))
-
-(defn- encode-user-property-name
-  [k]
-  (when (string? k)
-    (-> k (string/trim)
-        (string/replace "/" "")
-        (string/replace " " ""))))
 
 ;; helpers
 (defn ^:export install-plugin-hook
@@ -132,9 +129,10 @@
 (defn ^:export get_app_info
   ;; get app base info
   []
-  (bean/->js
-   (sdk-utils/normalize-keyword-for-json
-    {:version fv/version})))
+  (-> (sdk-utils/normalize-keyword-for-json
+       {:version fv/version
+        :supportDb true})
+      (bean/->js)))
 
 (def ^:export get_user_configs
   (fn []
@@ -212,16 +210,17 @@
 
 (def ^:export load_plugin_config
   (fn [path]
-    (fs/read-file nil (util/node-path.join path "package.json"))))
+    (if (util/electron?)
+      (fs/read-file nil (util/node-path.join path "package.json"))
+      (js/console.log "TODO: load plugin package.json from web plugin."))))
 
 (def ^:export load_plugin_readme
   (fn [path]
     (fs/read-file nil (util/node-path.join path "readme.md"))))
 
-(def ^:export save_plugin_config
+(def ^:export save_plugin_package_json
   (fn [path ^js data]
     (let [repo ""
-
           path (util/node-path.join path "package.json")]
       (fs/write-file! repo nil path (js/JSON.stringify data nil 2) {:skip-compare? true}))))
 
@@ -246,12 +245,12 @@
           _              (fs/write-file! repo nil user-path content {:skip-compare? true})]
     user-path))
 
-(defn ^:private write_dotdir_file
+(defn ^:export write_dotdir_file
   [file content sub-root]
   (some-> (plugin-handler/get-ls-dotdir-root)
           (p/then #(write_rootdir_file file content sub-root %))))
 
-(defn ^:private write_assetsdir_file
+(defn ^:export write_assetsdir_file
   [file content sub-root]
   (if-let [assets-dir (config/get-current-repo-assets-root)]
     (write_rootdir_file file content sub-root assets-dir)
@@ -361,30 +360,57 @@
 
 (def ^:export load_user_preferences
   (fn []
-    (p/let [repo ""
-            path (plugin-handler/get-ls-dotdir-root)
-            path (util/node-path.join path "preferences.json")
-            _    (fs/create-if-not-exists repo nil path)
-            json (fs/read-file nil path)
-            json (if (string/blank? json) "{}" json)]
-      (js/JSON.parse json))))
+    (let [repo ""
+          path (plugin-handler/get-ls-dotdir-root)
+          path (util/node-path.join path "preferences.json")]
+      (if (util/electron?)
+        (p/let [_ (fs/create-if-not-exists repo nil path)
+                json (fs/read-file nil path)
+                json (if (string/blank? json) "{}" json)]
+          (js/JSON.parse json))
+        (p/let [json (idb/get-item path)]
+          (or json #js {}))))))
 
 (def ^:export save_user_preferences
   (fn [^js data]
     (when data
-      (p/let [repo ""
-              path (plugin-handler/get-ls-dotdir-root)
-              path (util/node-path.join path "preferences.json")]
-        (fs/write-file! repo nil path (js/JSON.stringify data nil 2) {:skip-compare? true})))))
+      (let [repo ""
+            path (plugin-handler/get-ls-dotdir-root)
+            path (util/node-path.join path "preferences.json")]
+        (if (util/electron?)
+          (fs/write-file! repo nil path (js/JSON.stringify data nil 2) {:skip-compare? true})
+          (idb/set-item! path data))))))
 
 (def ^:export load_plugin_user_settings
   ;; results [path data]
-  (plugin-handler/make-fn-to-load-dotdir-json "settings" "{}"))
+  (plugin-handler/make-fn-to-load-dotdir-json "settings" #js {}))
 
 (def ^:export save_plugin_user_settings
   (fn [key ^js data]
     ((plugin-handler/make-fn-to-save-dotdir-json "settings")
-     key (js/JSON.stringify data nil 2))))
+     key data)))
+
+(defn ^:export load_installed_web_plugins
+  []
+  (let [getter (plugin-handler/make-fn-to-load-dotdir-json "installed-plugins-for-web" #js {})]
+    (some-> (getter :all) (p/then second))))
+
+(defn ^:export save_installed_web_plugin
+  ([^js plugin] (save_installed_web_plugin plugin false))
+  ([^js plugin remove?]
+   (when-let [id (some-> plugin (.-key) (name))]
+     (let [setter (plugin-handler/make-fn-to-save-dotdir-json "installed-plugins-for-web")
+           plugin (js/JSON.parse (js/JSON.stringify plugin))]
+       (p/let [^js plugins (or (load_installed_web_plugins) #js {})]
+         (if (true? remove?)
+           (when (aget plugins id)
+             (js-delete plugins id))
+           (gobj/set plugins id plugin))
+         (setter :all plugins))))))
+
+(defn ^:export unlink_installed_web_plugin
+  [key]
+  (save_installed_web_plugin #js {:key key} true))
 
 (def ^:export unlink_plugin_user_settings
   (plugin-handler/make-fn-to-unlink-dotdir-json "settings"))
@@ -513,8 +539,9 @@
           page? (= k :page)
           params (bean/->clj params)
           query (bean/->clj query)]
-      (if-let [page-name (and page? (:name params))]
-        (route-handler/redirect-to-page! page-name {:anchor (:anchor query) :push true})
+      (if page?
+        (-> (:name params)
+            (route-handler/redirect-to-page! {:anchor (:anchor query) :push true}))
         (rfe/push-state k params query)))))
 
 (def ^:export replace_state
@@ -597,61 +624,69 @@
                              (some->> page (api-block/into-properties (state/get-current-repo))))]
           (bean/->js (sdk-utils/normalize-keyword-for-json page)))))))
 
-(def ^:export get_page
-  (fn [id-or-page-name]
-    (p/let [page (db-async/<pull (state/get-current-repo)
-                                 (cond
-                                   (number? id-or-page-name)
-                                   id-or-page-name
-                                   (util/uuid-string? id-or-page-name)
-                                   [:block/uuid (uuid id-or-page-name)]
-                                   :else
-                                   [:block/name (util/page-name-sanity-lc id-or-page-name)]))]
-      (when-let [page (and (:block/name page)
-                           (some->> page (api-block/into-properties (state/get-current-repo))))]
-        (bean/->js (sdk-utils/normalize-keyword-for-json page))))))
+(defn ^:export get_page
+  [id-or-page-name]
+  (p/let [page (db-async/<pull (state/get-current-repo)
+                               (cond
+                                 (number? id-or-page-name)
+                                 id-or-page-name
+                                 (util/uuid-string? id-or-page-name)
+                                 [:block/uuid (uuid id-or-page-name)]
+                                 :else
+                                 [:block/name (util/page-name-sanity-lc id-or-page-name)]))]
+    (when-let [page (and (:block/name page)
+                         (some->> page (api-block/into-properties (state/get-current-repo))))]
+      (bean/->js (sdk-utils/normalize-keyword-for-json page)))))
 
-(def ^:export get_all_pages
-  (fn []
-    (let [db (conn/get-db (state/get-current-repo))]
-      (some->
-       (->>
-        (d/datoms db :avet :block/name)
-        (map #(db-utils/pull (:e %)))
-        (remove ldb/hidden?)
-        (remove (fn [page]
-                  (common-util/uuid-string? (:block/name page)))))
-       (sdk-utils/normalize-keyword-for-json)
-       (bean/->js)))))
+(defn ^:export get_all_pages
+  []
+  (let [db (conn/get-db (state/get-current-repo))]
+    (some->
+     (->>
+      (d/datoms db :avet :block/name)
+      (map #(db-utils/pull (:e %)))
+      (remove ldb/hidden?)
+      (remove (fn [page]
+                (common-util/uuid-string? (:block/name page)))))
+     (sdk-utils/normalize-keyword-for-json)
+     (bean/->js))))
 
-(def ^:export create_page
-  (fn [name ^js properties ^js opts]
-    (let [properties (bean/->clj properties)
-          db-base? (config/db-based-graph? (state/get-current-repo))
-          {:keys [redirect createFirstBlock format journal]} (bean/->clj opts)]
-      (p/let [page (<pull-block name)
-              new-page (when-not page
-                         (page-handler/<create!
-                          name
-                          (cond->
-                           {:redirect? (if (boolean? redirect) redirect true)
-                            :journal? journal
-                            :create-first-block? (if (boolean? createFirstBlock) createFirstBlock true)
-                            :format format}
+(defn ^:export create_page
+  [name ^js properties ^js opts]
+  (let [properties (bean/->clj properties)
+        db-base? (config/db-based-graph? (state/get-current-repo))
+        {:keys [redirect createFirstBlock format journal]} (bean/->clj opts)]
+    (p/let [page (<pull-block name)
+            new-page (when-not page
+                       (page-handler/<create!
+                        name
+                        (cond->
+                         {:redirect? (if (boolean? redirect) redirect true)
+                          :journal? journal
+                          :create-first-block? (if (boolean? createFirstBlock) createFirstBlock true)
+                          :format format}
 
-                            (not db-base?)
-                            (assoc :properties properties))))
-              _ (when (and db-base? (seq properties))
-                  (api-block/save-db-based-block-properties! new-page properties))]
-        (some-> (or page new-page)
-                :db/id
-                (db-utils/entity)
-                (sdk-utils/normalize-keyword-for-json)
-                (bean/->js))))))
+                          (not db-base?)
+                          (assoc :properties properties))))
+            _ (when (and db-base? (seq properties))
+                (api-block/save-db-based-block-properties! new-page properties))]
+      (some-> (or page new-page)
+              :db/id
+              (db-utils/pull)
+              (sdk-utils/normalize-keyword-for-json)
+              (bean/->js)))))
 
-(def ^:export delete_page
-  (fn [name]
-    (page-handler/<delete! name nil)))
+(defn ^:export create_journal_page
+  [^js date]
+  (let [date (js/Date. date)]
+    (when-let [datestr (and (not (js/isNaN (.getTime date)))
+                            (-> (gdate/Date. date)
+                                (date-time-util/format "yyyy-MM-dd")))]
+      (create_page datestr nil #js {:journal true :redirect false}))))
+
+(defn ^:export delete_page
+  [name]
+  (page-handler/<delete! name nil))
 
 (def ^:export rename_page
   page-handler/rename!)
@@ -756,7 +791,7 @@
                 block (if before
                         (db/pull (:db/id (ldb/get-left-sibling (db/entity (:db/id block))))) block)]
             (some-> (editor-handler/insert-block-tree-after-target
-                     (:db/id block) sibling bb (:block/format block) keep-uuid?)
+                     (:db/id block) sibling bb (get block :block/format :markdown) keep-uuid?)
                     (p/then (fn [results]
                               (some-> results (ldb/read-transit-str)
                                       :blocks (sdk-utils/normalize-keyword-for-json) (bean/->js)))))))))))
@@ -850,34 +885,25 @@
               (editor-handler/expand-block! block-uuid))
           nil)))))
 
-(defn convert?to-built-in-property-name
-  [property-name]
-  (if (and (not (qualified-keyword? property-name))
-           (contains? #{:background-color} property-name))
-    (keyword :logseq.property property-name)
-    property-name))
-
-;; FIXME: This ns should not be creating idents. This allows for ident conflicts
-;; and assumes that names directly map to idents which is incorrect and breaks for multiple
-;; cases e.g. a property that has been renamed or sanitized. Instead it should
-;; find a property's ident by looking up the property in the db by its title
-(defn get-db-ident-for-property-name
-  "Finds a property :db/ident for a given property name"
-  [property-name]
-  (let [property-name' (if (string? property-name)
-                         (keyword property-name) property-name)
-        property-name' (convert?to-built-in-property-name property-name')]
-    (if (qualified-keyword? property-name')
-      property-name'
-      (keyword "plugin.property" (encode-user-property-name property-name)))))
-
 ;; properties (db only)
+(defn -resolve-property-prefix-for-db
+  [^js plugin]
+  (when (some-> js/window.LSPlugin (.-PluginLocal) (instance? plugin))
+    (some-> (.-id plugin) (sanitize-user-property-name) (str "."))))
+
+(defn -get-property
+  [^js plugin k]
+  (when-let [k' (and (string? k) (some-> k (sanitize-user-property-name) (keyword)))]
+    (let [prefix (-resolve-property-prefix-for-db plugin)]
+      (p/let [k (if (qualified-keyword? k') k'
+                    (api-block/get-db-ident-for-user-property-name (str prefix k)))
+              p (db-utils/pull k)] p))))
+
 (defn ^:export get_property
   [k]
-  (when-let [k' (and (string? k) (some-> k (sanitize-user-property-name) (keyword)))]
-    (p/let [k (if (qualified-keyword? k') k' (get-db-ident-for-property-name k))
-            p (db-utils/pull k)]
-      (bean/->js (sdk-utils/normalize-keyword-for-json p)))))
+  (this-as this
+           (p/let [prop (-get-property this k)]
+             (bean/->js (sdk-utils/normalize-keyword-for-json prop)))))
 
 (defn ^:export upsert_property
   "schema:
@@ -888,66 +914,88 @@
      :public? false}
   "
   [k ^js schema ^js opts]
-  (when-let [k' (and (string? k) (keyword k))]
-    (p/let [opts (or (some-> opts (bean/->clj)) {})
-            name (or (:name opts) (some-> (str k) (string/trim)))
-            k (if (qualified-keyword? k') k'
-                  (get-db-ident-for-property-name k))
-            schema (or (some-> schema (bean/->clj)
-                               (update-keys #(if (contains? #{:hide :public} %)
-                                               (keyword (str (name %) "?")) %))) {})
-            schema (cond-> schema
-                     (string? (:cardinality schema))
-                     (update :cardinality keyword)
-                     (string? (:type schema))
-                     (update :type keyword))
-            p (db-property-handler/upsert-property! k schema
-                                                    (cond-> opts
-                                                      name
-                                                      (assoc :property-name name)))]
-      (bean/->js (sdk-utils/normalize-keyword-for-json p)))))
+  (this-as this
+           (when-let [k' (and (string? k) (keyword k))]
+             (let [prefix (when (some-> js/window.LSPlugin (.-PluginLocal) (instance? this))
+                            (str (.-id this) "."))]
+               (p/let [opts (or (some-> opts (bean/->clj)) {})
+                       name (or (:name opts) (some-> (str k) (string/trim)))
+                       k (if (qualified-keyword? k') k'
+                             (api-block/get-db-ident-for-user-property-name (str prefix k)))
+                       schema (or (some-> schema (bean/->clj)
+                                          (update-keys #(if (contains? #{:hide :public} %)
+                                                          (keyword (str (name %) "?")) %))) {})
+                       schema (cond-> schema
+                                (string? (:cardinality schema))
+                                (update :cardinality keyword)
+                                (string? (:type schema))
+                                (update :type keyword))
+                       p (db-property-handler/upsert-property! k schema
+                                                               (cond-> opts
+                                                                 name
+                                                                 (assoc :property-name name)))]
+                 (bean/->js (sdk-utils/normalize-keyword-for-json p)))))))
+
+(defn ^:export remove_property
+  [k]
+  (this-as this
+           (p/let [prop (-get-property this k)]
+             (when-let [uuid (:block/uuid prop)]
+               (page-common-handler/<delete! uuid nil nil)))))
 
 ;; block properties
-(def ^:export upsert_block_property
-  (fn [block-uuid keyname value]
-    (p/let [block-uuid (sdk-utils/uuid-or-throw-error block-uuid)
-            repo (state/get-current-repo)
-            _ (db-async/<get-block repo block-uuid :children? false)
-            db? (config/db-based-graph? repo)
-            key (-> (if (keyword? key) (name keyname) keyname) (util/safe-lower-case))
-            key (if db? (get-db-ident-for-property-name key) key)
-            _ (when (and db? (not (db-utils/entity key)))
-                (db-property-handler/upsert-property! key {} {:property-name keyname}))]
-      (property-handler/set-block-property! repo block-uuid key value))))
+(defn ^:export upsert_block_property
+  [block-uuid keyname value]
+  (this-as this
+           (p/let [keyname (sanitize-user-property-name keyname)
+                   block-uuid (sdk-utils/uuid-or-throw-error block-uuid)
+                   repo (state/get-current-repo)
+                   _ (db-async/<get-block repo block-uuid :children? false)
+                   db? (config/db-based-graph? repo)
+                   key (-> (if (keyword? key) (name keyname) keyname) (util/safe-lower-case))
+                   key (if db?
+                         (api-block/get-db-ident-for-user-property-name
+                          (str (-resolve-property-prefix-for-db this) key))
+                         key)
+                   _ (when (and db? (not (db-utils/entity key)))
+                       (db-property-handler/upsert-property! key {} {:property-name keyname}))]
+             (property-handler/set-block-property! repo block-uuid key value))))
 
-(def ^:export remove_block_property
-  (fn [block-uuid key]
-    (p/let [key (sanitize-user-property-name key)
-            block-uuid (sdk-utils/uuid-or-throw-error block-uuid)
-            _ (db-async/<get-block (state/get-current-repo) block-uuid :children? false)
-            db? (config/db-based-graph? (state/get-current-repo))
-            key-ns? (and (keyword? key) (namespace key))
-            key (if key-ns? key (-> (if (keyword? key) (name key) key) (util/safe-lower-case)))
-            key (if (and db? (not key-ns?)) (get-db-ident-for-property-name key) key)]
-      (property-handler/remove-block-property!
-       (state/get-current-repo)
-       block-uuid key))))
+(defn ^:export remove_block_property
+  [block-uuid key]
+  (this-as this
+           (p/let [key (sanitize-user-property-name key)
+                   block-uuid (sdk-utils/uuid-or-throw-error block-uuid)
+                   _ (db-async/<get-block (state/get-current-repo) block-uuid :children? false)
+                   db? (config/db-based-graph? (state/get-current-repo))
+                   key-ns? (and (keyword? key) (namespace key))
+                   key (if key-ns? key (-> (if (keyword? key) (name key) key) (util/safe-lower-case)))
+                   key (if (and db? (not key-ns?))
+                         (api-block/get-db-ident-for-user-property-name
+                          (str (-resolve-property-prefix-for-db this) key))
+                         key)]
+             (property-handler/remove-block-property!
+              (state/get-current-repo)
+              block-uuid key))))
 
-(def ^:export get_block_property
-  (fn [block-uuid key]
-    (p/let [block-uuid (sdk-utils/uuid-or-throw-error block-uuid)
-            _ (db-async/<get-block (state/get-current-repo) block-uuid :children? false)]
-      (when-let [properties (some-> block-uuid (db-model/get-block-by-uuid) (:block/properties))]
-        (when (seq properties)
-          (let [key (sanitize-user-property-name key)
-                property-name (-> (if (keyword? key) (name key) key) (util/safe-lower-case))
-                property-value (or (get properties key)
-                                   (get properties (keyword property-name))
-                                   (get properties (get-db-ident-for-property-name property-name)))
-                property-value (if-let [property-id (:db/id property-value)]
-                                 (db/pull property-id) property-value)
-                ret (sdk-utils/normalize-keyword-for-json property-value)]
-            (bean/->js ret)))))))
+(defn ^:export get_block_property
+  [block-uuid key]
+  (this-as this
+           (p/let [block-uuid (sdk-utils/uuid-or-throw-error block-uuid)
+                   _ (db-async/<get-block (state/get-current-repo) block-uuid :children? false)]
+             (when-let [properties (some-> block-uuid (db-model/get-block-by-uuid) (:block/properties))]
+               (when (seq properties)
+                 (let [key (sanitize-user-property-name key)
+                       property-name (-> (if (keyword? key) (name key) key) (util/safe-lower-case))
+                       property-value (or (get properties key)
+                                          (get properties (keyword property-name))
+                                          (get properties
+                                               (api-block/get-db-ident-for-user-property-name
+                                                (str (-resolve-property-prefix-for-db this) property-name))))
+                       property-value (if-let [property-id (:db/id property-value)]
+                                        (db/pull property-id) property-value)
+                       ret (sdk-utils/normalize-keyword-for-json property-value)]
+                   (bean/->js ret)))))))
 
 (def ^:export get_block_properties
   (fn [block-uuid]
@@ -1045,10 +1093,10 @@
 
 (def ^:export __install_plugin
   (fn [^js manifest]
-    (when-let [{:keys [repo id] :as mft} (bean/->clj manifest)]
+    (when-let [{:keys [repo id] :as manifest} (bean/->clj manifest)]
       (if-not (and repo id)
         (throw (js/Error. "[required] :repo :id"))
-        (plugin-common-handler/install-marketplace-plugin mft)))))
+        (plugin-common-handler/install-marketplace-plugin! manifest)))))
 
 ;; db
 (defn ^:export q

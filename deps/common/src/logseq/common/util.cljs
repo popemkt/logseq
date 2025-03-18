@@ -20,7 +20,7 @@
 
 (defn path-normalize
   "Normalize file path (for reading paths from FS, not required by writing)
-   Keep capitalization senstivity"
+   Keep capitalization sensitivity"
   [s]
   (.normalize s "NFC"))
 
@@ -228,11 +228,11 @@
   "Reads an edn string and returns nil if it fails to parse"
   ([content]
    (safe-read-string {} content))
-  ([opts content]
+  ([{:keys [log-error?] :or {log-error? true} :as opts} content]
    (try
-     (reader/read-string opts content)
+     (reader/read-string (dissoc opts :log-error?) content)
      (catch :default e
-       (log/error :parse/read-string-failed e)
+       (when log-error? (log/error :parse/read-string-failed e))
        nil))))
 
 (defn safe-read-map-string
@@ -245,26 +245,6 @@
      (catch :default e
        (log/error :parse/read-string-failed e)
        {}))))
-
-;; Copied from Medley
-;; https://github.com/weavejester/medley/blob/d1e00337cf6c0843fb6547aadf9ad78d981bfae5/src/medley/core.cljc#L22
-(defn dissoc-in
-  "Dissociate a value in a nested associative structure, identified by a sequence
-  of keys. Any collections left empty by the operation will be dissociated from
-  their containing structures."
-  ([m ks]
-   (if-let [[k & ks] (seq ks)]
-     (if (seq ks)
-       (let [v (dissoc-in (get m k) ks)]
-         (if (empty? v)
-           (dissoc m k)
-           (assoc m k v)))
-       (dissoc m k))
-     m))
-  ([m ks & kss]
-   (if-let [[ks' & kss] (seq kss)]
-     (recur (dissoc-in m ks) ks' kss)
-     (dissoc-in m ks))))
 
 (defn safe-re-find
   {:malli/schema [:=> [:cat :any :string] [:or :nil :string [:vector [:maybe :string]]]]}
@@ -374,3 +354,13 @@ return: [{:id 3} {:id 2 :depend-on 3} {:id 1 :depend-on 2}]"
   [content]
   {:pre [(string? content)]}
   (string/replace-first content markdown-heading-pattern ""))
+
+(defn block-with-timestamps
+  "Adds updated-at timestamp and created-at if it doesn't exist"
+  [block]
+  (let [updated-at (time-ms)
+        block (cond->
+               (assoc block :block/updated-at updated-at)
+                (nil? (:block/created-at block))
+                (assoc :block/created-at updated-at))]
+    block))

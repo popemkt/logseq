@@ -18,7 +18,7 @@
                                          :sha     "5704fbf48d3478eedcf24d458c8964b3c2fd59a9"}
   ;; TODO: delete cljs-drag-n-drop and use dnd-kit
   cljs-drag-n-drop/cljs-drag-n-drop     {:mvn/version "0.1.0"}
-  cljs-http/cljs-http                   {:mvn/version "0.1.46"}
+  cljs-http/cljs-http                   {:mvn/version "0.1.48"}
   org.babashka/sci                      {:mvn/version "0.3.2"}
   org.clj-commons/hickory               {:mvn/version "0.7.3"}
   hiccups/hiccups                       {:mvn/version "0.3.0"}
@@ -47,7 +47,9 @@
                                               ;; when PR merged
                                               ;; https://github.com/open-spaced-repetition/cljc-fsrs/pull/5
                                               :git/url "https://github.com/rcmerci/cljc-fsrs"}
-  tick/tick                             {:mvn/version "0.7.5"}}
+  tick/tick                              {:mvn/version "0.7.5"}
+  io.github.rcmerci/cljs-http-missionary {:git/url "https://github.com/RCmerci/cljs-http-missionary"
+                                          :git/sha "d61ce7e29186de021a2a453a8cee68efb5a88440"}}
 
  :aliases {:cljs {:extra-paths ["src/dev-cljs/" "src/test/" "src/electron/"]
                   :extra-deps  {org.clojure/clojurescript        {:mvn/version "1.11.132"}

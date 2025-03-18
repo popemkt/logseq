@@ -1,20 +1,22 @@
 (ns frontend.components.query
   (:require [clojure.string :as string]
-            [frontend.components.file-based.query-table :as query-table]
             [frontend.components.file-based.query :as file-query]
+            [frontend.components.file-based.query-table :as query-table]
             [frontend.components.query.result :as query-result]
             [frontend.components.query.view :as query-view]
+            [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
             [frontend.db :as db]
             [frontend.db-mixins :as db-mixins]
             [frontend.extensions.sci :as sci]
             [frontend.handler.editor :as editor-handler]
+            [frontend.hooks :as hooks]
             [frontend.state :as state]
             [frontend.ui :as ui]
             [frontend.util :as util]
             [lambdaisland.glogi :as log]
-            [rum.core :as rum]
-            [frontend.config :as config]))
+            [logseq.db :as ldb]
+            [rum.core :as rum]))
 
 (defn- built-in-custom-query?
   [title]
@@ -131,6 +133,13 @@
   (let [collapsed?' (:collapsed? config)
         result' (rum/react *result)]
     (let [result (when *result (query-result/transform-query-result config q result'))
+          ;; Remove hidden pages from result
+          result (if (and (coll? result) (not (map? result)))
+                   (->> result
+                        (remove (fn [b] (when (and (map? b) (:block/title b)) (ldb/hidden? (:block/title b)))))
+                        (remove (fn [b]
+                                  (when (and current-block (:db/id current-block)) (= (:db/id b) (:db/id current-block))))))
+                   result)
           ;; Args for displaying query header and results
           view-fn (if (keyword? view) (get-in (state/sub-config) [:query/views view]) view)
           view-f (and view-fn (sci/eval-string (pr-str view-fn)))
@@ -168,15 +177,14 @@
                  (custom-query-inner config q opts))
                {:default-collapsed? collapsed?
                 :title-trigger? true})]
-             (when-not (:table? config)
-               [:div.bd
-                (when-not collapsed?'
-                  (custom-query-inner config q opts))]))])))))
+             [:div.bd
+              (when-not collapsed?'
+                (custom-query-inner config q opts))])])))))
 
 (rum/defc trigger-custom-query
   [config q]
   (let [[result set-result!] (rum/use-state nil)]
-    (rum/use-effect!
+    (hooks/use-effect!
      (fn []
        (query-result/trigger-custom-query! config q (:*query-error config) set-result!))
      [q])
@@ -218,5 +226,5 @@
                         :table? table?
                         :built-in-query? (built-in-custom-query? (:title q))
                         :*query-error *query-error)]
-     (when (or built-in-collapsed? (not collapsed?'))
+     (when (or built-in-collapsed? (not db-graph?) (not collapsed?'))
        (trigger-custom-query config' q)))))

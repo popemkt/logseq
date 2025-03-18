@@ -145,6 +145,7 @@ export interface AppUserInfo {
 
 export interface AppInfo {
   version: string
+  supportDb: boolean
 
   [key: string]: unknown
 }
@@ -314,7 +315,7 @@ export type ExternalCommandType =
   | 'logseq.ui/toggle-theme'
   | 'logseq.ui/toggle-wide-mode'
 
-export type UserProxyTags = 'app' | 'editor' | 'db' | 'git' | 'ui' | 'assets'
+export type UserProxyTags = 'app' | 'editor' | 'db' | 'git' | 'ui' | 'assets' | 'utils'
 
 export type SearchIndiceInitStatus = boolean
 export type SearchBlockItem = {
@@ -686,6 +687,8 @@ export interface IEditorProxy extends Record<string, any> {
    */
   newBlockUUID: () => Promise<string>
 
+  isPageBlock: (block: BlockEntity | PageEntity) => Boolean
+
   /**
    * @example https://github.com/logseq/logseq-plugin-samples/tree/master/logseq-reddit-hot-news
    *
@@ -761,6 +764,10 @@ export interface IEditorProxy extends Record<string, any> {
     }>
   ) => Promise<PageEntity | null>
 
+  createJournalPage: (
+    date: string | Date
+  ) => Promise<PageEntity | null>
+
   deletePage: (pageName: BlockPageName) => Promise<void>
 
   renamePage: (oldName: string, newName: string) => Promise<void>
@@ -801,12 +808,7 @@ export interface IEditorProxy extends Record<string, any> {
   // property entity related APIs (DB only)
   getProperty: (key: string) => Promise<BlockEntity | null>
 
-  /**
-   * insert or update property entity
-   * @param key
-   * @param schema
-   * @param opts
-   */
+  // insert or update property entity
   upsertProperty: (
     key: string,
     schema?: Partial<{
@@ -816,6 +818,9 @@ export interface IEditorProxy extends Record<string, any> {
       public: boolean
     }>,
     opts?: { name?: string }) => Promise<IEntityID>
+
+  // remove property entity
+  removeProperty: (key: string) => Promise<void>
 
   // block property related APIs
   upsertBlockProperty: (
@@ -928,6 +933,10 @@ export interface IUIProxy {
   queryElementById: (id: string) => Promise<string | boolean>
   checkSlotValid: (slot: UISlotIdentity['slot']) => Promise<boolean>
   resolveThemeCssPropsVals: (props: string | Array<string>) => Promise<Record<string, string | undefined> | null>
+}
+
+export interface IUtilsProxy {
+  toJs: <R = unknown>(obj: {}) => Promise<R>
 }
 
 /**

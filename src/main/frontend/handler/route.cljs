@@ -1,23 +1,23 @@
 (ns frontend.handler.route
   "Provides fns used for routing throughout the app"
-  (:require [frontend.config :as config]
+  (:require [clojure.string :as string]
+            [frontend.config :as config]
+            [frontend.context.i18n :refer [t]]
             [frontend.date :as date]
             [frontend.db :as db]
             [frontend.db.model :as model]
+            [frontend.extensions.pdf.utils :as pdf-utils]
+            [frontend.handler.notification :as notification]
+            [frontend.handler.property.util :as pu]
             [frontend.handler.recent :as recent-handler]
             [frontend.handler.search :as search-handler]
             [frontend.handler.ui :as ui-handler]
-            [frontend.handler.property.util :as pu]
             [frontend.state :as state]
             [frontend.util :as util]
-            [frontend.extensions.pdf.utils :as pdf-utils]
-            [logseq.graph-parser.text :as text]
-            [reitit.frontend.easy :as rfe]
-            [frontend.context.i18n :refer [t]]
-            [clojure.string :as string]
             [logseq.common.util :as common-util]
-            [frontend.handler.notification :as notification]
-            [logseq.db :as ldb]))
+            [logseq.db :as ldb]
+            [logseq.graph-parser.text :as text]
+            [reitit.frontend.easy :as rfe]))
 
 (defn redirect!
   "If `push` is truthy, previous page will be left in history."
@@ -56,9 +56,8 @@
   (defn- default-page-route [page-name-or-block-uuid]
     ;; Only query if in a block context
     (let [block (when (uuid? page-name-or-block-uuid)
-                  (model/get-block-by-uuid page-name-or-block-uuid))
-          properties (:block/properties block)]
-      (if (pu/lookup properties :logseq.property/heading)
+                  (model/get-block-by-uuid page-name-or-block-uuid))]
+      (if (pu/lookup block :logseq.property/heading)
         {:to :page-block
          :path-params {:name (get-in block [:block/page :block/name])
                        :block-route-name (model/heading-content->route-name (:block/title block))}}
@@ -139,7 +138,8 @@
           block-title (when (and block? (not page))
                         (when-let [block (db/entity [:block/uuid (uuid name)])]
                           (let [content (text/remove-level-spaces (:block/title block)
-                                                                  (:block/format block) (config/get-block-pattern (:block/format block)))]
+                                                                  (get block :block/format :markdown)
+                                                                  (config/get-block-pattern (get block :block/format :markdown)))]
                             (if (> (count content) 48)
                               (str (subs content 0 48) "...")
                               content))))
@@ -193,19 +193,23 @@
   (swap! state/state assoc :route-match route)
   (update-page-title! route)
   (update-page-label! route)
-  (if-let [anchor (get-in route [:query-params :anchor])]
-    (jump-to-anchor! anchor)
-    (js/setTimeout #(util/scroll-to (util/app-scroll-container-node)
-                                    (state/get-saved-scroll-position)
-                                    false)
-                   100)))
+  (when-let [anchor (get-in route [:query-params :anchor])]
+    (jump-to-anchor! anchor)))
+
+(defn restore-scroll-pos
+  []
+  (js/setTimeout #(util/scroll-to (util/app-scroll-container-node)
+                                  (state/get-saved-scroll-position)
+                                  false)
+                 100))
 
 (defn go-to-search!
-  [search-mode]
-  (search-handler/clear-search! false)
-  (when search-mode
-    (state/set-search-mode! search-mode))
-  (state/pub-event! [:go/search]))
+  ([search-mode] (go-to-search! search-mode nil))
+  ([search-mode args]
+   (search-handler/clear-search! false)
+   (when search-mode
+     (state/set-search-mode! search-mode args))
+   (state/pub-event! [:go/search])))
 
 (defn sidebar-journals!
   []

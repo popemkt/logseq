@@ -5,27 +5,24 @@
             [frontend.mobile.util :as mobile-util]
             [frontend.state :as state]
             [frontend.util :as util]
-            [logseq.common.path :as path]
-            [logseq.common.config :as common-config]
-            [logseq.common.util :as common-util]
-            [shadow.resource :as rc]
-            [goog.crypt.Md5]
             [goog.crypt :as crypt]
-            [logseq.db.sqlite.util :as sqlite-util]))
+            [goog.crypt.Md5]
+            [logseq.common.config :as common-config]
+            [logseq.common.path :as path]
+            [logseq.common.util :as common-util]
+            [logseq.db.sqlite.util :as sqlite-util]
+            [shadow.resource :as rc]))
 
 (goog-define DEV-RELEASE false)
 (defonce dev-release? DEV-RELEASE)
 (defonce dev? ^boolean (or dev-release? goog.DEBUG))
 
-(goog-define PUBLISHING false)
-(defonce publishing? PUBLISHING)
+(defonce publishing? common-config/PUBLISHING)
 
 (goog-define REVISION "unknown")
 (defonce revision REVISION)
 
-(reset! state/publishing? publishing?)
-
-(def ENABLE-FILE-SYNC-PRODUCTION false)
+(goog-define ENABLE-FILE-SYNC-PRODUCTION false)
 
 ;; this is a feature flag to enable the account tab
 ;; when it launches (when pro plan launches) it should be removed
@@ -74,16 +71,13 @@
 
 ;; User level configuration for whether plugins are enabled
 (defonce lsp-enabled?
-  (and (util/electron?)
+  (and util/plugin-platform?
        (not (false? feature-plugin-system-on?))
        (state/lsp-enabled?-or-theme)))
 
 (defn plugin-config-enabled?
   []
   (and lsp-enabled? (global-config-enabled?)))
-
-;; TODO: switch to `logseq-team` group check later @zhiyuan
-(def db-graph-enabled? true)
 
 ;; :TODO: How to do this?
 ;; (defonce desktop? ^boolean goog.DESKTOP)
@@ -506,6 +500,11 @@
 (defn get-current-repo-assets-root
   []
   (when-let [repo-dir (get-repo-dir (state/get-current-repo))]
+    (path/path-join repo-dir "assets")))
+
+(defn get-repo-assets-root
+  [repo]
+  (when-let [repo-dir (get-repo-dir repo)]
     (path/path-join repo-dir "assets")))
 
 (defn get-custom-js-path

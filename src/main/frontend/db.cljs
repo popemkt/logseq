@@ -1,15 +1,15 @@
 (ns frontend.db
   "Main entry ns for db related fns"
-  (:require [frontend.db.conn :as conn]
+  (:require [frontend.config :as config]
+            [frontend.db.conn :as conn]
             [frontend.db.model]
             [frontend.db.react :as react]
             [frontend.db.utils]
-            [frontend.namespaces :refer [import-vars]]
-            [logseq.db :as ldb]
-            [frontend.modules.outliner.ui :as ui-outliner-tx]
             [frontend.modules.outliner.op :as outliner-op]
+            [frontend.modules.outliner.ui :as ui-outliner-tx]
+            [frontend.namespaces :refer [import-vars]]
             [frontend.state :as state]
-            [frontend.config :as config]
+            [logseq.db :as ldb]
             [logseq.outliner.op]))
 
 (import-vars
@@ -46,7 +46,7 @@
   get-current-page
   remove-q! remove-query-component! add-q! add-query-component! clear-query-state!
   q
-  query-state query-components set-new-result!])
+  query-state component->query-key set-new-result!])
 
 (defn start-db-conn!
   ([repo]
@@ -73,7 +73,7 @@
 (defn set-file-last-modified-at!
   "Refresh file timestamps to DB"
   [repo path last-modified-at]
-  (when (and repo path last-modified-at)
+  (when (and repo (not (config/db-based-graph? repo)) path last-modified-at)
     (transact! repo
                [{:file/path path
                  :file/last-modified-at last-modified-at}] {})))

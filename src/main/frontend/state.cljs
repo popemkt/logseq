@@ -11,6 +11,7 @@
             [electron.ipc :as ipc]
             [frontend.db.conn-state :as db-conn-state]
             [frontend.db.transact :as db-transact]
+            [frontend.flows :as flows]
             [frontend.mobile.util :as mobile-util]
             [frontend.rum :as r]
             [frontend.spec.storage :as storage-spec]
@@ -21,14 +22,14 @@
             [goog.object :as gobj]
             [logseq.common.config :as common-config]
             [logseq.db :as ldb]
+            [logseq.db.frontend.entity-plus :as entity-plus]
             [logseq.db.sqlite.util :as sqlite-util]
             [logseq.shui.dialog.core :as shui-dialog]
             [logseq.shui.ui :as shui]
             [promesa.core :as p]
             [rum.core :as rum]))
 
-(defonce *profile-state
-  (atom {}))
+(defonce *profile-state (volatile! {}))
 
 (defonce *db-worker (atom nil))
 
@@ -63,6 +64,7 @@
 
       :search/q                              ""
       :search/mode                           nil ; nil -> global mode, :graph -> add graph filter, etc.
+      :search/args                           nil
       :search/result                         nil
       :search/graph-filters                  []
       :search/engines                        {}
@@ -85,7 +87,7 @@
       :ui/settings-open?                     false
       :ui/sidebar-open?                      false
       :ui/sidebar-width                      "40%"
-      :ui/left-sidebar-open?                 (boolean (storage/get "ls-left-sidebar-open?"))
+      :ui/left-sidebar-open?                 (boolean (storage/get :ls-left-sidebar-open?))
       :ui/theme                              (or (storage/get :ui/theme) "light")
       :ui/system-theme?                      ((fnil identity (or util/mac? util/win32? false)) (storage/get :ui/system-theme?))
       :ui/custom-theme                       (or (storage/get :ui/custom-theme) {:light {:mode "light"} :dark {:mode "dark"}})
@@ -149,7 +151,7 @@
       ;; for audio record
       :editor/record-status                  "NONE"
 
-      :editor/code-block-context             {}
+      :editor/code-block-context             nil
       :editor/latest-shortcut                (atom nil)
 
       :history/paused?                       (atom false)
@@ -202,7 +204,7 @@
       :mobile/app-state-change                 (atom nil)
 
       ;; plugin
-      :plugin/enabled                        (and (util/electron?)
+      :plugin/enabled                        (and util/plugin-platform?
                                                   ;; true false :theme-only
                                                   ((fnil identity true) (storage/get ::storage-spec/lsp-core-enabled)))
       :plugin/preferences                    nil
@@ -256,6 +258,7 @@
       :command-palette/commands              (atom [])
 
       :view/components                       {}
+      :view/selected-blocks                  nil
 
       :srs/mode?                             false
 
@@ -293,6 +296,7 @@
       :rtc/downloading-graph-uuid            nil
       :rtc/graphs                            []
       :rtc/online-info                       (atom {})
+      :rtc/asset-upload-download-progress    (atom {})
 
       :user/info                             {:UserGroups (storage/get :user-groups)}
       :encryption/graph-parsing?             false
@@ -302,6 +306,7 @@
       :ui/cached-key->container-id           (atom {})
       :feature/enable-sync?                  (storage/get :logseq-sync-enabled)
       :feature/enable-sync-diff-merge?       ((fnil identity true) (storage/get :logseq-sync-diff-merge-enabled))
+      :feature/enable-rtc?                   (storage/get :logseq-rtc-enabled)
 
       :file/rename-event-chan                (async/chan 100)
       :ui/find-in-page                       nil
@@ -317,6 +322,9 @@
       :system/info                           {}
       ;; Whether block is selected
       :ui/select-query-cache                 (atom {})
+      :ui/toggle-highlight-recent-blocks?    (atom false)
+      :ui/highlight-recent-days              (atom (or (storage/get :ui/highlight-recent-days)
+                                                       3))
       :favorites/updated?                    (atom 0)
       :db/async-query-loading                (atom #{})
       :db/async-queries                      (atom {})
@@ -465,15 +473,13 @@ should be done through this fn in order to get global config and config defaults
     (get-global-config)
     (get-graph-config repo-url))))
 
-(defonce publishing? (atom nil))
-
 (defn publishing-enable-editing?
   []
-  (and @publishing? (:publishing/enable-editing? (get-config))))
+  (and common-config/PUBLISHING (:publishing/enable-editing? (get-config))))
 
 (defn enable-editing?
   []
-  (or (not @publishing?) (:publishing/enable-editing? (get-config))))
+  (or (not common-config/PUBLISHING) (:publishing/enable-editing? (get-config))))
 
 (defonce built-in-macros
   {"img" "[:img.$4 {:src \"$1\" :style {:width $2 :height $3}}]"})
@@ -594,13 +600,14 @@ should be done through this fn in order to get global config and config defaults
   (let [repo (get-current-repo)]
     (if (sqlite-util/db-based-graph? repo)
       (when-let [conn (db-conn-state/get-conn repo)]
-        (get (d/entity @conn :logseq.class/Journal)
+        (get (entity-plus/entity-memoized @conn :logseq.class/Journal)
              :logseq.property.journal/title-format
              "MMM do, yyyy"))
       (common-config/get-date-formatter (get-config)))))
 
-(defn shortcuts []
-  (:shortcuts (get-config)))
+(defn custom-shortcuts []
+  (merge (storage/get :ls-shortcuts)
+         (:shortcuts (get-config))))
 
 (defn get-commands
   []
@@ -742,8 +749,8 @@ Similar to re-frame subscriptions"
    (not (false? (:feature/enable-whiteboards? (sub-config repo))))))
 
 (defn enable-rtc?
-  [repo]
-  (:feature/enable-rtc? (sub-config repo)))
+  []
+  (sub :feature/enable-rtc?))
 
 (defn enable-git-auto-push?
   [repo]
@@ -825,7 +832,7 @@ Similar to re-frame subscriptions"
 
 (defn set-state!
   [path value & {:keys [path-in-sub-atom]}]
-  (swap! *profile-state update path inc)
+  (vswap! *profile-state update path inc)
   (let [path-coll?             (coll? path)
         get-fn                 (if path-coll? get-in get)
         s                      (get-fn @state path)
@@ -857,7 +864,7 @@ Similar to re-frame subscriptions"
 
 (defn update-state!
   [path f & {:keys [path-in-sub-atom]}]
-  (swap! *profile-state update path inc)
+  (vswap! *profile-state update path inc)
   (let [path-coll?             (coll? path)
         get-fn                 (if path-coll? get-in get)
         s                      (get-fn @state path)
@@ -973,6 +980,7 @@ Similar to re-frame subscriptions"
 (defn set-current-repo!
   [repo]
   (swap! state assoc :git/current-repo repo)
+  (reset! flows/*current-repo repo)
   (if repo
     (storage/set :git/current-repo repo)
     (storage/remove :git/current-repo))
@@ -1080,8 +1088,10 @@ Similar to re-frame subscriptions"
   (set-state! :editor/cursor-range range))
 
 (defn set-search-mode!
-  [value]
-  (set-state! :search/mode value))
+  ([value] (set-search-mode! value nil))
+  ([value args]
+   (set-state! :search/mode value)
+   (set-state! :search/args args)))
 
 (defn set-editor-action!
   [value]
@@ -1159,27 +1169,43 @@ Similar to re-frame subscriptions"
   []
   (get-selected-block-ids (get-selection-blocks)))
 
+(defn sub-block-selected?
+  [block-id]
+  (assert (uuid? block-id))
+  (rum/react
+   (r/cached-derived-atom (:selection/blocks @state) [(get-current-repo) ::ui-selected block-id]
+                          (fn [blocks] (some #{block-id} (get-selected-block-ids blocks))))))
+
 (defn dom-clear-selection!
   []
   (doseq [node (dom/by-class "ls-block selected")]
     (dom/remove-class! node "selected")))
 
 (defn mark-dom-blocks-as-selected
-  ([]
-   (mark-dom-blocks-as-selected (get-selection-block-ids)))
-  ([ids]
-   (doseq [id ids]
-     (doseq [node (array-seq (gdom/getElementsByClass (str "id" id)))]
-       (dom/add-class! node "selected")))))
+  [nodes]
+  (doseq [node nodes]
+    (dom/add-class! node "selected")))
+
+(defn get-events-chan
+  []
+  (:system/events @state))
+
+(defn pub-event!
+  {:malli/schema [:=> [:cat vector?] :any]}
+  [payload]
+  (let [d (p/deferred)
+        chan (get-events-chan)]
+    (async/put! chan [payload d])
+    d))
 
 (defn- set-selection-blocks-aux!
   [blocks]
+  (set-state! :view/selected-blocks nil)
   (let [selected-ids (set (get-selected-block-ids @(:selection/blocks @state)))
         _ (set-state! :selection/blocks blocks)
         new-ids (set (get-selection-block-ids))
-        added (set/difference new-ids selected-ids)
         removed (set/difference selected-ids new-ids)]
-    (mark-dom-blocks-as-selected added)
+    (mark-dom-blocks-as-selected blocks)
     (doseq [id removed]
       (doseq [node (array-seq (gdom/getElementsByClass (str "id" id)))]
         (dom/remove-class! node "selected")))))
@@ -1198,7 +1224,8 @@ Similar to re-frame subscriptions"
   (set-state! :selection/blocks nil)
   (set-state! :selection/direction nil)
   (set-state! :selection/start-block nil)
-  (set-state! :selection/selected-all? false))
+  (set-state! :selection/selected-all? false)
+  (pub-event! [:editor/hide-action-bar]))
 
 (defn clear-selection!
   []
@@ -1354,12 +1381,13 @@ Similar to re-frame subscriptions"
   (set-state! :editor/content {})
   (set-state! :ui/select-query-cache {})
   (set-state! :editor/block-refs #{})
-  (set-state! :editor/action-data nil))
+  (set-state! :editor/action-data nil)
+  (set-state! :view/selected-blocks nil))
 
 (defn into-code-editor-mode!
   []
   (set-state! :editor/cursor-range nil)
-  (swap! state merge {:editor/code-mode? true}))
+  (swap! state assoc :editor/code-mode? true))
 
 (defn set-editor-last-pos!
   [new-pos]
@@ -1557,6 +1585,11 @@ Similar to re-frame subscriptions"
   (let [mode (document-mode?)]
     (set-state! :document/mode? (not mode))
     (storage/set :document/mode? (not mode))))
+
+(defn toggle-highlight-recent-blocks!
+  []
+  (let [value @(:ui/toggle-highlight-recent-blocks? @state)]
+    (set-state! :ui/toggle-highlight-recent-blocks? (not value))))
 
 (defn shortcut-tooltip-enabled?
   []
@@ -1812,18 +1845,6 @@ Similar to re-frame subscriptions"
   ([] (open-settings! true))
   ([active-tab] (set-state! :ui/settings-open? active-tab)))
 
-(defn get-events-chan
-  []
-  (:system/events @state))
-
-(defn pub-event!
-  {:malli/schema [:=> [:cat vector?] :any]}
-  [payload]
-  (let [d (p/deferred)
-        chan (get-events-chan)]
-    (async/put! chan [payload d])
-    d))
-
 (defn sidebar-add-block!
   [repo db-id block-type]
   (when (not (util/sm-breakpoint?))
@@ -1939,7 +1960,7 @@ Similar to re-frame subscriptions"
       (when (and edit-input-id block
                  (or
                   (publishing-enable-editing?)
-                  (not @publishing?)))
+                  (not common-config/PUBLISHING)))
         (let [block-element (gdom/getElement (string/replace edit-input-id "edit-block" "ls-block"))
               container (util/get-block-container block-element)
               block (if container
@@ -2024,7 +2045,7 @@ Similar to re-frame subscriptions"
   ([theme?] (get-enabled?-installed-plugins theme? true false false))
   ([theme? enabled? include-unpacked? include-all?]
    (filterv
-    #(and (if include-unpacked? true (:iir %))
+    #(and (if include-unpacked? true (or (:webMode %) (:iir %)))
           (if-not (boolean? enabled?) true (= (not enabled?) (boolean (get-in % [:settings :disabled]))))
           (or include-all? (if (boolean? theme?) (= (boolean theme?) (:theme %)) true)))
     (vals (:plugin/installed-plugins @state)))))
@@ -2276,10 +2297,11 @@ Similar to re-frame subscriptions"
 
 (defn sub-async-query-loading
   [k]
-  (assert (some? k))
-  (rum/react
-   (r/cached-derived-atom (:db/async-query-loading @state) [(get-current-repo) ::async-query (str k)]
-                          (fn [s] (contains? s (str k))))))
+  (assert (or (string? k) (uuid? k)))
+  (let [k* (str k)]
+    (rum/react
+     (r/cached-derived-atom (:db/async-query-loading @state) [(get-current-repo) ::async-query k*]
+                            (fn [s] (contains? s k*))))))
 
 (defn clear-async-query-state!
   []
@@ -2352,3 +2374,18 @@ Similar to re-frame subscriptions"
   [ref-entity]
   (let [refs! (:editor/block-refs @state)]
     (swap! refs! conj ref-entity)))
+
+(defn get-highlight-recent-days
+  []
+  @(:ui/highlight-recent-days @state))
+
+(defn set-highlight-recent-days!
+  [days]
+  (prn :debug :set :days days)
+  (reset! (:ui/highlight-recent-days @state) days)
+  (storage/set :ui/highlight-recent-days days))
+
+(defn set-rtc-enabled!
+  [value]
+  (storage/set :logseq-rtc-enabled value)
+  (set-state! :feature/enable-rtc? value))

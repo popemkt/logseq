@@ -1,46 +1,57 @@
 (ns logseq.db.frontend.entity-util
-  "Lower level entity util fns used across db namespaces"
-  (:require [datascript.core :as d]
-            [clojure.string :as string]
-            [logseq.common.config :as common-config])
+  "Lower level entity util fns for DB graphs"
+  (:require [clojure.string :as string]
+            [datascript.db]
+            [datascript.impl.entity :as de])
   (:refer-clojure :exclude [object?]))
 
-(defn db-based-graph?
-  "Whether the current graph is db-only"
-  [db]
-  (when db
-    (= "db" (:kv/value (d/entity db :logseq.kv/db-type)))))
+(defn- has-tag?
+  [entity tag-ident]
+  (when (or (map? entity) (de/entity? entity))
+    (some (fn [t]
+            (or (keyword-identical? (:db/ident t) tag-ident)
+                (keyword-identical? t tag-ident)))
+          (:block/tags entity))))
 
-(defn page?
-  [block]
-  (contains? #{"page" "journal" "whiteboard" "class" "property" "hidden"}
-             (:block/type block)))
+(comment
+  (require '[logseq.common.profile :as c.p])
+  (do (vreset! c.p/*key->call-count {})
+      (vreset! c.p/*key->time-sum {}))
+  (c.p/profile-fn! has-tag? :print-on-call? false))
 
 (defn internal-page?
   [entity]
-  (= (:block/type entity) "page"))
+  (has-tag? entity :logseq.class/Page))
 
 (defn class?
   [entity]
-  (= (:block/type entity) "class"))
+  (has-tag? entity :logseq.class/Tag))
 
 (defn property?
   [entity]
-  (= (:block/type entity) "property"))
-
-(defn closed-value?
-  [entity]
-  (= (:block/type entity) "closed value"))
+  (has-tag? entity :logseq.class/Property))
 
 (defn whiteboard?
   "Given a page entity or map, check if it is a whiteboard page"
-  [page]
-  (= (:block/type page) "whiteboard"))
+  [entity]
+  (has-tag? entity :logseq.class/Whiteboard))
+
+(defn closed-value?
+  [entity]
+  (some? (:block/closed-value-property entity)))
 
 (defn journal?
   "Given a page entity or map, check if it is a journal page"
-  [page]
-  (= (:block/type page) "journal"))
+  [entity]
+  (has-tag? entity :logseq.class/Journal))
+
+(defn page?
+  [entity]
+  (or (internal-page? entity)
+      (class? entity)
+      (property? entity)
+      (whiteboard? entity)
+      (journal? entity)))
 
 (defn asset?
   "Given an entity or map, check if it is an asset block"
@@ -50,12 +61,23 @@
 
 (defn hidden?
   [page]
-  (when page
-    (if (string? page)
-      (or (string/starts-with? page "$$$")
-          (= common-config/favorites-page-name page))
-      (= (:block/type page) "hidden"))))
+  (boolean
+   (when page
+     (if (string? page)
+       (string/starts-with? page "$$$")
+       (when (or (map? page) (de/entity? page))
+         (:logseq.property/hide? page))))))
 
 (defn object?
   [node]
   (seq (:block/tags node)))
+
+(defn get-entity-types
+  "Get entity types from :block/tags"
+  [entity]
+  (let [ident->type {:logseq.class/Tag :class
+                     :logseq.class/Property :property
+                     :logseq.class/Journal :journal
+                     :logseq.class/Whiteboard :whiteboard
+                     :logseq.class/Page :page}]
+    (set (map #(ident->type (:db/ident %)) (:block/tags entity)))))

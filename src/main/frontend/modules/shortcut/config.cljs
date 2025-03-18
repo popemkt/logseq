@@ -1,34 +1,34 @@
 (ns frontend.modules.shortcut.config
-  (:require [clojure.string :as str]
+  (:require [clojure.data :as data]
+            [clojure.string :as string]
+            [electron.ipc :as ipc]
+            [frontend.commands :as commands]
             [frontend.components.commit :as commit]
-            [frontend.extensions.srs.handler :as srs]
+            [frontend.config :as config]
+            [frontend.dicts :as dicts]
             [frontend.extensions.pdf.utils :as pdf-utils]
+            [frontend.extensions.srs.handler :as srs]
             [frontend.handler.config :as config-handler]
             [frontend.handler.editor :as editor-handler]
-            [frontend.handler.paste :as paste-handler]
+            [frontend.handler.export :as export-handler]
             [frontend.handler.history :as history]
+            [frontend.handler.journal :as journal-handler]
+            [frontend.handler.jump :as jump-handler]
             [frontend.handler.notification :as notification]
             [frontend.handler.page :as page-handler]
+            [frontend.handler.paste :as paste-handler]
+            [frontend.handler.plugin :as plugin-handler]
+            [frontend.handler.plugin-config :as plugin-config-handler]
             [frontend.handler.route :as route-handler]
-            [frontend.handler.journal :as journal-handler]
             [frontend.handler.search :as search-handler]
             [frontend.handler.ui :as ui-handler]
-            [frontend.handler.plugin :as plugin-handler]
-            [frontend.handler.export :as export-handler]
             [frontend.handler.whiteboard :as whiteboard-handler]
-            [frontend.handler.plugin-config :as plugin-config-handler]
             [frontend.handler.window :as window-handler]
-            [frontend.handler.jump :as jump-handler]
-            [frontend.dicts :as dicts]
             [frontend.modules.shortcut.before :as m]
             [frontend.state :as state]
             [frontend.util :refer [mac?] :as util]
-            [frontend.commands :as commands]
-            [frontend.config :as config]
-            [electron.ipc :as ipc]
-            [promesa.core :as p]
-            [clojure.data :as data]
-            [medley.core :as medley]))
+            [medley.core :as medley]
+            [promesa.core :as p]))
 
 (defn- search
   [mode]
@@ -358,31 +358,37 @@
                                              :fn      #(state/pub-event! [:editor/toggle-own-number-list (state/get-selection-block-ids)])}
 
    :editor/add-property                     {:binding (if mac? "mod+p" "ctrl+alt+p")
+                                             :db-graph? true
                                              :fn      (fn [e]
                                                         (when e (util/stop e))
                                                         (state/pub-event! [:editor/new-property {}]))}
 
    :editor/add-property-deadline            {:binding "p d"
+                                             :db-graph? true
                                              :selection? true
                                              :fn      (fn []
                                                         (state/pub-event! [:editor/new-property {:property-key "Deadline"}]))}
 
    :editor/add-property-status              {:binding "p s"
+                                             :db-graph? true
                                              :selection? true
                                              :fn      (fn []
                                                         (state/pub-event! [:editor/new-property {:property-key "Status"}]))}
 
    :editor/add-property-priority            {:binding "p p"
+                                             :db-graph? true
                                              :selection? true
                                              :fn      (fn []
                                                         (state/pub-event! [:editor/new-property {:property-key "Priority"}]))}
 
    :editor/add-property-icon                {:binding "p i"
+                                             :db-graph? true
                                              :selection? true
                                              :fn      (fn []
                                                         (state/pub-event! [:editor/new-property {:property-key "Icon"}]))}
 
    :editor/toggle-display-all-properties    {:binding "p t"
+                                             :db-graph? true
                                              :fn      ui-handler/toggle-show-empty-hidden-properties!}
 
    :ui/toggle-brackets                      {:binding "t b"
@@ -456,13 +462,11 @@
                                              :binding []}
 
    :graph/db-add                            {:fn #(state/pub-event! [:graph/new-db-graph])
-                                             ;; TODO: Remove this once feature is released
-                                             :inactive (not config/db-graph-enabled?)
                                              :binding false}
 
    :graph/db-save                           {:fn #(state/pub-event! [:graph/save-db-to-disk])
-                                             ;; TODO: Remove `(not config/db-graph-enabled?)` check once feature is released
-                                             :inactive (or (not config/db-graph-enabled?) (not (util/electron?)))
+                                             :inactive (not (util/electron?))
+                                             :db-graph? true
                                              :binding "mod+s"}
 
    :graph/re-index                          {:fn      (fn []
@@ -509,6 +513,8 @@
 
    :ui/toggle-document-mode                 {:binding "t d"
                                              :fn      state/toggle-document-mode!}
+
+   :ui/highlight-recent-blocks              {:fn      state/toggle-highlight-recent-blocks!}
 
    :ui/toggle-settings                      {:binding (if mac? ["t s" "mod+,"] "t s")
                                              :fn      ui-handler/toggle-settings-modal!}
@@ -566,9 +572,13 @@
                                              :inactive (not config/lsp-enabled?)
                                              :fn       plugin-handler/goto-plugins-dashboard!}
 
-   :ui/install-plugins-from-file            {:binding  false
+   :ui/install-plugins-from-file            {:binding  []
                                              :inactive (not (config/plugin-config-enabled?))
                                              :fn       plugin-config-handler/open-replace-plugins-modal}
+
+   :ui/install-plugin-from-github           {:binding  []
+                                             :inactive (or (not config/lsp-enabled?) (not (util/electron?)))
+                                             :fn       plugin-config-handler/open-install-plugin-from-github-modal}
 
    :ui/clear-all-notifications              {:binding []
                                              :fn      :frontend.handler.notification/clear-all!}
@@ -601,7 +611,28 @@
 
    :dev/show-page-ast {:binding []
                        :inactive (not (state/developer-mode?))
-                       :fn :frontend.handler.common.developer/show-page-ast}})
+                       :fn :frontend.handler.common.developer/show-page-ast}
+
+   :misc/export-block-data {:binding []
+                            :db-graph? true
+                            :fn :frontend.handler.db-based.export/export-block-data}
+
+   :misc/export-page-data {:binding []
+                           :db-graph? true
+                           :fn :frontend.handler.db-based.export/export-page-data}
+
+   :misc/export-graph-ontology-data {:binding []
+                                     :db-graph? true
+                                     :fn :frontend.handler.db-based.export/export-graph-ontology-data}
+
+   :misc/import-edn-data {:binding []
+                          :db-graph? true
+                          :fn :frontend.handler.db-based.export/import-edn-data}
+
+   :dev/validate-db   {:binding []
+                       :db-graph? true
+                       :inactive (not (state/developer-mode?))
+                       :fn :frontend.handler.common.developer/validate-db}})
 
 (let [keyboard-commands
       {::commands (set (keys all-built-in-keyboard-shortcuts))
@@ -615,10 +646,22 @@
   marked as ^:export for advanced mode"
   [keyword-fn]
   (fn []
-    (if-let [resolved-fn (some-> (find-ns-obj (namespace keyword-fn))
+    (if-let [resolved-fn (some-> (namespace keyword-fn)
+                                 ;; export is reserved word
+                                 (string/replace-first ".export" ".export$")
+                                 find-ns-obj
                                  (aget (munge (name keyword-fn))))]
       (resolved-fn)
       (throw (ex-info (str "Unable to resolve " keyword-fn " to a fn") {})))))
+
+(defn- wrap-fn-with-db-graph-only-warning
+  "Wraps DB graph only commands so they are only run in DB graphs and warned
+   when in file graphs"
+  [f]
+  (fn []
+    (if (config/db-based-graph? (state/get-current-repo))
+      (f)
+      (notification/show! "This command is only for DB graphs." :warning true nil 3000))))
 
 (defn- wrap-fn-with-file-graph-only-warning
   "Wraps file graph only commands so they are only run in file graphs and warned
@@ -647,9 +690,12 @@
                    (assoc v :fn (resolve-fn (:fn v)))
                    v)]))
        (map (fn [[k v]]
-              [k (if (:file-graph? v)
-                   (update v :fn wrap-fn-with-file-graph-only-warning)
-                   v)]))
+              [k (cond (:file-graph? v)
+                       (update v :fn wrap-fn-with-file-graph-only-warning)
+                       (:db-graph? v)
+                       (update v :fn wrap-fn-with-db-graph-only-warning)
+                       :else
+                       v)]))
        (into {})))
 
 ;; This is the only var that should be publicly expose :fn functionality
@@ -777,6 +823,7 @@
           :go/next-journal
           :go/prev-journal
           :ui/toggle-document-mode
+          :ui/highlight-recent-blocks
           :ui/toggle-settings
           :ui/toggle-right-sidebar
           :ui/toggle-left-sidebar
@@ -797,15 +844,21 @@
           :ui/select-theme-color
           :ui/goto-plugins
           :ui/install-plugins-from-file
+          :ui/install-plugin-from-github
           :editor/toggle-open-blocks
           :ui/clear-all-notifications
           :git/commit
           :sidebar/close-top
+          :misc/export-block-data
+          :misc/export-page-data
+          :misc/export-graph-ontology-data
+          :misc/import-edn-data
           :dev/show-block-data
           :dev/show-block-ast
           :dev/show-page-data
           :dev/show-page-ast
           :dev/replace-graph-with-db-file
+          :dev/validate-db
           :ui/customize-appearance])
         (with-meta {:before m/enable-when-not-editing-mode!}))
 
@@ -921,7 +974,7 @@
      :editor/toggle-open-blocks
      :editor/toggle-number-list
      :ui/toggle-wide-mode
-     :ui/toggle-document-mode
+     :ui/highlight-recent-blocks
      :ui/toggle-brackets
      :ui/toggle-theme
      :ui/toggle-left-sidebar
@@ -988,11 +1041,16 @@
      :auto-complete/shift-complete
      :auto-complete/meta-complete
      :git/commit
+     :misc/export-block-data
+     :misc/export-page-data
+     :misc/export-graph-ontology-data
+     :misc/import-edn-data
      :dev/show-block-data
      :dev/show-block-ast
      :dev/show-page-data
      :dev/show-page-ast
      :dev/replace-graph-with-db-file
+     :dev/validate-db
      :ui/clear-all-notifications]
 
     :shortcut.category/plugins
@@ -1017,7 +1075,7 @@
    (swap! *config assoc-in [handler-id id] shortcut-map)
    (when-not config-only?
      (swap! *shortcut-cmds assoc id (:cmd shortcut-map))
-     (let [plugin? (str/starts-with? (str id) ":plugin.")
+     (let [plugin? (string/starts-with? (str id) ":plugin.")
            category (or (:category shortcut-map)
                         (if plugin?
                           :shortcut.category/plugins

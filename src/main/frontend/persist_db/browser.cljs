@@ -3,18 +3,18 @@
 
    This interface uses clj data format as input."
   (:require ["comlink" :as Comlink]
-            [frontend.persist-db.protocol :as protocol]
-            [frontend.config :as config]
-            [promesa.core :as p]
-            [frontend.util :as util]
-            [frontend.handler.notification :as notification]
-            [cljs-bean.core :as bean]
-            [frontend.state :as state]
             [electron.ipc :as ipc]
-            [frontend.handler.worker :as worker-handler]
-            [logseq.db :as ldb]
+            [frontend.config :as config]
+            [frontend.date :as date]
             [frontend.db.transact :as db-transact]
-            [frontend.date :as date]))
+            [frontend.handler.assets :as assets-handler]
+            [frontend.handler.notification :as notification]
+            [frontend.handler.worker :as worker-handler]
+            [frontend.persist-db.protocol :as protocol]
+            [frontend.state :as state]
+            [frontend.util :as util]
+            [logseq.db :as ldb]
+            [promesa.core :as p]))
 
 (defonce *worker state/*db-worker)
 
@@ -84,6 +84,35 @@
                  (ldb/write-transit-str context))
       (notification/show! "Latest change was not saved! Please restart the application." :error))))
 
+(defn- with-write-transit-str
+  [p]
+  (p/chain p ldb/write-transit-str))
+
+(deftype Main []
+  Object
+  (readAsset [_this repo asset-block-id asset-type]
+    (assets-handler/<read-asset repo asset-block-id asset-type))
+  (writeAsset [_this repo asset-block-id asset-type data]
+    (assets-handler/<write-asset repo asset-block-id asset-type data))
+  (unlinkAsset [_this repo asset-block-id asset-type]
+    (assets-handler/<unlink-asset repo asset-block-id asset-type))
+  (get-all-asset-file-paths [_this repo]
+    (with-write-transit-str
+      (assets-handler/<get-all-asset-file-paths repo)))
+  (get-asset-file-metadata [_this repo asset-block-id asset-type]
+    (with-write-transit-str
+      (assets-handler/<get-asset-file-metadata repo asset-block-id asset-type)))
+  (rtc-upload-asset [_this repo asset-block-uuid-str asset-type checksum put-url]
+    (with-write-transit-str
+      (js/Promise.
+       (assets-handler/new-task--rtc-upload-asset repo asset-block-uuid-str asset-type checksum put-url))))
+  (rtc-download-asset [_this repo asset-block-uuid-str asset-type get-url]
+    (with-write-transit-str
+      (js/Promise.
+       (assets-handler/new-task--rtc-download-asset repo asset-block-uuid-str asset-type get-url))))
+  (testFn [_this]
+    (prn :debug :works)))
+
 (defn start-db-worker!
   []
   (when-not util/node-test?
@@ -93,6 +122,7 @@
           worker (js/Worker. (str worker-url "?electron=" (util/electron?) "&publishing=" config/publishing?))
           wrapped-worker (Comlink/wrap worker)
           t1 (util/time-ms)]
+      (Comlink/expose (Main.) worker)
       (worker-handler/handle-message! worker wrapped-worker)
       (reset! *worker wrapped-worker)
       (-> (p/let [_ (.init wrapped-worker config/RTC-WS-URL)
@@ -147,8 +177,7 @@
   (<list-db [_this]
     (when-let [^js sqlite @*worker]
       (-> (.listDB sqlite)
-          (p/then (fn [result]
-                    (bean/->clj result)))
+          (p/then ldb/read-transit-str)
           (p/catch sqlite-error-handler))))
 
   (<unsafe-delete [_this repo]
@@ -159,13 +188,13 @@
     (when-let [^js sqlite @*worker]
       (.releaseAccessHandles sqlite repo)))
 
-  (<fetch-initial-data [_this repo _opts]
+  (<fetch-initial-data [_this repo opts]
     (when-let [^js sqlite @*worker]
       (-> (p/let [db-exists? (.dbExists sqlite repo)
                   disk-db-data (when-not db-exists? (ipc/ipc :db-get repo))
                   _ (when disk-db-data
                       (.importDb sqlite repo disk-db-data))
-                  _ (.createOrOpenDB sqlite repo (ldb/write-transit-str {}))]
+                  _ (.createOrOpenDB sqlite repo (ldb/write-transit-str opts))]
             (.getInitialData sqlite repo))
           (p/catch sqlite-error-handler))))
 

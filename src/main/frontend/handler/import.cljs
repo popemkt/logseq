@@ -1,90 +1,28 @@
 (ns frontend.handler.import
   "Fns related to import from external services"
-  (:require [clojure.edn :as edn]
-            [clojure.walk :as walk]
-            [frontend.external :as external]
-            [frontend.handler.file :as file-handler]
-            [frontend.handler.repo :as repo-handler]
-            [frontend.handler.file-based.repo :as file-repo-handler]
-            [frontend.state :as state]
-            [frontend.date :as date]
-            [frontend.config :as config]
+  (:require [cljs.core.async.interop :refer [p->c]]
+            [clojure.core.async :as async]
+            [clojure.edn :as edn]
             [clojure.string :as string]
+            [clojure.walk :as walk]
+            [frontend.config :as config]
             [frontend.db :as db]
-            [frontend.format.mldoc :as mldoc]
+            [frontend.db.async :as db-async]
             [frontend.format.block :as block]
-            [logseq.graph-parser.mldoc :as gp-mldoc]
-            [logseq.common.util :as common-util]
-            [logseq.graph-parser.whiteboard :as gp-whiteboard]
-            [logseq.common.util.date-time :as date-time-util]
-            [frontend.handler.page :as page-handler]
+            [frontend.format.mldoc :as mldoc]
             [frontend.handler.editor :as editor]
             [frontend.handler.notification :as notification]
-            [frontend.util :as util]
-            [clojure.core.async :as async]
-            [cljs.core.async.interop :refer [p->c]]
-            [medley.core :as medley]
+            [frontend.handler.page :as page-handler]
+            [frontend.handler.repo :as repo-handler]
             [frontend.persist-db :as persist-db]
-            [promesa.core :as p]
-            [frontend.db.async :as db-async]
-            [logseq.db.sqlite.util :as sqlite-util]))
-
-(defn index-files!
-  "Create file structure, then parse into DB (client only)"
-  [repo files finish-handler]
-  (let [titles (->> files
-                    (map :title)
-                    (remove nil?))
-        files (map (fn [file]
-                     (let [title (:title file)
-                           journal? (date/valid-journal-title? title)]
-                       (when-let [text (:text file)]
-                         (let [title (or
-                                      (when journal?
-                                        (date/journal-title->default title))
-                                      (string/replace title "/" "-"))
-                               title (-> (common-util/page-name-sanity title)
-                                         (string/replace "\n" " "))
-                               path (str (if journal?
-                                           (config/get-journals-directory)
-                                           (config/get-pages-directory))
-                                         "/"
-                                         title
-                                         ".md")]
-                           {:file/path path
-                            :file/content text}))))
-                files)
-        files (remove nil? files)]
-    (file-repo-handler/parse-files-and-load-to-db! repo files nil)
-    (let [files (->> (map (fn [{:file/keys [path content]}] (when path [path content])) files)
-                     (remove nil?))]
-      (file-handler/alter-files repo files {:add-history? false
-                                            :update-db? false
-                                            :update-status? false
-                                            :finish-handler finish-handler}))
-    (let [journal-pages-tx (let [titles (filter date/normalize-journal-title titles)]
-                             (map
-                               (fn [title]
-                                 (let [day (date/journal-title->int title)
-                                       journal-title (date-time-util/int->journal-title day (state/get-date-formatter))]
-                                   (when journal-title
-                                     (let [page-name (util/page-name-sanity-lc journal-title)]
-                                       {:block/name page-name
-                                        :block/type "journal"
-                                        :block/journal-day day}))))
-                               titles))]
-      (when (seq journal-pages-tx)
-        (db/transact! repo journal-pages-tx)))))
-
-;; TODO: replace files with page blocks transaction
-(defn import-from-roam-json!
-  [data finished-ok-handler]
-  (when-let [repo (state/get-current-repo)]
-    (let [files (external/to-markdown-files :roam data {})]
-      (index-files! repo files
-                    (fn []
-                      (finished-ok-handler))))))
-
+            [frontend.state :as state]
+            [frontend.util :as util]
+            [logseq.db :as ldb]
+            [logseq.db.sqlite.util :as sqlite-util]
+            [logseq.graph-parser.mldoc :as gp-mldoc]
+            [logseq.graph-parser.whiteboard :as gp-whiteboard]
+            [medley.core :as medley]
+            [promesa.core :as p]))
 
 ;;; import OPML files
 (defn import-from-opml!
@@ -184,7 +122,7 @@
   (let [imported-chan (async/promise-chan)]
     (try
       (let [blocks (->> (:blocks data)
-                        (mapv tree-translator-fn )
+                        (mapv tree-translator-fn)
                         (sort-by :title)
                         (medley/indexed))
             job-chan (async/to-chan! blocks)]
@@ -199,8 +137,8 @@
               (create-page-with-exported-tree! block)
               (recur))
             (let [result (async/<! (p->c (db-async/<get-all-referenced-blocks-uuid (state/get-current-repo))))]
-                (editor/set-blocks-id! result)
-                (async/offer! imported-chan true)))))
+              (editor/set-blocks-id! result)
+              (async/offer! imported-chan true)))))
 
       (catch :default e
         (notification/show! (str "Error happens when importing:\n" e) :error)
@@ -234,7 +172,7 @@
      (p/do!
       (persist-db/<import-db graph buffer)
       (state/add-repo! {:url graph})
-      (repo-handler/restore-and-setup-repo! graph)
+      (repo-handler/restore-and-setup-repo! graph {:import-type :sqlite-db})
       (state/set-current-repo! graph)
       (persist-db/<export-db graph {})
       (db/transact! graph (sqlite-util/import-tx :sqlite-db))
@@ -250,9 +188,9 @@
   [raw finished-ok-handler]
   (try
     (let [data (edn/read-string raw)]
-     (async/go
-       (async/<! (import-from-tree! data tree-vec-translate-edn))
-       (finished-ok-handler nil)))
+      (async/go
+        (async/<! (import-from-tree! data tree-vec-translate-edn))
+        (finished-ok-handler nil)))
     (catch :default e
       (js/console.error e)
       (notification/show!
@@ -292,3 +230,16 @@
     (async/go
       (async/<! (import-from-tree! clj-data tree-vec-translate-json))
       (finished-ok-handler nil)))) ;; it was designed to accept a list of imported page names but now deprecated
+
+(defn import-from-debug-transit!
+  [bare-graph-name raw finished-ok-handler]
+  (let [graph (str config/db-version-prefix bare-graph-name)
+        datoms (ldb/read-transit-str raw)]
+    (p/do!
+     (persist-db/<new graph {:import-type :debug-transit
+                             :datoms datoms})
+     (state/add-repo! {:url graph})
+     (repo-handler/restore-and-setup-repo! graph {:import-type :debug-transit})
+     (db/transact! graph (sqlite-util/import-tx :debug-transit))
+     (state/set-current-repo! graph)
+     (finished-ok-handler nil))))

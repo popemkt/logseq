@@ -1,6 +1,8 @@
 (ns logseq.common.util.date-time
   "cljs-time util fns for deps"
-  (:require [cljs-time.format :as tf]
+  (:require [cljs-time.coerce :as tc]
+            [cljs-time.core :as t]
+            [cljs-time.format :as tf]
             [clojure.string :as string]
             [logseq.common.util :as common-util]))
 
@@ -37,6 +39,14 @@
   [date date-formatter]
   (when date-formatter
     (tf/unparse (tf/formatter date-formatter) date)))
+
+(defn int->local-date
+  [day]
+  (let [s (str day)
+        year (js/parseInt (subs s 0 4))
+        month (dec (js/parseInt (subs s 4 6)))
+        day (js/parseInt (subs s 6))]
+    (js/Date. year month day)))
 
 (defn int->journal-title
   [day date-formatter]
@@ -79,3 +89,19 @@
   [date]
   (parse-long
    (string/replace (ymd date) "/" "")))
+
+(defn journal-day->ms
+  "Converts a journal's :block/journal-day integer into milliseconds"
+  [day]
+  (when day
+    (-> (tf/parse (tf/formatter "yyyyMMdd") (str day))
+        (tc/to-long))))
+
+(defn ms->journal-day
+  "Converts a milliseconds timestamp to the nearest :block/journal-day"
+  [ms]
+  (some->> ms
+           tc/from-long
+           t/to-default-time-zone
+           (tf/unparse (tf/formatter "yyyyMMdd"))
+           parse-long))

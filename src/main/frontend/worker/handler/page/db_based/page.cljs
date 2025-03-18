@@ -6,37 +6,41 @@
             [logseq.common.util :as common-util]
             [logseq.common.util.namespace :as ns-util]
             [logseq.db :as ldb]
+            [logseq.db.common.order :as db-order]
+            [logseq.db.common.property-util :as db-property-util]
             [logseq.db.frontend.class :as db-class]
-            [logseq.db.frontend.order :as db-order]
+            [logseq.db.frontend.entity-plus :as entity-plus]
+            [logseq.db.frontend.entity-util :as entity-util]
+            [logseq.db.frontend.malli-schema :as db-malli-schema]
             [logseq.db.frontend.property.build :as db-property-build]
-            [logseq.db.frontend.property.util :as db-property-util]
             [logseq.db.sqlite.util :as sqlite-util]
             [logseq.graph-parser.block :as gp-block]
             [logseq.graph-parser.text :as text]
             [logseq.outliner.validate :as outliner-validate]))
 
-(defn- build-page-tx [conn properties page {:keys [whiteboard? class? tags]}]
+(defn- build-page-tx [db properties page {:keys [whiteboard? class? tags]}]
   (when (:block/uuid page)
-    (let [page (assoc page :block/type (cond class? "class"
-                                             whiteboard? "whiteboard"
-                                             (:block/type page) (:block/type page)
-                                             :else "page"))
-          page' (cond-> page
-                  (seq tags)
-                  (update :block/tags
-                          (fnil into [])
-                          (mapv (fn [tag]
-                                  (let [v (if (uuid? tag)
-                                            (d/entity @conn [:block/uuid tag])
-                                            tag)]
-                                    (cond
-                                      (de/entity? v)
-                                      (:db/id v)
-                                      (map? v)
-                                      (:db/id v)
-                                      :else
-                                      v)))
-                                tags)))
+    (let [type-tag (cond class? :logseq.class/Tag
+                         whiteboard? :logseq.class/Whiteboard
+                         :else :logseq.class/Page)
+          tags' (if (:block/journal-day page) tags (conj tags type-tag))
+          page' (update page :block/tags
+                        (fnil into [])
+                        (mapv (fn [tag]
+                                (let [v (if (uuid? tag)
+                                          (d/entity db [:block/uuid tag])
+                                          tag)]
+                                  (cond (de/entity? v)
+                                        (:db/id v)
+                                        ;; tx map
+                                        (map? v)
+                                        ;; Handle adding :db/ident if a new tag
+                                        (if (d/entity db [:block/uuid (:block/uuid v)])
+                                          v
+                                          (db-class/build-new-class db v))
+                                        :else
+                                        v)))
+                              tags'))
           property-vals-tx-m
           ;; Builds property values for built-in properties like logseq.property.pdf/file
           (db-property-build/build-property-values-tx-m
@@ -48,7 +52,12 @@
                         (when (db-property-util/built-in-has-ref-value? k)
                           [k v])))
                 (into {})))]
-      (cond-> [(if class? (db-class/build-new-class @conn page') page')]
+      (cond-> (if class?
+                [(merge (db-class/build-new-class db page')
+                        ;; FIXME: new pages shouldn't have db/ident but converting property to tag still relies on this
+                        (select-keys page' [:db/ident]))
+                 [:db/retract [:block/uuid (:block/uuid page)] :block/tags :logseq.class/Page]]
+                [page'])
         (seq property-vals-tx-m)
         (into (vals property-vals-tx-m))
         true
@@ -67,15 +76,14 @@
     title))
 
 (defn build-first-block-tx
-  [page-uuid format]
+  [page-uuid]
   (let [page-id [:block/uuid page-uuid]]
     [(sqlite-util/block-with-timestamps
       {:block/uuid (ldb/new-block-id)
        :block/page page-id
        :block/parent page-id
        :block/order (db-order/gen-key nil nil)
-       :block/title ""
-       :block/format format})]))
+       :block/title ""})]))
 
 (defn- get-page-by-parent-name
   [db parent-title child-title]
@@ -95,10 +103,12 @@
 
 (defn- split-namespace-pages
   [db page date-formatter]
-  (let [{:block/keys [title] block-uuid :block/uuid block-type :block/type} page]
+  (let [{:block/keys [title] block-uuid :block/uuid} page]
     (->>
-     (if (and (contains? #{"page" "class"} block-type) (ns-util/namespace-page? title))
-       (let [class? (= block-type "class")
+     (if (and (or (entity-util/class? page)
+                  (entity-util/page? page))
+              (ns-util/namespace-page? title))
+       (let [class? (entity-util/class? page)
              parts (->> (string/split title ns-util/parent-re)
                         (map string/trim)
                         (remove string/blank?))
@@ -110,12 +120,10 @@
                                     (ldb/get-page db part)
                                     (get-page-by-parent-name db (nth parts (dec idx)) part))
                              result (or page
-                                        (when last-part? (ldb/get-page db part))
-                                        (-> (gp-block/page-name->map part db true date-formatter
-                                                                     {:page-uuid (when last-part? block-uuid)
-                                                                      :skip-existing-page-check? true
-                                                                      :class? class?})
-                                            (assoc :block/format :markdown)))]
+                                        (gp-block/page-name->map part db true date-formatter
+                                                                 {:page-uuid (when last-part? block-uuid)
+                                                                  :skip-existing-page-check? true
+                                                                  :class? class?}))]
                          result))
                      parts))]
          (cond
@@ -157,59 +165,88 @@
        [page])
      (remove nil?))))
 
-(defn create!
-  [conn title*
-   {:keys [create-first-block? properties uuid persist-op? whiteboard? class? today-journal? split-namespace?]
+(defn create
+  "Pure function without side effects"
+  [db title*
+   {:keys [create-first-block? properties uuid persist-op? whiteboard?
+           class? today-journal? split-namespace? skip-existing-page-check?
+           created-by]
     :or   {create-first-block?      true
            properties               nil
            uuid                     nil
-           persist-op?              true}
+           persist-op?              true
+           skip-existing-page-check? false}
     :as options}]
-  (let [db @conn
-        date-formatter (:logseq.property.journal/title-format (d/entity db :logseq.class/Journal))
+  (let [date-formatter (:logseq.property.journal/title-format (entity-plus/entity-memoized db :logseq.class/Journal))
         title (sanitize-title title*)
-        type (cond class?
-                   "class"
-                   whiteboard?
-                   "whiteboard"
-                   today-journal?
-                   "journal"
-                   :else
-                   "page")]
-    (when-not (ldb/page-exists? db title type)
-      (let [format    :markdown
-            page      (-> (gp-block/page-name->map title @conn true date-formatter
-                                                   {:class? class?
-                                                    :page-uuid (when (uuid? uuid) uuid)
-                                                    :skip-existing-page-check? true})
-                          (assoc :block/format format))
+        types (cond class?
+                    #{:logseq.class/Tag}
+                    whiteboard?
+                    #{:logseq.class/Whiteboard}
+                    today-journal?
+                    #{:logseq.class/Journal}
+                    :else
+                    #{:logseq.class/Page})]
+    (if-let [existing-page-id (first (ldb/page-exists? db title types))]
+      (let [existing-page (d/entity db existing-page-id)
+            tx-meta {:persist-op? persist-op?
+                     :outliner-op :save-block}]
+        (when (and class?
+                   (not (ldb/class? existing-page))
+                   (or (ldb/property? existing-page) (ldb/internal-page? existing-page)))
+          ;; Convert existing user property or page to class
+          (let [tx-data [(merge (db-class/build-new-class db (select-keys existing-page [:block/title :block/uuid :block/created-at]))
+                                (select-keys existing-page [:db/ident]))
+                         [:db/retract [:block/uuid (:block/uuid existing-page)] :block/tags :logseq.class/Page]]]
+            {:tx-meta tx-meta
+             :tx-data tx-data})))
+      (let [page      (gp-block/page-name->map title db true date-formatter
+                                               {:class? class?
+                                                :page-uuid (when (uuid? uuid) uuid)
+                                                :skip-existing-page-check? (if (some? skip-existing-page-check?)
+                                                                             skip-existing-page-check?
+                                                                             true)
+                                                :created-by created-by})
             [page parents] (if (and (text/namespace-page? title) split-namespace?)
                              (let [pages (split-namespace-pages db page date-formatter)]
                                [(last pages) (butlast pages)])
                              [page nil])]
-        (when page
+        (when (and page (or (nil? (:db/ident page))
+                            ;; New page creation must not override built-in entities
+                            (not (db-malli-schema/internal-ident? (:db/ident page)))))
           ;; Don't validate journal names because they can have '/'
-          (when (not= "journal" type)
+          (when-not (or (contains? types :logseq.class/Journal)
+                        (contains? (set (:block/tags page)) :logseq.class/Journal))
             (outliner-validate/validate-page-title-characters (str (:block/title page)) {:node page})
             (doseq [parent parents]
               (outliner-validate/validate-page-title-characters (str (:block/title parent)) {:node parent})))
 
           (let [page-uuid (:block/uuid page)
-                page-txs  (build-page-tx conn properties page (select-keys options [:whiteboard? :class? :tags]))
+                page-txs  (build-page-tx db properties page (select-keys options [:whiteboard? :class? :tags]))
                 first-block-tx (when (and
-                                      (nil? (d/entity @conn [:block/uuid page-uuid]))
+                                      (nil? (d/entity db [:block/uuid page-uuid]))
                                       create-first-block?
                                       (not (or whiteboard? class?))
                                       page-txs)
-                                 (build-first-block-tx (:block/uuid (first page-txs)) format))
+                                 (build-first-block-tx (:block/uuid (first page-txs))))
                 txs      (concat
-                          parents
+                          ;; transact doesn't support entities
+                          (remove de/entity? parents)
                           page-txs
-                          first-block-tx)]
-            (when (seq txs)
-              (ldb/transact! conn txs (cond-> {:persist-op? persist-op?
-                                               :outliner-op :create-page}
-                                        today-journal?
-                                        (assoc :create-today-journal? true
-                                               :today-journal-name title))))
-            [title page-uuid]))))))
+                          first-block-tx)
+                tx-meta (cond-> {:persist-op? persist-op?
+                                 :outliner-op :create-page}
+                          today-journal?
+                          (assoc :create-today-journal? true
+                                 :today-journal-name title))]
+            {:tx-meta tx-meta
+             :tx-data txs
+             :title title
+             :page-uuid page-uuid}))))))
+
+(defn create!
+  [conn title opts]
+  (let [{:keys [tx-meta tx-data title page-uuid]} (create @conn title opts)]
+    (when (seq tx-data)
+      (d/transact! conn tx-data tx-meta)
+      [title page-uuid])))

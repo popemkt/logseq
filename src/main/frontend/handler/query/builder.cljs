@@ -23,6 +23,16 @@
                     "full text search"
                     "between"
                     "sample"])
+(def db-based-block-filters
+  ["tags"
+   "page reference"
+   "property"
+   "task"
+   "priority"
+   "page"
+   "full text search"
+   "between"
+   "sample"])
 
 (defn- vec-dissoc-item
   [vec idx]
@@ -137,11 +147,15 @@
     (and (vector? f) (= :priority (keyword (first f))))
     (vec (cons (symbol :priority) (map symbol (rest f))))
 
+    ;; Stringify task property values to support multi-word values like "In Review"
     (and (vector? f) (= :task (keyword (first f))))
-    (vec (cons (symbol :task) (map symbol (rest f))))
+    (vec (cons (symbol :task) (map str (rest f))))
 
     (and (vector? f) (= :page-ref (keyword (first f))))
     (->page-ref (second f))
+
+    (and (vector? f) (= :tags (keyword (first f))))
+    [(symbol :tags) (->page-ref (second f))]
 
     (and (vector? f) (= :page-tags (keyword (first f))))
     [(symbol :page-tags) (->page-ref (second f))]
@@ -150,7 +164,7 @@
     (into [(symbol :between)] (map ->page-ref (rest f)))
 
     ;; property key value
-    (and (vector? f) (= 3 (count f)) (contains? #{:page-property :property} (keyword (first f))))
+    (and (vector? f) (= 3 (count f)) (contains? #{:page-property :property :private-property} (keyword (first f))))
     (let [l (if (page-ref/page-ref? (str (last f)))
               (symbol (last f))
               (last f))]

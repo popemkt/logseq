@@ -1,22 +1,24 @@
 (ns frontend.ui
   "Main ns for reusable components"
-  (:require ["@logseq/react-tweet-embed" :as react-tweet-embed]
+  (:require ["@emoji-mart/data" :as emoji-data]
+            ["@logseq/react-tweet-embed" :as react-tweet-embed]
+            ["emoji-mart" :as emoji-mart]
             ["react-intersection-observer" :as react-intersection-observer]
             ["react-textarea-autosize" :as TextareaAutosize]
             ["react-tippy" :as react-tippy]
             ["react-transition-group" :refer [CSSTransition TransitionGroup]]
             ["react-virtuoso" :refer [Virtuoso VirtuosoGrid]]
-            ["@emoji-mart/data" :as emoji-data]
-            ["emoji-mart" :as emoji-mart]
             [cljs-bean.core :as bean]
             [clojure.string :as string]
             [electron.ipc :as ipc]
             [frontend.components.svg :as svg]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
+            [frontend.date :as date]
             [frontend.db-mixins :as db-mixins]
             [frontend.handler.notification :as notification]
             [frontend.handler.plugin :as plugin-handler]
+            [frontend.hooks :as hooks]
             [frontend.mixins :as mixins]
             [frontend.mobile.util :as mobile-util]
             [frontend.modules.shortcut.config :as shortcut-config]
@@ -32,11 +34,10 @@
             [lambdaisland.glogi :as log]
             [logseq.shui.icon.v2 :as shui.icon.v2]
             [logseq.shui.popup.core :as shui-popup]
+            [logseq.shui.ui :as shui]
             [medley.core :as medley]
             [promesa.core :as p]
-            [rum.core :as rum]
-            [logseq.shui.ui :as shui]
-            [frontend.date :as date]))
+            [rum.core :as rum]))
 
 (declare icon)
 
@@ -368,7 +369,7 @@
                       input)))
         [time set-time] (rum/use-state (time-fn))]
 
-    (rum/use-effect!
+    (hooks/use-effect!
      (fn []
        (let [timer (js/setInterval
                     #(set-time (time-fn)) (* 1000 30))]
@@ -511,42 +512,56 @@
            empty-placeholder
            item-render
            class
-           header]}]
+           header
+           grouped?]}]
   (let [*current-idx (get state ::current-idx)
-        *groups (atom #{})]
+        *groups (atom #{})
+        render-f (fn [matched]
+                   (for [[idx item] matched]
+                     (let [react-key (str idx)
+                           item-cp
+                           [:div.menu-link-wrap
+                            {:key react-key
+                             ;; mouse-move event to indicate that cursor moved by user
+                             :on-mouse-move  #(reset! *current-idx idx)}
+                            (let [chosen? (= @*current-idx idx)]
+                              (menu-link
+                               {:id (str "ac-" react-key)
+                                :tab-index "0"
+                                :class (when chosen? "chosen")
+                                ;; TODO: should have more tests on touch devices
+                                        ;:on-pointer-down #(util/stop %)
+                                :on-click (fn [e]
+                                            (util/stop e)
+                                            (when-not (:disabled? item)
+                                              (if (and (gobj/get e "shiftKey") on-shift-chosen)
+                                                (on-shift-chosen item)
+                                                (on-chosen item e))))}
+                               (if item-render (item-render item chosen?) item)))]]
+
+                       (let [group-name (and (fn? get-group-name) (get-group-name item))]
+                         (if (and group-name (not (contains? @*groups group-name)))
+                           (do
+                             (swap! *groups conj group-name)
+                             [:div
+                              [:div.ui__ac-group-name group-name]
+                              item-cp])
+                           item-cp)))))]
     [:div#ui__ac {:class class}
      (if (seq matched)
        [:div#ui__ac-inner.hide-scrollbar
         (when header header)
-        (for [[idx item] (medley/indexed matched)]
-          (let [react-key (str idx)
-                item-cp
-                [:div.menu-link-wrap
-                 {:key react-key
-                   ;; mouse-move event to indicate that cursor moved by user
-                  :on-mouse-move  #(reset! *current-idx idx)}
-                 (let [chosen? (= @*current-idx idx)]
-                   (menu-link
-                    {:id (str "ac-" react-key)
-                     :tab-index "0"
-                     :class (when chosen? "chosen")
-                       ;; TODO: should have more tests on touch devices
-                       ;:on-pointer-down #(util/stop %)
-                     :on-click (fn [e]
-                                 (util/stop e)
-                                 (if (and (gobj/get e "shiftKey") on-shift-chosen)
-                                   (on-shift-chosen item)
-                                   (on-chosen item e)))}
-                    (if item-render (item-render item chosen?) item)))]]
-
-            (let [group-name (and (fn? get-group-name) (get-group-name item))]
-              (if (and group-name (not (contains? @*groups group-name)))
-                (do
-                  (swap! *groups conj group-name)
+        (if grouped?
+          (let [*idx (atom -1)
+                inc-idx #(swap! *idx inc)]
+            (for [[group matched] (group-by :group matched)]
+              (let [matched' (doall (map (fn [item] [(inc-idx) item]) matched))]
+                (if group
                   [:div
-                   [:div.ui__ac-group-name group-name]
-                   item-cp])
-                item-cp))))]
+                   [:div.ui__ac-group-name group]
+                   (render-f matched')]
+                  (render-f matched')))))
+          (render-f (medley/indexed matched)))]
        (when empty-placeholder
          empty-placeholder))]))
 
@@ -568,7 +583,7 @@
 
 (defn keyboard-shortcut-from-config [shortcut-name & {:keys [pick-first?]}]
   (let [built-in-binding (:binding (get shortcut-config/all-built-in-keyboard-shortcuts shortcut-name))
-        custom-binding  (when (state/shortcuts) (get (state/shortcuts) shortcut-name))
+        custom-binding  (when (state/custom-shortcuts) (get (state/custom-shortcuts) shortcut-name))
         binding         (or custom-binding built-in-binding)]
     (if (and pick-first? (coll? binding))
       (first binding)
@@ -593,24 +608,27 @@
   (rum/local false ::control?)
   [state {:keys [on-pointer-down header title-trigger? collapsed?]}]
   (let [control? (get state ::control?)]
-    [:div.content
+    [:div.ls-foldable-title.content
      [:div.flex-1.flex-row.foldable-title (cond->
                                            {:on-mouse-over #(reset! control? true)
                                             :on-mouse-out  #(reset! control? false)}
                                             title-trigger?
                                             (assoc :on-pointer-down on-pointer-down
                                                    :class "cursor"))
-      [:div.flex.flex-row.items-center
+      [:div.flex.flex-row.items-center.ls-foldable-header.gap-1
+       {:on-click (fn [^js e]
+                    (let [^js target (.-target e)]
+                      (when (some-> target (.closest ".as-toggle"))
+                        (reset! collapsed? (not @collapsed?)))))}
        (when-not (mobile-util/native-platform?)
-         [:a.block-control.opacity-50.hover:opacity-100.mr-2
-          (cond->
-           {:style    {:width       14
-                       :height      16
-                       :margin-left -30}}
-            (not title-trigger?)
-            (assoc :on-pointer-down on-pointer-down))
-          [:span {:class (if (or @control? @collapsed?) "control-show cursor-pointer" "control-hide")}
-           (rotating-arrow @collapsed?)]])
+         (let [style {:width 14 :height 16}]
+           [:a.ls-foldable-title-control.block-control.opacity-50.hover:opacity-100
+            (cond->
+             {:style style}
+              (not title-trigger?)
+              (assoc :on-pointer-down on-pointer-down))
+            [:span {:class (if (or @control? @collapsed?) "control-show cursor-pointer" "control-hide")}
+             (rotating-arrow @collapsed?)]]))
        (if (fn? header)
          (header @collapsed?)
          header)]]]))
@@ -626,7 +644,7 @@
                 (when-let [f (:init-collapsed (last (:rum/args state)))]
                   (f (::collapsed? state)))
                 state)}
-  [state header content {:keys [title-trigger? on-pointer-down class disable-on-pointer-down?
+  [state header content {:keys [title-trigger? on-pointer-down class
                                 _default-collapsed? _init-collapsed]}]
   (let [collapsed? (get state ::collapsed?)
         on-pointer-down (fn [e]
@@ -640,9 +658,9 @@
                       :header header
                       :title-trigger? title-trigger?
                       :collapsed? collapsed?})
-     [:div (cond-> {:class (if @collapsed? "hidden" "initial")}
-             (not disable-on-pointer-down?)
-             (assoc :on-pointer-down (fn [e] (.stopPropagation e))))
+     ;; Don't stop propagation for the pointer down event to the high level content container.
+     ;; That may cause the drag function to not work.
+     [:div {:class (if @collapsed? "hidden" "initial")}
       (if (fn? content)
         (if (not @collapsed?) (content) nil)
         content)]]))
@@ -679,8 +697,9 @@
      (fn [state error _info]
        (log/error :exception error)
        (notification/show!
-        (str "Error caught by UI!\n " error)
-        :error)
+        [:div.flex.flex-col.gap-2
+         [:div (str "Error caught by UI!\n " error)]
+         (str (.-stack error))] `:error)
        (assoc state ::error error))}
   [{error ::error, c :rum/react-component} error-view view]
   (if (some? error)
@@ -892,8 +911,9 @@
 (rum/defc with-shortcut < rum/reactive
   < {:key-fn (fn [key pos] (str "shortcut-" key pos))}
   [shortcut-key position content]
-  (let [tooltip? (state/sub :ui/shortcut-tooltip?)]
-    (if tooltip?
+  (let [shortcut-tooltip? (state/sub :ui/shortcut-tooltip?)
+        enabled-tooltip? (state/enable-tooltip?)]
+    (if (and enabled-tooltip? shortcut-tooltip?)
       (tippy
        {:html [:div.text-sm.font-medium (keyboard-shortcut-from-config shortcut-key)]
         :interactive true
@@ -999,13 +1019,11 @@
       :small? true)]]))
 
 (rum/defc tooltip
-  [trigger tooltip-content]
+  [trigger tooltip-content & {:keys [trigger-props]}]
   (shui/tooltip-provider
    (shui/tooltip
-    (shui/tooltip-trigger
-     trigger)
-    (shui/tooltip-content
-     tooltip-content))))
+    (shui/tooltip-trigger trigger-props trigger)
+    (shui/tooltip-content tooltip-content))))
 
 (rum/defc DelDateButton
   [on-delete]
@@ -1103,11 +1121,11 @@
                        (let [value (or (and (string? value) value)
                                        (.-value (gdom/getElement "time-picker")))]
                          (let [[h m] (string/split value ":")]
-                           (when selected
+                           (when (and date selected)
                              (.setHours date h m 0))
                            (default-on-select date))))
                      default-on-select)]
-    [:div.flex.flex-col.gap-2
+    [:div.flex.flex-col.gap-2.relative
      (single-calendar (assoc opts :on-select on-select'))
      (when (:datetime? opts)
        (time-picker (cond->
@@ -1135,12 +1153,23 @@
                                   (on-select' date))
                                 (notification/show! (str (pr-str value) " is not a valid date. Please try again") :warning)))))))})]))
 
-(rum/defc skeleton
-  []
-  [:div.space-y-2
-   (shui/skeleton {:class "h-8 w-1/3 mb-8"})
-   (shui/skeleton {:class "h-6 w-full"})
-   (shui/skeleton {:class "h-6 w-full"})])
+(comment
+  (rum/defc skeleton
+    []
+    [:div.space-y-2
+     (shui/skeleton {:class "h-8 w-1/3 mb-8"})
+     (shui/skeleton {:class "h-6 w-full"})
+     (shui/skeleton {:class "h-6 w-full"})]))
+
+(rum/defc indicator-progress-pie
+  [percentage]
+  (let [*el (rum/use-ref nil)]
+    (hooks/use-effect!
+     #(when-let [^js el (rum/deref *el)]
+        (set! (.. el -style -backgroundImage)
+              (util/format "conic-gradient(var(--ls-pie-fg-color) %s%, var(--ls-pie-bg-color) %s%)" percentage percentage)))
+     [percentage])
+    [:span.cp__file-sync-indicator-progress-pie {:ref *el}]))
 
 (comment
   (rum/defc emoji-picker

@@ -1,72 +1,60 @@
 (ns logseq.db.frontend.validate
   "Validate frontend db for DB graphs"
-  (:require [datascript.core :as d]
+  (:require [clojure.pprint :as pprint]
+            [datascript.core :as d]
             [logseq.db.frontend.malli-schema :as db-malli-schema]
-            [malli.util :as mu]
+            [logseq.db.frontend.property :as db-property]
             [malli.core :as m]
-            [malli.error :as me]))
+            [malli.error :as me]
+            [malli.util :as mu]))
 
-(defn update-schema
-  "Updates the db schema to add a datascript db for property validations
-   and to optionally close maps"
-  [db-schema db {:keys [closed-schema?]}]
-  (cond-> db-schema
-    true
-    (db-malli-schema/update-properties-in-schema db)
-    closed-schema?
-    mu/closed-schema))
+(def ^:private db-schema-validator (m/validator db-malli-schema/DB))
+(def ^:private db-schema-explainer (m/explainer db-malli-schema/DB))
+(def ^:private closed-db-schema-validator (m/validator (mu/closed-schema db-malli-schema/DB)))
+(def ^:private closed-db-schema-explainer (m/explainer (mu/closed-schema db-malli-schema/DB)))
 
-(defn validate-ents-before-after!
-  [changed-ids db-before db-after tx-data tx-meta]
-  (let [id->ent-before (into {}
-                             (keep (fn [id] (when-let [ent (d/entity db-before id)] [id ent])))
-                             changed-ids)
-        id->ent-after (keep (fn [id] (when-let [ent (d/entity db-after id)] [id ent])) changed-ids)
-        ent-before+ent-after-coll
-        (reduce
-         (fn [acc [id ent-after]]
-           (if-let [ent-before (id->ent-before id)]
-             (conj acc [ent-before ent-after])
-             acc))
-         [] id->ent-after)]
-    (doseq [[ent-before ent-after] ent-before+ent-after-coll]
-      (let [[type-before type-after] [(:block/type ent-before) (:block/type ent-after)]]
-        (when (and (some? type-before)
-                   (nil? type-after))
-          (js/console.error "Illegal :block/type change, entity id:" (:db/id ent-after))
-          (prn :ent-before ent-before :ent-after ent-after :tx-data tx-data :tx-meta tx-meta))))))
+(defn get-schema-validator
+  [closed-schema?]
+  (if closed-schema? closed-db-schema-validator db-schema-validator))
+
+(defn get-schema-explainer
+  [closed-schema?]
+  (if closed-schema? closed-db-schema-explainer db-schema-explainer))
 
 (defn validate-tx-report!
   "Validates the datascript tx-report for entities that have changed. Returns
   boolean indicating if db is valid"
-  [{:keys [db-before db-after tx-data tx-meta]} validate-options]
+  [{:keys [db-after tx-data tx-meta]} validate-options]
   (let [changed-ids (->> tx-data (keep :e) distinct)
-        _ (validate-ents-before-after! changed-ids db-before db-after tx-data tx-meta)
         tx-datoms (mapcat #(d/datoms db-after :eavt %) changed-ids)
         ent-maps* (map (fn [[db-id m]]
                          ;; Add :db/id for debugging
                          (assoc m :db/id db-id))
                        (db-malli-schema/datoms->entity-maps tx-datoms {:entity-fn #(d/entity db-after %)}))
         ent-maps (db-malli-schema/update-properties-in-ents db-after ent-maps*)
-        db-schema (update-schema db-malli-schema/DB db-after validate-options)
-        invalid-ent-maps (remove
-                          ;; remove :db/id as it adds needless declarations to schema
-                          #(m/validate db-schema [(dissoc % :db/id)])
-                          ent-maps)]
-    (js/console.log "changed eids:" changed-ids tx-meta)
-    (if (seq invalid-ent-maps)
-      (do
-        (js/console.error "Invalid datascript entities detected amongst changed entity ids:" changed-ids)
-        (doseq [m invalid-ent-maps]
-
-          (prn {:entity-map m
-                :errors (me/humanize (m/explain db-schema [m]))})
-          ;; FIXME: pprint fails sometime
-          ;; (pprint/pprint {;; :entity-map (map #(into {} %) m)
-          ;;                 :errors (me/humanize (m/explain db-schema [m]))})
-          )
-        false)
-      true)))
+        validator (get-schema-validator (:closed-schema? validate-options))]
+    (binding [db-malli-schema/*db-for-validate-fns* db-after]
+      (let [invalid-ent-maps (remove
+                              ;; remove :db/id as it adds needless declarations to schema
+                              #(validator [(dissoc % :db/id)])
+                              ent-maps)]
+        (js/console.log "changed eids:" changed-ids tx-meta)
+        (if (seq invalid-ent-maps)
+          (let [explainer (get-schema-explainer (:closed-schema? validate-options))]
+            (js/console.error "Invalid datascript entities detected amongst changed entity ids:" changed-ids)
+            (doseq [m invalid-ent-maps]
+              (let [m' (update m :block/properties (fn [properties]
+                                                     (map (fn [[p v]]
+                                                            [(:db/ident p) v])
+                                                          properties)))
+                    data {:entity-map m'
+                          :errors (me/humanize (explainer [(dissoc m :db/id)]))}]
+                (try
+                  (pprint/pprint data)
+                  (catch :default _e
+                    (prn data)))))
+            false)
+          true)))))
 
 (defn group-errors-by-entity
   "Groups malli errors by entities. db is used for providing more debugging info"
@@ -75,32 +63,30 @@
   (->> errors
        (group-by #(-> % :in first))
        (map (fn [[idx errors']]
-              {:entity (let [ent (get ent-maps idx)
-                             db-id (:db/id (meta ent))]
-                         (cond-> ent
-                           db-id
-                           (assoc :db/id db-id)
+              (let [ent (get ent-maps idx)]
+                {:entity (cond-> ent
                            ;; Provide additional page info for debugging
                            (:block/page ent)
                            (update :block/page
                                    (fn [id] (select-keys (d/entity db id)
-                                                         [:block/name :block/type :db/id :block/created-at])))))
-               :errors errors'
+                                                         [:block/name :block/tags :db/id :block/created-at]))))
+                 :dispatch-key (->> (dissoc ent :db/id) (db-malli-schema/entity-dispatch-key db))
+                 :errors errors'
                ;; Group by type to reduce verbosity
                ;; TODO: Move/remove this to another fn if unused
-               :errors-by-type
-               (->> (group-by :type errors')
-                    (map (fn [[type' type-errors]]
-                           [type'
-                            {:in-value-distinct (->> type-errors
-                                                     (map #(select-keys % [:in :value]))
+                 :errors-by-type
+                 (->> (group-by :type errors')
+                      (map (fn [[type' type-errors]]
+                             [type'
+                              {:in-value-distinct (->> type-errors
+                                                       (map #(select-keys % [:in :value]))
+                                                       distinct
+                                                       vec)
+                               :schema-distinct (->> (map :schema type-errors)
+                                                     (map m/form)
                                                      distinct
-                                                     vec)
-                             :schema-distinct (->> (map :schema type-errors)
-                                                   (map m/form)
-                                                   distinct
-                                                   vec)}]))
-                    (into {}))}))))
+                                                     vec)}]))
+                      (into {}))})))))
 
 (defn validate-db!
   "Validates all the entities of the given db using :eavt datoms. Returns a map
@@ -109,15 +95,32 @@
   [db]
   (let [datoms (d/datoms db :eavt)
         ent-maps* (db-malli-schema/datoms->entities datoms)
-        schema (update-schema db-malli-schema/DB db {:closed-schema? true})
         ent-maps (mapv
                   ;; Remove some UI interactions adding this e.g. import
                   #(dissoc % :block.temp/fully-loaded?)
                   (db-malli-schema/update-properties-in-ents db ent-maps*))
-        errors (->> ent-maps (m/explain schema) :errors)]
+        errors (binding [db-malli-schema/*db-for-validate-fns* db]
+                 (-> (map (fn [e]
+                            (dissoc e :db/id))
+                          ent-maps) closed-db-schema-explainer :errors))]
     (cond-> {:datom-count (count datoms)
-             :entities ent-maps}
+             :entities ent-maps*}
       (some? errors)
       (assoc :errors (map #(-> (dissoc % :errors-by-type)
                                (update :errors (fn [errs] (me/humanize {:errors errs}))))
                           (group-errors-by-entity db ent-maps errors))))))
+
+(defn graph-counts
+  "Calculates graph-wide counts given a graph's db and its entities from :eavt datoms"
+  [db entities]
+  (let [classes-count (count (d/datoms db :avet :block/tags :logseq.class/Tag))
+        properties-count (count (d/datoms db :avet :block/tags :logseq.class/Property))]
+    {:entities (count entities)
+     :pages (count (filter :block/name entities))
+     ;; Nodes that aren't pages
+     :blocks (count (filter :block/parent entities))
+     :classes classes-count
+     :properties properties-count
+     ;; Objects that aren't classes or properties
+     :objects (- (count (d/datoms db :avet :block/tags)) classes-count properties-count)
+     :property-pairs (count (mapcat #(-> % db-property/properties (dissoc :block/tags)) entities))}))

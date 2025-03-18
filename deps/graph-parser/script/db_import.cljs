@@ -2,20 +2,34 @@
   "Imports given file(s) to a db graph. This script is primarily for
    developing the import feature and for engineers who want to customize
    the import process"
-  (:require [clojure.string :as string]
-            [datascript.core :as d]
-            ["path" :as node-path]
-            ["os" :as os]
-            ["fs" :as fs]
+  (:require ["fs" :as fs]
             ["fs/promises" :as fsp]
-            [nbb.core :as nbb]
-            [nbb.classpath :as cp]
-            [babashka.cli :as cli]
-            [logseq.graph-parser.exporter :as gp-exporter]
-            [logseq.common.graph :as common-graph]
+            ["os" :as os]
+            ["path" :as node-path]
             #_:clj-kondo/ignore
+            [babashka.cli :as cli]
+            [cljs.pprint :as pprint]
+            [clojure.set :as set]
+            [clojure.string :as string]
+            [datascript.core :as d]
+            [logseq.common.graph :as common-graph]
+            [logseq.graph-parser.exporter :as gp-exporter]
             [logseq.outliner.cli :as outliner-cli]
+            [logseq.outliner.pipeline :as outliner-pipeline]
+            [nbb.classpath :as cp]
+            [nbb.core :as nbb]
             [promesa.core :as p]))
+
+(def tx-queue (atom cljs.core/PersistentQueue.EMPTY))
+(def original-transact! d/transact!)
+(defn dev-transact! [conn tx-data tx-meta]
+  (swap! tx-queue (fn [queue]
+                    (let [new-queue (conj queue {:tx-data tx-data :tx-meta tx-meta})]
+                          ;; Only care about last few so vary 10 as needed
+                      (if (> (count new-queue) 10)
+                        (pop new-queue)
+                        new-queue))))
+  (original-transact! conn tx-data tx-meta))
 
 (defn- build-graph-files
   "Given a file graph directory, return all files including assets and adds relative paths
@@ -40,11 +54,13 @@
           _ (fsp/mkdir parent-dir #js {:recursive true})]
     (fsp/copyFile (:path file) (node-path/join parent-dir (node-path/basename (:path file))))))
 
-(defn- notify-user [m]
+(defn- notify-user [{:keys [continue debug]} m]
   (println (:msg m))
   (when (:ex-data m)
-    (println "Ex-data:" (pr-str (dissoc (:ex-data m) :error)))
-    (println "Stacktrace:")
+    (println "Ex-data:" (pr-str (merge (dissoc (:ex-data m) :error)
+                                       (when-let [err (get-in m [:ex-data :error])]
+                                         {:original-error (ex-data (.-cause err))}))))
+    (println "\nStacktrace:")
     (if-let [stack (some-> (get-in m [:ex-data :error]) ex-data :sci.impl/callstack deref)]
       (println (string/join
                 "\n"
@@ -54,14 +70,22 @@
                        (when (:sci.impl/f-meta %)
                          (str " calls #'" (get-in % [:sci.impl/f-meta :ns]) "/" (get-in % [:sci.impl/f-meta :name]))))
                  (reverse stack))))
-      (println (some-> (get-in m [:ex-data :error]) .-stack))))
-  (when (= :error (:level m))
+      (println (some-> (get-in m [:ex-data :error]) .-stack)))
+    (when debug
+      (when-let [matching-tx (seq (filter #(and (get-in m [:ex-data :path])
+                                                (or (= (get-in % [:tx-meta ::gp-exporter/path]) (get-in m [:ex-data :path]))
+                                                    (= (get-in % [:tx-meta ::outliner-pipeline/original-tx-meta ::gp-exporter/path]) (get-in m [:ex-data :path]))))
+                                          @tx-queue))]
+        (println (str "\n" (count matching-tx)) "Tx Maps for failing path:")
+        (pprint/pprint matching-tx))))
+  (when (and (= :error (:level m)) (not continue))
     (js/process.exit 1)))
 
-(def default-export-options
+(defn default-export-options
+  [options]
   {;; common options
    :rpath-key ::rpath
-   :notify-user notify-user
+   :notify-user (partial notify-user options)
    :<read-file <read-file
    ;; :set-ui-state prn
    ;; config file options
@@ -77,11 +101,12 @@
         config-file (first (filter #(string/ends-with? (:path %) "logseq/config.edn") *files))
         _ (assert config-file "No 'logseq/config.edn' found for file graph dir")
         options (merge options
-                       default-export-options
+                       (default-export-options options)
                         ;; asset file options
                        {:<copy-asset (fn copy-asset [file]
                                        (<copy-asset-file file db-graph-dir file-graph-dir))})]
-    (gp-exporter/export-file-graph conn conn config-file *files options)))
+    (p/with-redefs [d/transact! dev-transact!]
+      (gp-exporter/export-file-graph conn conn config-file *files options))))
 
 (defn- resolve-path
   "If relative path, resolve with $ORIGINAL_PWD"
@@ -93,11 +118,23 @@
 (defn- import-files-to-db
   "Import specific doc files for dev purposes"
   [file conn {:keys [files] :as options}]
-  (let [doc-options (gp-exporter/build-doc-options {:macros {}} (merge options default-export-options))
+  (let [doc-options (gp-exporter/build-doc-options {:macros {}} (merge options (default-export-options options)))
         files' (mapv #(hash-map :path %)
                      (into [file] (map resolve-path files)))]
-    (p/let [_ (gp-exporter/export-doc-files conn files' <read-file doc-options)]
-      {:import-state (:import-state doc-options)})))
+    (p/with-redefs [d/transact! dev-transact!]
+      (p/let [_ (gp-exporter/export-doc-files conn files' <read-file doc-options)]
+        {:import-state (:import-state doc-options)}))))
+
+(defn- get-dir-and-db-name
+  "Gets dir and db name for use with open-db! Works for relative and absolute paths and
+   defaults to ~/logseq/graphs/ when no '/' present in name"
+  [graph-dir]
+  (if (string/includes? graph-dir "/")
+    (let [resolve-path' #(if (node-path/isAbsolute %) %
+                             ;; $ORIGINAL_PWD used by bb tasks to correct current dir
+                             (node-path/join (or js/process.env.ORIGINAL_PWD ".") %))]
+      ((juxt node-path/dirname node-path/basename) (resolve-path' graph-dir)))
+    [(node-path/join (os/homedir) "logseq" "graphs") graph-dir]))
 
 (def spec
   "Options spec"
@@ -105,12 +142,20 @@
           :desc "Print help"}
    :verbose {:alias :v
              :desc "Verbose mode"}
+   :debug {:alias :d
+           :desc "Debug mode"}
+   :continue {:alias :c
+              :desc "Continue past import failures"}
+   :all-tags {:alias :a
+              :desc "All tags convert to classes"}
    :tag-classes {:alias :t
                  :coerce []
                  :desc "List of tags to convert to classes"}
    :files {:alias :f
            :coerce []
            :desc "Additional files to import"}
+   :remove-inline-tags {:alias :r
+                        :desc "Remove inline tags"}
    :property-classes {:alias :p
                       :coerce []
                       :desc "List of properties whose values convert to classes"}
@@ -126,24 +171,31 @@
             (println (str "Usage: $0 FILE-GRAPH DB-GRAPH [OPTIONS]\nOptions:\n"
                           (cli/format-opts {:spec spec})))
             (js/process.exit 1))
-        [dir db-name] (if (string/includes? db-graph-dir "/")
-                        (let [graph-dir' (resolve-path db-graph-dir)]
-                          ((juxt node-path/dirname node-path/basename) graph-dir'))
-                        [(node-path/join (os/homedir) "logseq" "graphs") db-graph-dir])
+        [dir db-name] (get-dir-and-db-name db-graph-dir)
         file-graph' (resolve-path file-graph)
         conn (outliner-cli/init-conn dir db-name {:classpath (cp/get-classpath)})
         directory? (.isDirectory (fs/statSync file-graph'))
-        ;; coerce option collection into strings
-        options' (if (:tag-classes options) (update options :tag-classes (partial mapv str)) options)]
+        user-options (cond-> (merge {:all-tags false} (dissoc options :verbose :files :help :continue))
+                       ;; coerce option collection into strings
+                       (:tag-classes options)
+                       (update :tag-classes (partial mapv str))
+                       true
+                       (set/rename-keys {:all-tags :convert-all-tags? :remove-inline-tags :remove-inline-tags?}))
+        _ (when (:verbose options) (prn :options user-options))
+        options' (merge {:user-options user-options
+                         :graph-name db-name}
+                        (select-keys options [:files :verbose :continue :debug]))]
     (p/let [{:keys [import-state]}
             (if directory?
-              (import-file-graph-to-db file-graph' (node-path/join dir db-name) conn (merge options' {:graph-name db-name}))
-              (import-files-to-db file-graph' conn (merge options' {:graph-name db-name})))]
+              (import-file-graph-to-db file-graph' (node-path/join dir db-name) conn options')
+              (import-files-to-db file-graph' conn options'))]
 
       (when-let [ignored-props (seq @(:ignored-properties import-state))]
         (println "Ignored properties:" (pr-str ignored-props)))
+      (when-let [ignored-files (seq @(:ignored-files import-state))]
+        (println (count ignored-files) "ignored file(s):" (pr-str (vec ignored-files))))
       (when (:verbose options') (println "Transacted" (count (d/datoms @conn :eavt)) "datoms"))
       (println "Created graph" (str db-name "!")))))
 
-(when (= nbb/*file* (:file (meta #'-main)))
+(when (= nbb/*file* (nbb/invoked-file))
   (-main *command-line-args*))

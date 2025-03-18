@@ -1,7 +1,7 @@
 (ns logseq.db.frontend.db-ident
   "Helper fns for class and property :db/ident"
-  (:require [datascript.core :as d]
-            [clojure.string :as string]))
+  (:require [clojure.string :as string]
+            [datascript.core :as d]))
 
 (defn ensure-unique-db-ident
   "Ensures the given db-ident is unique. If a db-ident conflicts, it is made
@@ -68,9 +68,10 @@
          :cljs (exists? js/process)
          :default false)
     ;; So that we don't have to change :user.{property|class} in our tests
-    (keyword user-namespace (string/replace name-string "/" "-"))
+    (keyword user-namespace (-> name-string (string/replace #"/|\s+" "-") (string/replace-first #"^(\d)" "NUM-$1")))
     (keyword user-namespace
-             (str (rand-nth non-int-char-range)
-                  (nano-id 20)
-                  "-"
-                  (->> (filter #(re-find #"[0-9a-zA-Z-]{1}" %) (seq name-string)) (apply str))))))
+             (str
+              (->> (filter #(re-find #"[0-9a-zA-Z-]{1}" %) (seq name-string)) (apply str))
+              "-"
+              (rand-nth non-int-char-range)
+              (nano-id 7)))))

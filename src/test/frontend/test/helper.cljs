@@ -1,23 +1,24 @@
 (ns frontend.test.helper
   "Common helper fns for tests"
-  (:require [frontend.handler.file-based.repo :as file-repo-handler]
-            [frontend.state :as state]
-            [frontend.db.conn :as conn]
-            [clojure.string :as string]
-            [logseq.db.sqlite.util :as sqlite-util]
-            [frontend.db :as db]
-            [frontend.handler.editor :as editor-handler]
-            [frontend.handler.db-based.page :as db-page-handler]
+  (:require [clojure.string :as string]
             [datascript.core :as d]
-            [logseq.graph-parser.text :as text]
-            [logseq.db.sqlite.create-graph :as sqlite-create-graph]
+            [frontend.background-tasks]
             [frontend.config :as config]
-            [frontend.worker.pipeline :as worker-pipeline]
-            [logseq.db.frontend.order :as db-order]
-            [logseq.db.sqlite.build :as sqlite-build]
+            [frontend.db :as db]
+            [frontend.db.conn :as conn]
+            [frontend.handler.db-based.page :as db-page-handler]
+            [frontend.handler.editor :as editor-handler]
+            [frontend.handler.file-based.repo :as file-repo-handler]
             [frontend.handler.file-based.status :as status]
-            [logseq.outliner.db-pipeline :as db-pipeline]
-            [frontend.worker.handler.page :as worker-page]))
+            [frontend.state :as state]
+            [frontend.worker.handler.page :as worker-page]
+            [frontend.worker.pipeline :as worker-pipeline]
+            [logseq.db.common.order :as db-order]
+            [logseq.db.sqlite.build :as sqlite-build]
+            [logseq.db.sqlite.create-graph :as sqlite-create-graph]
+            [logseq.db.sqlite.util :as sqlite-util]
+            [logseq.graph-parser.text :as text]
+            [logseq.outliner.db-pipeline :as db-pipeline]))
 
 (def node? (exists? js/process))
 
@@ -63,7 +64,7 @@
                       (parse-property-value v)
                       (let [val (parse-property-value v)]
                         (if (coll? val)
-                          (set (map #(vector :page %) val))
+                          (set (map #(vector :build/page {:block/title %}) val))
                           val)))]))))
        (into {})))
 
@@ -192,15 +193,13 @@ This can be called in synchronous contexts as no async fns should be invoked"
        :block/page page-id
        :block/parent page-id
        :block/order (db-order/gen-key nil)
-       :block/title "block 1"
-       :block/format :markdown}
+       :block/title "block 1"}
       ;; second block
       {:block/uuid second-block-uuid
        :block/page page-id
        :block/parent page-id
        :block/order (db-order/gen-key nil)
-       :block/title "block 2"
-       :block/format :markdown}]
+       :block/title "block 2"}]
      (map sqlite-util/block-with-timestamps))))
 
 (defn start-and-destroy-db

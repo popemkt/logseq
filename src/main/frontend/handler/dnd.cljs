@@ -1,14 +1,16 @@
 (ns frontend.handler.dnd
   "Provides fns for drag and drop"
-  (:require [frontend.handler.editor :as editor-handler]
-            [frontend.handler.property :as property-handler]
-            [logseq.db :as ldb]
-            [frontend.modules.outliner.ui :as ui-outliner-tx]
-            [frontend.modules.outliner.op :as outliner-op]
-            [logseq.common.util.block-ref :as block-ref]
-            [frontend.state :as state]
+  (:require [frontend.config :as config]
             [frontend.db :as db]
-            [frontend.handler.block :as block-handler]))
+            [frontend.handler.block :as block-handler]
+            [frontend.handler.editor :as editor-handler]
+            [frontend.handler.property :as property-handler]
+            [frontend.modules.outliner.op :as outliner-op]
+            [frontend.modules.outliner.ui :as ui-outliner-tx]
+            [frontend.state :as state]
+            [logseq.common.util.block-ref :as block-ref]
+            [logseq.common.util.page-ref :as page-ref]
+            [logseq.db :as ldb]))
 
 (defn move-blocks
   [^js event blocks target-block original-block move-to]
@@ -18,17 +20,17 @@
         top? (= move-to :top)
         nested? (= move-to :nested)
         alt-key? (and event (.-altKey event))
-        current-format (:block/format first-block)
-        target-format (:block/format target-block)
+        current-format (get first-block :block/format :markdown)
+        target-format (get target-block :block/format :markdown)
         target-block (if nested? target-block
                          (or original-block target-block))]
     (cond
       ;; alt pressed, make a block-ref
       (and alt-key? (= (count blocks) 1))
-      (do
+      (let [->ref (if (config/db-based-graph?) page-ref/->page-ref block-ref/->block-ref)]
         (property-handler/file-persist-block-id! (state/get-current-repo) (:block/uuid first-block))
         (editor-handler/api-insert-new-block!
-         (block-ref/->block-ref (:block/uuid first-block))
+         (->ref (:block/uuid first-block))
          {:block-uuid (:block/uuid target-block)
           :sibling? (not nested?)
           :before? top?}))

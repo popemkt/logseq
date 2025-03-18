@@ -10,6 +10,7 @@
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
             [frontend.db :as db]
+            [frontend.extensions.fsrs :as fsrs]
             [frontend.extensions.srs :as srs]
             [frontend.handler.common.developer :as dev-common-handler]
             [frontend.handler.editor :as editor-handler]
@@ -21,7 +22,6 @@
             [frontend.persist-db.browser :as db-browser]
             [frontend.state :as state]
             [frontend.ui :as ui]
-            [logseq.shui.ui :as shui]
             [frontend.util :as util]
             [frontend.util.url :as url-util]
             [goog.dom :as gdom]
@@ -29,10 +29,10 @@
             [logseq.common.util :as common-util]
             [logseq.common.util.block-ref :as block-ref]
             [logseq.common.util.page-ref :as page-ref]
-            [promesa.core :as p]
-            [rum.core :as rum]
             [logseq.db :as ldb]
-            [frontend.extensions.fsrs :as fsrs]))
+            [logseq.shui.ui :as shui]
+            [promesa.core :as p]
+            [rum.core :as rum]))
 
 ;; TODO i18n support
 
@@ -64,14 +64,14 @@
       {:key "delete"
        :on-click #(do (editor-handler/delete-selection %)
                       (state/hide-custom-context-menu!)
-                    (shui/popup-hide!))}
+                      (shui/popup-hide!))}
 
       (t :editor/delete-selection)
       (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/delete)))
 
      (shui/dropdown-menu-item
       {:key "copy"
-       :on-click editor-handler/copy-selection-blocks}
+       :on-click #(editor-handler/copy-selection-blocks true)}
       (t :editor/copy)
       (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/copy)))
 
@@ -165,15 +165,15 @@
                           (p/let [exists? (page-handler/<template-exists? title)]
                             (if exists?
                               (notification/show!
-                                [:p (t :context-menu/template-exists-warning)]
-                                :error)
+                               [:p (t :context-menu/template-exists-warning)]
+                               :error)
                               (p/do!
-                                (property-handler/set-block-property! repo block-id (pu/get-pid :logseq.property/template) title)
-                                (when (false? template-including-parent?)
-                                  (property-handler/set-block-property! repo block-id
-                                    (pu/get-pid :logseq.property/template-including-parent)
-                                    false))
-                                (shui/popup-hide!)))))))]
+                               (property-handler/set-block-property! repo block-id (pu/get-pid :logseq.property/template) title)
+                               (when (false? template-including-parent?)
+                                 (property-handler/set-block-property! repo block-id
+                                                                       (pu/get-pid :logseq.property/template-including-parent)
+                                                                       false))
+                               (shui/popup-hide!)))))))]
         (state/clear-edit!)
         [:<>
          [:div.px-4.py-2.text-sm {:on-click (fn [e] (util/stop e))}
@@ -183,7 +183,7 @@
             :on-key-down (fn [e]
                            (util/stop-propagation e)
                            (when (and (= "Enter" (util/ekey e))
-                                   (not (string/blank? (util/trim-safe @input))))
+                                      (not (string/blank? (util/trim-safe @input))))
                              (submit!)))
             :on-change (fn [e]
                          (reset! input (util/evalue e)))}]
@@ -192,7 +192,7 @@
           (ui/button (t :submit) :on-click submit!)]
          (shui/dropdown-menu-separator)])
       (shui/dropdown-menu-item
-        {:key "Make a Template"
+       {:key "Make a Template"
         :on-click (fn [e]
                     (util/stop e)
                     (reset! edit? true))}
@@ -200,12 +200,11 @@
 
 (rum/defc ^:large-vars/cleanup-todo block-context-menu-content <
   shortcut/disable-all-shortcuts
-  [_target block-id]
+  [_target block-id property-default-value?]
   (let [repo (state/get-current-repo)
         db? (config/db-based-graph? repo)]
     (when-let [block (db/entity [:block/uuid block-id])]
-      (let [properties (:block/properties block)
-            heading (or (pu/lookup properties :logseq.property/heading)
+      (let [heading (or (pu/lookup block :logseq.property/heading)
                         false)]
         [:<>
          (ui/menu-background-color #(property-handler/set-block-property! repo block-id
@@ -265,18 +264,20 @@
                         #(export/export-blocks [block-id] {:whiteboard? false})))}
           (t :content/copy-export-as))
 
-         (shui/dropdown-menu-item
-          {:key "Cut"
-           :on-click (fn [_e]
-                       (editor-handler/cut-block! block-id))}
-          (t :editor/cut)
-          (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/cut)))
+         (when-not property-default-value?
+           (shui/dropdown-menu-item
+            {:key "Cut"
+             :on-click (fn [_e]
+                         (editor-handler/cut-block! block-id))}
+            (t :editor/cut)
+            (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/cut))))
 
-         (shui/dropdown-menu-item
-          {:key "delete"
-           :on-click #(editor-handler/delete-block-aux! block)}
-          (t :editor/delete-selection)
-          (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/delete)))
+         (when-not property-default-value?
+           (shui/dropdown-menu-item
+            {:key "delete"
+             :on-click #(editor-handler/delete-block-aux! block)}
+            (t :editor/delete-selection)
+            (shui/dropdown-menu-shortcut (ui/keyboard-shortcut-from-config :editor/delete))))
 
          (shui/dropdown-menu-separator)
 
@@ -346,7 +347,8 @@
                {:key "(Dev) Show block AST"
                 :on-click (fn []
                             (let [block (db/entity [:block/uuid block-id])]
-                              (dev-common-handler/show-content-ast (:block/title block) (:block/format block))))}
+                              (dev-common-handler/show-content-ast (:block/title block)
+                                                                   (get block :block/format :markdown))))}
                (t :dev/show-block-ast))
               (shui/dropdown-menu-item
                {:key "(Dev) Show block content history"
@@ -355,7 +357,7 @@
                   (let [^object worker @db-browser/*worker
                         token (state/get-auth-id-token)
                         graph-uuid (ldb/get-graph-rtc-uuid (db/get-db))]
-                    (p/let [result (.rtc-get-block-content-versions2 worker token graph-uuid (str block-id))
+                    (p/let [result (.rtc-get-block-content-versions worker token graph-uuid (str block-id))
                             blocks-versions (ldb/read-transit-str result)]
                       (prn :Dev-show-block-content-history)
                       (doseq [[block-uuid versions] blocks-versions]

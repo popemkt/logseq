@@ -20,3 +20,14 @@
     }
   }
 }
+
+.overdue {
+  @apply text-yellow-rx-08 dark:text-yellow-rx-10;
+  :not(.ls-datetime) .page-ref {
+    @apply text-yellow-rx-08 dark:text-yellow-rx-10;
+  }
+}
+
+.ls-property-key .cp__select-input, .property-select .cp__select-input {
+    @apply text-sm;
+}

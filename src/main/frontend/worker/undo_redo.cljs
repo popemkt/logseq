@@ -2,55 +2,57 @@
   "undo/redo related fns and op-schema"
   (:require [clojure.set :as set]
             [datascript.core :as d]
-            [frontend.common.schema-register :include-macros true :as sr]
-            [logseq.outliner.batch-tx :include-macros true :as batch-tx]
             [frontend.worker.db-listener :as db-listener]
             [frontend.worker.state :as worker-state]
             [logseq.common.config :as common-config]
             [logseq.common.util :as common-util]
+            [logseq.db :as ldb]
+            [logseq.outliner.batch-tx :include-macros true :as batch-tx]
             [logseq.outliner.core :as outliner-core]
             [logseq.outliner.transaction :as outliner-tx]
-            [logseq.db :as ldb]
             [malli.core :as m]
             [malli.util :as mu]))
+(comment
+  ;; this ns is not used currently, so just comment out these kw definitions
+  ;; use logseq.common.defkeywords/defkeywords instead
 
-(sr/defkeyword :gen-undo-ops?
-  "tx-meta option, generate undo ops from tx-data when true (default true)")
+  (sr/defkeyword :gen-undo-ops?
+    "tx-meta option, generate undo ops from tx-data when true (default true)")
 
-(sr/defkeyword :gen-undo-boundary-op?
-  "tx-meta option, generate `::boundary` undo-op when true (default true).
+  (sr/defkeyword :gen-undo-boundary-op?
+    "tx-meta option, generate `::boundary` undo-op when true (default true).
 usually every transaction's tx-data will generate ops like: [<boundary> <op1> <op2> ...],
 push to undo-stack, result in [...<boundary> <op0> <boundary> <op1> <op2> ...].
 
 when this option is false, only generate [<op1> <op2> ...]. undo-stack: [...<boundary> <op0> <op1> <op2> ...]
 so when undo, it will undo [<op0> <op1> <op2>] instead of [<op1> <op2>]")
 
-(sr/defkeyword ::boundary
-  "boundary of one or more undo-ops.
+  (sr/defkeyword ::boundary
+    "boundary of one or more undo-ops.
 when one undo/redo will operate on all ops between two ::boundary")
 
-(sr/defkeyword ::insert-blocks
-  "when some blocks are inserted, generate a ::insert-blocks undo-op.
+  (sr/defkeyword ::insert-blocks
+    "when some blocks are inserted, generate a ::insert-blocks undo-op.
 when undo this op, the related blocks will be removed.")
 
-(sr/defkeyword ::move-block
-  "when a block is moved, generate a ::move-block undo-op.")
+  (sr/defkeyword ::move-block
+    "when a block is moved, generate a ::move-block undo-op.")
 
-(sr/defkeyword ::remove-block
-  "when a block is removed, generate a ::remove-block undo-op.
+  (sr/defkeyword ::remove-block
+    "when a block is removed, generate a ::remove-block undo-op.
 when undo this op, this original entity-map will be transacted back into db")
 
-(sr/defkeyword ::update-block
-  "when a block is updated, generate a ::update-block undo-op.")
+  (sr/defkeyword ::update-block
+    "when a block is updated, generate a ::update-block undo-op.")
 
-(sr/defkeyword ::record-editor-info
-  "record current editor and cursor")
+  (sr/defkeyword ::record-editor-info
+    "record current editor and cursor")
 
-(sr/defkeyword ::empty-undo-stack
-  "return by undo, when no more undo ops")
+  (sr/defkeyword ::empty-undo-stack
+    "return by undo, when no more undo ops")
 
-(sr/defkeyword ::empty-redo-stack
-  "return by redo, when no more redo ops")
+  (sr/defkeyword ::empty-redo-stack
+    "return by redo, when no more redo ops"))
 
 (def ^:private boundary [::boundary])
 
@@ -128,7 +130,6 @@ when undo this op, this original entity-map will be transacted back into db")
       true                  (update :block/parent :block/uuid)
       (seq (:block/tags m)) (update :block/tags (partial mapv :block/uuid))
       (:block/link m)       (update :block/link :block/uuid))))
-
 
 (defn- reverse-op
   "return ops"
@@ -252,7 +253,6 @@ when undo this op, this original entity-map will be transacted back into db")
        (:block/parent entity)
        (:block/left entity)))
 
-
 (defmulti ^:private reverse-apply-op (fn [op _conn _repo] (first op)))
 (defmethod reverse-apply-op :default
   [_ _ _]
@@ -301,7 +301,6 @@ when undo this op, this original entity-map will be transacted back into db")
           (set (keep :block/uuid (:block/_parent block-entity)))
           block-uuid-set)))
       block-entities))))
-
 
 (defmethod reverse-apply-op ::insert-blocks
   [op conn repo]
@@ -401,7 +400,6 @@ when undo this op, this original entity-map will be transacted back into db")
       insert-op               (conj insert-op)
       (seq other-ops)         (conj-vec other-ops)
       (seq sorted-remove-ops) (conj-vec sorted-remove-ops))))
-
 
 (defn undo
   [repo page-block-uuid conn]
@@ -547,8 +545,9 @@ when undo this op, this original entity-map will be transacted back into db")
         (push-undo-ops repo page-block-uuid (if gen-boundary-op? (vec (cons boundary ops')) ops'))))))
 
 (defmethod db-listener/listen-db-changes :gen-undo-ops
-  [_ {:keys [_tx-data tx-meta db-before db-after
-             repo id->attr->datom same-entity-datoms-coll]}]
+  [_
+   {:keys [repo id->attr->datom same-entity-datoms-coll]}
+   {:keys [_tx-data tx-meta db-before db-after]}]
   (when (:gen-undo-ops? tx-meta true)
     (generate-undo-ops repo db-before db-after same-entity-datoms-coll id->attr->datom
                        (:gen-undo-boundary-op? tx-meta true)
@@ -588,5 +587,4 @@ when undo this op, this original entity-map will be transacted back into db")
                                     :n n})))
 
   (remove-watch (:undo/repo->page-block-uuid->undo-ops @worker-state/*state) :xxx)
-  (remove-watch (:undo/repo->page-block-uuid->redo-ops @worker-state/*state) :xxx)
-  )
+  (remove-watch (:undo/repo->page-block-uuid->redo-ops @worker-state/*state) :xxx))
