@@ -48,7 +48,7 @@ jobs:
         run: yarn install && gulp build && yarn cljs:release-electron
 
       - name: Cache Static File
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: static
           path: static
@@ -58,7 +58,7 @@ jobs:
     needs: [ build-and-deploy ]
     steps:
       - name: Download The Static Asset
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: static
           path: static
