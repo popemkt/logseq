@@ -1,7 +1,6 @@
 (ns frontend.handler.page
   "Provides util handler fns for pages"
-  (:require [cljs.reader :as reader]
-            [clojure.string :as string]
+  (:require [clojure.string :as string]
             [datascript.core :as d]
             [datascript.impl.entity :as de]
             [electron.ipc :as ipc]
@@ -14,12 +13,13 @@
             [frontend.db.conn :as conn]
             [frontend.db.model :as model]
             [frontend.fs :as fs]
-            [frontend.handler.common :as common-handler]
             [frontend.handler.common.page :as page-common-handler]
             [frontend.handler.db-based.page :as db-page-handler]
             [frontend.handler.db-based.property :as db-property-handler]
             [frontend.handler.editor :as editor-handler]
-            [frontend.handler.file-based.nfs :as nfs-handler]
+            [frontend.handler.file-based.native-fs :as nfs-handler]
+            [frontend.handler.file-based.page :as file-page-handler]
+            [frontend.handler.file-based.page-property :as file-page-property]
             [frontend.handler.graph :as graph-handler]
             [frontend.handler.notification :as notification]
             [frontend.handler.plugin :as plugin-handler]
@@ -28,7 +28,7 @@
             [frontend.mobile.util :as mobile-util]
             [frontend.modules.outliner.op :as outliner-op]
             [frontend.modules.outliner.ui :as ui-outliner-tx]
-            [frontend.persist-db.browser :as db-browser]
+            [frontend.util.ref :as ref]
             [frontend.state :as state]
             [frontend.util :as util]
             [frontend.util.cursor :as cursor]
@@ -36,16 +36,13 @@
             [frontend.util.url :as url-util]
             [goog.functions :refer [debounce]]
             [goog.object :as gobj]
-            [lambdaisland.glogi :as log]
             [logseq.common.config :as common-config]
             [logseq.common.path :as path]
             [logseq.common.util :as common-util]
             [logseq.common.util.page-ref :as page-ref]
             [logseq.db :as ldb]
-            [logseq.graph-parser.db :as gp-db]
             [logseq.graph-parser.text :as text]
-            [promesa.core :as p]
-            [frontend.handler.file-based.page-property :as file-page-property]))
+            [promesa.core :as p]))
 
 (def <create! page-common-handler/<create!)
 (def <delete! page-common-handler/<delete!)
@@ -97,22 +94,6 @@
                               (distinct))]
           (keep (fn [page-name] (db/get-page page-name)) page-names))))))
 
-;; FIXME: add whiteboard
-(defn- get-directory
-  [journal?]
-  (if journal?
-    (config/get-journals-directory)
-    (config/get-pages-directory)))
-
-(defn- get-file-name
-  [journal? title]
-  (when-let [s (if journal?
-                 (date/journal-title->default title)
-                 ;; legacy in org-mode format, don't escape slashes except bug reported
-                 (common-util/page-name-sanity (string/lower-case title)))]
-    ;; Win10 file path has a length limit of 260 chars
-    (common-util/safe-subs s 0 200)))
-
 (defn toggle-favorite! []
   ;; NOTE: in journals or settings, current-page is nil
   (when-let [page-name (state/get-current-page)]
@@ -122,24 +103,22 @@
 
 (defn rename!
   [page-uuid-or-old-name new-name & {:as _opts}]
-  (when @db-browser/*worker
-    (p/let [page-uuid (cond
-                        (uuid? page-uuid-or-old-name)
-                        page-uuid-or-old-name
-                        (common-util/uuid-string? page-uuid-or-old-name)
-                        page-uuid-or-old-name
-                        :else
-                        (:block/uuid (db/get-page page-uuid-or-old-name)))
-            result (ui-outliner-tx/transact!
-                    {:outliner-op :rename-page}
-                    (outliner-op/rename-page! page-uuid new-name))
-            result' (ldb/read-transit-str result)]
-      (case (if (string? result') (keyword result') result')
-        :invalid-empty-name
-        (notification/show! "Please use a valid name, empty name is not allowed!" :warning)
-        :rename-page-exists
-        (notification/show! "Another page with the new name exists already" :warning)
-        nil))))
+  (p/let [page-uuid (cond
+                      (uuid? page-uuid-or-old-name)
+                      page-uuid-or-old-name
+                      (common-util/uuid-string? page-uuid-or-old-name)
+                      page-uuid-or-old-name
+                      :else
+                      (:block/uuid (db/get-page page-uuid-or-old-name)))
+          result (ui-outliner-tx/transact!
+                  {:outliner-op :rename-page}
+                  (outliner-op/rename-page! page-uuid new-name))]
+    (case (if (string? result) (keyword result) result)
+      :invalid-empty-name
+      (notification/show! "Please use a valid name, empty name is not allowed!" :warning)
+      :rename-page-exists
+      (notification/show! "Another page with the new name exists already" :warning)
+      nil)))
 
 (defn <reorder-favorites!
   [favorites]
@@ -158,16 +137,6 @@
               (outliner-op/save-block! (assoc block :block/link page-block-db-id)))))
          (state/update-favorites-updated!))))))
 
-(defn has-more-journals?
-  []
-  (let [current-length (:journals-length @state/state)]
-    (< current-length (db/get-journals-length))))
-
-(defn load-more-journals!
-  []
-  (when (has-more-journals?)
-    (state/set-journals-length! (+ (:journals-length @state/state) 7))))
-
 (defn update-public-attribute!
   [repo page value]
   (if (config/db-based-graph? repo)
@@ -176,31 +145,9 @@
 
 (defn get-page-ref-text
   [page]
-  (let [edit-block-file-path (model/get-block-file-path (state/get-edit-block))
-        page-name (string/lower-case page)]
-    (if (and edit-block-file-path
-             (state/org-mode-file-link? (state/get-current-repo)))
-      (if-let [ref-file-path (:file/path (db/get-page-file page-name))]
-        (util/format "[[file:%s][%s]]"
-                     (util/get-relative-path edit-block-file-path ref-file-path)
-                     page)
-        (let [journal? (date/valid-journal-title? page)
-              ref-file-path (str
-                             (if (or (util/electron?) (mobile-util/native-platform?))
-                               (-> (config/get-repo-dir (state/get-current-repo))
-                                   js/decodeURI
-                                   (string/replace #"/+$" "")
-                                   (str "/"))
-                               "")
-                             (get-directory journal?)
-                             "/"
-                             (get-file-name journal? page)
-                             ".org")]
-          (<create! page {:redirect? false})
-          (util/format "[[file:%s][%s]]"
-                       (util/get-relative-path edit-block-file-path ref-file-path)
-                       page)))
-      (page-ref/->page-ref page))))
+  (if (config/db-based-graph?)
+    (ref/->page-ref page)
+    (file-page-handler/get-page-ref-text page)))
 
 (defn init-commands!
   []
@@ -229,44 +176,6 @@
       (graph-handler/settle-metadata-to-local! {:created-at (js/Date.now)}))
     opts)))
 
-(defn get-all-pages
-  [repo]
-  (let [db-based? (config/db-based-graph? repo)
-        graph-specific-hidden?
-        (if db-based?
-          (fn [p]
-            (and (ldb/property? p) (ldb/built-in? p)))
-          (fn [p]
-            (gp-db/built-in-pages-names (string/upper-case (:block/name p)))))]
-    (cond->>
-     (->> (db/get-all-pages repo)
-          (remove graph-specific-hidden?))
-      (not db-based?)
-      (common-handler/fix-pages-timestamps))))
-
-(defn get-filters
-  [page]
-  (if (config/db-based-graph? (state/get-current-repo))
-    (let [included-pages (:logseq.property.linked-references/includes page)
-          excluded-pages (:logseq.property.linked-references/excludes page)]
-      {:included included-pages
-       :excluded excluded-pages})
-    (let [k :filters
-          properties (:block/properties page)
-          properties-str (or (get properties k) "{}")]
-      (try (let [result (reader/read-string properties-str)]
-             (when (seq result)
-               (let [excluded-pages (->> (filter #(false? (second %)) result)
-                                         (keep first)
-                                         (keep db/get-page))
-                     included-pages (->> (filter #(true? (second %)) result)
-                                         (keep first)
-                                         (keep db/get-page))]
-                 {:included included-pages
-                  :excluded excluded-pages})))
-           (catch :default e
-             (log/error :syntax/filters e))))))
-
 (defn file-based-save-filter!
   [page filter-state]
   (property-handler/add-page-property! page :filters filter-state))
@@ -288,7 +197,7 @@
   (if (state/org-mode-file-link? (state/get-current-repo))
     (let [page-ref-text (get-page-ref-text q)
           value (gobj/get input "value")
-          old-page-ref (page-ref/->page-ref q)
+          old-page-ref (ref/->page-ref q)
           new-value (string/replace value
                                     old-page-ref
                                     page-ref-text)]
@@ -324,7 +233,7 @@
                              (text/get-namespace-last-part chosen)
                              chosen)
           wrapped-tag (if (and (util/safe-re-find #"\s+" chosen-last-part) (not wrapped?))
-                        (page-ref/->page-ref chosen-last-part)
+                        (ref/->page-ref chosen-last-part)
                         chosen-last-part)
           q (if (editor-handler/get-selected-text) "" q)
           last-pattern (if wrapped?
@@ -363,7 +272,7 @@
                                               [page (db/get-page page)])))
                                         [chosen' chosen-result])
             ref-text (if (and (de/entity? chosen-result) (not (ldb/page? chosen-result)))
-                       (page-ref/->page-ref (:block/uuid chosen-result))
+                       (ref/->page-ref (:block/uuid chosen-result))
                        (get-page-ref-text chosen'))
             result (when db-based?
                      (when-not (de/entity? chosen-result)
@@ -373,7 +282,7 @@
                                   :split-namespace? true})))
             ref-text' (if result
                         (let [title (:block/title result)]
-                          (page-ref/->page-ref title))
+                          (ref/->page-ref title))
                         ref-text)]
       (p/do!
        (editor-handler/insert-command! id
@@ -421,18 +330,20 @@
         (let [title (date/today)
               today-page (util/page-name-sanity-lc title)
               format (state/get-preferred-format repo)
-              template (state/get-default-journal-template)
+              db-based? (config/db-based-graph? repo)
               create-f (fn []
                          (p/do!
                           (<create! title {:redirect? false
                                            :split-namespace? false
-                                           :create-first-block? (not template)
+                                           :create-first-block? (if db-based?
+                                                                  true
+                                                                  (not (state/get-default-journal-template)))
                                            :today-journal? true})
-                          (state/pub-event! [:journal/insert-template today-page])
+                          (when-not db-based? (state/pub-event! [:journal/insert-template today-page]))
                           (ui-handler/re-render-root!)
                           (plugin-handler/hook-plugin-app :today-journal-created {:title today-page})))]
           (when (db/page-empty? repo today-page)
-            (if (config/db-based-graph? repo)
+            (if db-based?
               (when-not (model/get-journal-page title)
                 (create-f))
               (p/let [file-name (date/journal-title->default title)

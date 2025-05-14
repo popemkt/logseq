@@ -101,17 +101,15 @@
 }
 
 .breadcrumb {
-  @apply flex flex-row items-center flex-wrap;
+  @apply inline;
 
   .asset-container > img {
     height: 18px;
     width: unset !important;
   }
 
-  .inline-wrap {
-    & > div, & > div > div {
-      display: inherit;
-    }
+  a, svg, div {
+    @apply inline;
   }
 
   &.block-parents {
@@ -410,6 +408,12 @@
       @apply inline;
     }
   }
+
+  .block-title-wrap {
+    > .prefix-link {
+      @apply inline mx-1;
+    }
+  }
 }
 
 .asset-ref {
@@ -529,7 +533,7 @@
 }
 
 .ls-block {
-  @apply relative py-0.5 transition-[background-color] mx-auto;
+  @apply flex-1 relative py-0.5 transition-[background-color] mx-auto;
 
   &.selected {
     @apply rounded;
@@ -959,6 +963,10 @@ html.is-mac {
   .block-title-wrap {
     @apply overflow-hidden h-6 whitespace-nowrap text-ellipsis;
   }
+
+  .jtrigger {
+    @apply px-1;
+  }
 }
 
 .positioned-properties.block-below {
@@ -1004,10 +1012,12 @@ html.is-mac {
   height: 18px;
 }
 
+.ls-small-icon svg {
+    width: 12px;
+    height: 12px;
+}
 .ls-type-warning svg {
   color: var(--rx-gray-09);
-  width: 12px;
-  height: 12px;
 }
 
 .ls-page-title .ls-page-icon svg, .ls-page-title .ls-page-icon button {
@@ -1036,7 +1046,7 @@ html.is-mac {
   }
 
   > .code-block-actions {
-    @apply absolute right-1 top-1 select-none z-[1] text-xs;
+    @apply flex flex-row gap-1 opacity-0 transition-opacity ease-in duration-300 absolute right-1 top-1 select-none z-[1] text-xs bg-gray-01;
 
     button {
       @apply !py-0 h-4 text-muted-foreground hover:text-foreground text-xs px-1;
@@ -1077,4 +1087,10 @@ html.is-mac {
 .aspect-video {
   aspect-ratio: 16 / 9;
   height: auto;
+}
+
+.ls-filters {
+    div[data-testid='virtuoso-item-list'] button {
+        @apply mb-2;
+    }
 }

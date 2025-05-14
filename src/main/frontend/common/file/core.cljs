@@ -4,8 +4,8 @@
   (:require [clojure.string :as string]
             [datascript.core :as d]
             [logseq.db :as ldb]
+            [logseq.db.common.entity-plus :as entity-plus]
             [logseq.db.frontend.content :as db-content]
-            [logseq.db.frontend.entity-plus :as entity-plus]
             [logseq.db.sqlite.util :as sqlite-util]
             [logseq.graph-parser.property :as gp-property]
             [logseq.outliner.tree :as otree]))
@@ -29,6 +29,27 @@
     :else
     content))
 
+(defn- recur-replace-uuid-in-block-title
+  "Return block-title"
+  [ent max-depth]
+  (let [ref-set (loop [result-refs (:block/refs ent)
+                       current-refs (:block/refs ent)
+                       depth 0]
+                  (if (or (>= depth max-depth) (empty? current-refs))
+                    result-refs
+                    (let [next-refs (set (mapcat :block/refs current-refs))
+                          result-refs' (apply conj result-refs next-refs)]
+                      (if (= (count result-refs') (count result-refs))
+                        result-refs
+                        (recur (apply conj result-refs next-refs) next-refs (inc depth))))))]
+    (loop [result (db-content/id-ref->title-ref (:block/title ent) ref-set true)
+           last-result nil
+           depth 0]
+      (if (or (>= depth max-depth)
+              (= last-result result))
+        result
+        (recur (db-content/id-ref->title-ref result ref-set true) result (inc depth))))))
+
 (defn- transform-content
   [repo db {:block/keys [collapsed? format pre-block? title page properties] :as b} level {:keys [heading-to-list?]} context]
   (let [db-based? (sqlite-util/db-based-graph? repo)
@@ -39,7 +60,7 @@
         markdown? (= :markdown format)
         title (if db-based?
                 ;; replace [[uuid]] with block's content
-                (:block/title (assoc (d/entity db (:db/id b)) :block.temp/search? true))
+                (recur-replace-uuid-in-block-title (d/entity db (:db/id b)) 10)
                 title)
         content (or title "")
         page-first-child? (= (:db/id b) (ldb/get-first-child db (:db/id page)))
@@ -81,7 +102,7 @@
                                   (-> (string/replace content #"^\s?#+\s+" "")
                                       (string/replace #"^\s?#+\s?$" ""))
                                   content)
-                        content (content-with-collapsed-state repo format content collapsed?)
+                        content (if db-based? content (content-with-collapsed-state repo format content collapsed?))
                         new-content (indented-block-content (string/trim content) spaces-tabs)
                         sep (if (or markdown-top-heading?
                                     (string/blank? new-content))
@@ -93,13 +114,13 @@
       content)))
 
 (defn- tree->file-content-aux
-  [repo db tree {:keys [init-level] :as opts} context]
+  [repo db tree {:keys [init-level link] :as opts} context]
   (let [block-contents (transient [])]
     (loop [[f & r] tree level init-level]
       (if (nil? f)
         (->> block-contents persistent! flatten (remove nil?))
         (let [page? (nil? (:block/page f))
-              content (if page? nil (transform-content repo db f level opts context))
+              content (if (and page? (not link)) nil (transform-content repo db f level opts context))
               new-content
               (if-let [children (seq (:block/children f))]
                 (cons content (tree->file-content-aux repo db children {:init-level (inc level)} context))

@@ -14,7 +14,6 @@
             [frontend.handler.notification :as notification]
             [frontend.handler.route :as route-handler]
             [frontend.handler.ui :as ui-handler]
-            [frontend.handler.user :as user]
             [frontend.modules.outliner.op :as outliner-op]
             [frontend.modules.outliner.ui :as ui-outliner-tx]
             [frontend.state :as state]
@@ -60,18 +59,14 @@
        (if (and has-tags? (nil? title'))
          (notification/show! "Page name can't include \"#\"." :warning)
          (when-not (string/blank? title')
-           (p/let [current-user-id (user/user-uuid)
-                   options' (if db-based?
+           (p/let [options' (if db-based?
                               (cond-> (update options :tags concat (:block/tags parsed-result))
                                 (nil? (:split-namespace? options))
-                                (assoc :split-namespace? true)
-                                current-user-id
-                                (assoc :created-by current-user-id))
+                                (assoc :split-namespace? true))
                               options)
-                   result (ui-outliner-tx/transact!
-                           {:outliner-op :create-page}
-                           (outliner-op/create-page! title' options'))
-                   [_page-name page-uuid] (ldb/read-transit-str result)
+                   [_page-name page-uuid] (ui-outliner-tx/transact!
+                                           {:outliner-op :create-page}
+                                           (outliner-op/create-page! title' options'))
                    page (db/get-page (or page-uuid title'))]
              (when redirect?
                (route-handler/redirect-to-page! page-uuid)
@@ -168,9 +163,8 @@
               (notification/show! "Journals enabled" :success)))
            (-> (p/let [res (ui-outliner-tx/transact!
                             {:outliner-op :delete-page}
-                            (outliner-op/delete-page! page-uuid))
-                       res' (ldb/read-transit-str res)]
-                 (if res'
+                            (outliner-op/delete-page! page-uuid))]
+                 (if res
                    (when ok-handler (ok-handler))
                    (when error-handler (error-handler))))
                (p/catch (fn [error]

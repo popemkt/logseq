@@ -32,9 +32,8 @@
    :block/path-refs {:db/valueType   :db.type/ref
                      :db/cardinality :db.cardinality/many}
 
-   ;; tags are structured classes
-   :block/tags {:db/valueType :db.type/ref
-                :db/cardinality :db.cardinality/many}
+  :block/tags {:db/valueType :db.type/ref
+               :db/cardinality :db.cardinality/many}
 
    ;; which block this block links to, used for tag, embeds
    :block/link {:db/valueType :db.type/ref
@@ -45,7 +44,8 @@
 
    ;; for pages
    :block/alias {:db/valueType :db.type/ref
-                 :db/cardinality :db.cardinality/many}
+                 :db/cardinality :db.cardinality/many
+                 :db/index true}
 
    ;; todo keywords, e.g. "TODO", "DOING", "DONE"
    :block/marker {}

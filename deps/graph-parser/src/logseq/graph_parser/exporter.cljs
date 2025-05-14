@@ -29,7 +29,8 @@
             [logseq.graph-parser.block :as gp-block]
             [logseq.graph-parser.extract :as extract]
             [logseq.graph-parser.property :as gp-property]
-            [promesa.core :as p]))
+            [promesa.core :as p]
+            [logseq.db.common.property-util :as db-property-util]))
 
 (defn- add-missing-timestamps
   "Add updated-at or created-at timestamps if they doesn't exist"
@@ -268,22 +269,22 @@
   "If a block has a marker, convert it to a task object"
   [block {:keys [log-fn]}]
   (if-let [marker (:block/marker block)]
-    (let [old-to-new {"TODO" :logseq.task/status.todo
-                      "LATER" :logseq.task/status.todo
-                      "IN-PROGRESS" :logseq.task/status.doing
-                      "NOW" :logseq.task/status.doing
-                      "DOING" :logseq.task/status.doing
-                      "DONE" :logseq.task/status.done
-                      "WAIT" :logseq.task/status.backlog
-                      "WAITING" :logseq.task/status.backlog
-                      "CANCELED" :logseq.task/status.canceled
-                      "CANCELLED" :logseq.task/status.canceled}
+    (let [old-to-new {"TODO" :logseq.property/status.todo
+                      "LATER" :logseq.property/status.todo
+                      "IN-PROGRESS" :logseq.property/status.doing
+                      "NOW" :logseq.property/status.doing
+                      "DOING" :logseq.property/status.doing
+                      "DONE" :logseq.property/status.done
+                      "WAIT" :logseq.property/status.backlog
+                      "WAITING" :logseq.property/status.backlog
+                      "CANCELED" :logseq.property/status.canceled
+                      "CANCELLED" :logseq.property/status.canceled}
           status-ident (or (old-to-new marker)
                            (do
                              (log-fn :invalid-todo (str (pr-str marker) " is not a valid marker so setting it to TODO"))
-                             :logseq.task/status.todo))]
+                             :logseq.property/status.todo))]
       (-> block
-          (assoc :logseq.task/status status-ident)
+          (assoc :logseq.property/status status-ident)
           (update :block/title string/replace-first (re-pattern (str marker "\\s*")) "")
           (update :block/tags (fnil conj []) :logseq.class/Task)
           (dissoc :block/marker)))
@@ -292,15 +293,15 @@
 (defn- update-block-priority
   [block {:keys [log-fn]}]
   (if-let [priority (:block/priority block)]
-    (let [old-to-new {"A" :logseq.task/priority.high
-                      "B" :logseq.task/priority.medium
-                      "C" :logseq.task/priority.low}
+    (let [old-to-new {"A" :logseq.property/priority.high
+                      "B" :logseq.property/priority.medium
+                      "C" :logseq.property/priority.low}
           priority-value (or (old-to-new priority)
                              (do
                                (log-fn :invalid-priority (str (pr-str priority) " is not a valid priority so setting it to low"))
-                               :logseq.task/priority.low))]
+                               :logseq.property/priority.low))]
       (-> block
-          (assoc :logseq.task/priority priority-value)
+          (assoc :logseq.property/priority priority-value)
           (update :block/title string/replace-first (re-pattern (str "\\[#" priority "\\]" "\\s*")) "")
           (dissoc :block/priority)))
     block))
@@ -325,7 +326,7 @@
                                       :block/journal-day date-int)))
                          (assoc :block/tags #{:logseq.class/Journal}))
           time-long (tc/to-long (date-time-util/int->local-date date-int))
-          datetime-property (if (:block/deadline block) :logseq.task/deadline :logseq.task/scheduled)]
+          datetime-property (if (:block/deadline block) :logseq.property/deadline :logseq.property/scheduled)]
       {:block
        (-> block
            (assoc datetime-property time-long)
@@ -405,38 +406,36 @@
     (when (and prev-type (not= prev-type prop-type))
       {:type {:from prev-type :to prop-type}})))
 
-(def built-in-property-name-to-idents
-  "Map of all built-in keyword property names to their idents. Using in-memory property
-  names because these are legacy names already in a user's file graph"
-  (merge (->> (dissoc db-property/built-in-properties :logseq.property/publishing-public?)
-              (map (fn [[k v]]
-                     [(:name v) k]))
-              (into {}))
-         ;; TODO: Move 3 remaining :name config from built-in-properties to here
-         {:public :logseq.property/publishing-public?}))
+(def built-in-property-file-to-db-idents
+  "Map of built-in property file ids to their db graph idents"
+  (->> (keys db-property/built-in-properties)
+       (map (fn [k]
+              [(db-property-util/get-file-pid k) k]))
+       (into {})))
 
-(def all-built-in-property-names
-  "All built-in property names as a set of keywords"
-  (-> built-in-property-name-to-idents keys set
+(def all-built-in-property-file-ids
+  "All built-in property file ids as a set of keywords"
+  (-> built-in-property-file-to-db-idents keys set
       ;; built-in-properties that map to new properties
       (set/union #{:filters :query-table :query-properties :query-sort-by :query-sort-desc :hl-stamp :file :file-path})))
 
+;; TODO: Review whether this should be using :block/title instead of file graph ids
 (def all-built-in-names
   "All built-in properties and classes as a set of keywords"
-  (set/union all-built-in-property-names
+  (set/union all-built-in-property-file-ids
              (set (->> db-class/built-in-classes
                        vals
                        (map #(-> % :title string/lower-case keyword))))))
 
 (def file-built-in-property-names
   "File-graph built-in property names that are supported. Expressed as set of keywords"
-  #{:alias :tags :background-color :background-image :heading
+  #{:alias :tags :background-color :heading
     :query-table :query-properties :query-sort-by :query-sort-desc
     :ls-type :hl-type :hl-color :hl-page :hl-stamp :hl-value :file :file-path
     :logseq.order-list-type :logseq.tldraw.page :logseq.tldraw.shape
     :icon :public :exclude-from-graph-view :filters})
 
-(assert (set/subset? file-built-in-property-names all-built-in-property-names)
+(assert (set/subset? file-built-in-property-names all-built-in-property-file-ids)
         "All file-built-in properties are used in db graph")
 
 (def query-table-special-keys
@@ -518,7 +517,7 @@
                            :ls-type
                            [[:logseq.property/ls-type (keyword prop-value)]]
                            ;; else
-                           [[(built-in-property-name-to-idents prop) prop-value]]))))
+                           [[(built-in-property-file-to-db-idents prop) prop-value]]))))
              (into {}))]
     (cond-> m
       (and (contains? props :query-sort-desc) (:query-sort-by props))
@@ -661,7 +660,7 @@
    ;; Not supported as they have been ignored for a long time and cause invalid built-in pages
    :now :later :doing :done :canceled :cancelled :in-progress :todo :wait :waiting
    ;; deprecated in db graphs
-   :macros :logseq.query/nlp-date
+   :background-image :macros :logseq.query/nlp-date
    :card-last-interval :card-repeats :card-last-reviewed :card-next-schedule
    :card-ease-factor :card-last-score
    :logseq.color :logseq.table.borders :logseq.table.stripes :logseq.table.max-width
@@ -918,30 +917,41 @@
       (dissoc :block/whiteboard?)
       (update-page-tags db user-options per-file-state all-idents)))
 
+(defn- get-page-parents
+  "Like ldb/get-page-parents but using all-existing-page-uuids"
+  [node all-existing-page-uuids]
+  (let [get-parent (fn get-parent [n]
+                     (when (:block/uuid (:logseq.property/parent n))
+                       (or (get all-existing-page-uuids (:block/uuid (:logseq.property/parent n)))
+                           (throw (ex-info (str "No parent page found for " (pr-str (:block/uuid (:logseq.property/parent n))))
+                                           {:node n})))))]
+    (when-let [parent (get-parent node)]
+      (loop [current-parent parent
+             parents' []]
+        (if (and current-parent (not (contains? parents' current-parent)))
+          (recur (get-parent current-parent)
+                 (conj parents' current-parent))
+          (vec (reverse parents')))))))
+
 (defn- get-all-existing-page-uuids
   "Returns a map of unique page names mapped to their uuids. The page names
    are in a format that is compatible with extract/extract e.g. namespace pages have
    their full hierarchy in the name"
-  [db classes-from-property-parents]
-  (->> db
-       ;; don't fetch built-in as that would give the wrong entity if a user used
-       ;; a db-only built-in property name e.g. description
-       (d/q '[:find [?b ...]
-              :where [?b :block/name] [(missing? $ ?b :logseq.property/built-in?)]])
-       (map #(d/entity db %))
-       (map #(vector
-              (if-let [parents (and (or (ldb/internal-page? %) (ldb/class? %))
+  [classes-from-property-parents all-existing-page-uuids]
+  (->> all-existing-page-uuids
+       (map (fn [[_ p]]
+              (vector
+               (if-let [parents (and (or (contains? (:block/tags p) :logseq.class/Tag)
+                                         (contains? (:block/tags p) :logseq.class/Page))
                                     ;; These classes have parents now but don't in file graphs (and in extract)
-                                    (not (contains? classes-from-property-parents (:block/title %)))
-                                    (->> (ldb/get-page-parents %)
-                                         (remove (fn [e] (= :logseq.class/Root (:db/ident e))))
-                                         seq))]
+                                     (not (contains? classes-from-property-parents (:block/title p)))
+                                     (get-page-parents p all-existing-page-uuids))]
                 ;; Build a :block/name for namespace pages that matches data from extract/extract
-                (string/join ns-util/namespace-char (map :block/name (conj (vec parents) %)))
-                (:block/name %))
-              (or (:block/uuid %)
-                  (throw (ex-info (str "No uuid for existing page " (pr-str (:block/name %)))
-                                  (select-keys % [:block/name :block/tags]))))))
+                 (string/join ns-util/namespace-char (map :block/name (conj (vec parents) p)))
+                 (:block/name p))
+               (or (:block/uuid p)
+                   (throw (ex-info (str "No uuid for existing page " (pr-str (:block/name p)))
+                                   (select-keys p [:block/name :block/tags])))))))
        (into {})))
 
 (defn- build-existing-page
@@ -1008,8 +1018,9 @@
                                       (not (:block/file %))))
                         ;; remove file path relative
                         (map #(dissoc % :block/file)))
-        ;; Fetch all named ents once per import file to speed up named lookups
-        all-existing-page-uuids (get-all-existing-page-uuids @conn @(:classes-from-property-parents import-state))
+        ;; Build all named ents once per import file to speed up named lookups
+        all-existing-page-uuids (get-all-existing-page-uuids @(:classes-from-property-parents import-state)
+                                                             @(:all-existing-page-uuids import-state))
         all-pages (map #(modify-page-tx % all-existing-page-uuids) all-pages*)
         all-new-page-uuids (->> all-pages
                                 (remove #(all-existing-page-uuids (or (::original-name %) (:block/name %))))
@@ -1119,6 +1130,8 @@
    ;; Map of property names (keyword) and their current schemas (map of qualified properties).
    ;; Used for adding schemas to properties and detecting changes across a property's usage
    :property-schemas (atom {})
+   ;; Indexes all created pages by uuid. Index is used to fetch all parents of a page
+   :all-existing-page-uuids (atom {})
    ;; Map of property or class names (keyword) to db-ident keywords
    :all-idents (atom {})
    ;; Set of children pages turned into classes by :property-parent-classes option
@@ -1312,6 +1325,12 @@
                  classes-tx)
            retract-page-tag-from-existing-pages)}))
 
+(defn- save-from-tx
+  "Save importer state from given txs"
+  [txs {:keys [import-state]}]
+  (when-let [nodes (seq (filter :block/name txs))]
+    (swap! (:all-existing-page-uuids import-state) merge (into {} (map (juxt :block/uuid identity) nodes)))))
+
 (defn add-file-to-db-graph
   "Parse file and save parsed data to the given db graph. Options available:
 
@@ -1351,6 +1370,7 @@
         ;; _ (when (seq property-pages-tx) (cljs.pprint/pprint {:property-pages-tx property-pages-tx}))
         ;; Necessary to transact new property entities first so that block+page properties can be transacted next
         main-props-tx-report (d/transact! conn property-pages-tx {::new-graph? true ::path file})
+        _ (save-from-tx property-pages-tx options)
 
         classes-tx @(:classes-tx tx-options)
         {:keys [retract-page-tags-tx] pages-tx'' :pages-tx} (clean-extra-invalid-tags @conn pages-tx' classes-tx existing-pages)
@@ -1376,11 +1396,13 @@
         ;;                        [whiteboard-pages pages-index page-properties-tx property-page-properties-tx pages-tx' classes-tx blocks-index blocks-tx]))
         ;; _ (when (not (seq whiteboard-pages)) (cljs.pprint/pprint {#_:property-pages-tx #_property-pages-tx :pages-tx pages-tx :tx tx'}))
         main-tx-report (d/transact! conn tx' {::new-graph? true ::path file})
+        _ (save-from-tx tx' options)
 
         upstream-properties-tx
         (build-upstream-properties-tx @conn @(:upstream-properties tx-options) (:import-state options) log-fn)
         ;; _ (when (seq upstream-properties-tx) (cljs.pprint/pprint {:upstream-properties-tx upstream-properties-tx}))
-        upstream-tx-report (when (seq upstream-properties-tx) (d/transact! conn upstream-properties-tx {::new-graph? true ::path file}))]
+        upstream-tx-report (when (seq upstream-properties-tx) (d/transact! conn upstream-properties-tx {::new-graph? true ::path file}))
+        _ (save-from-tx upstream-properties-tx options)]
 
     ;; Return all tx-reports that occurred in this fn as UI needs to know what changed
     [main-props-tx-report main-tx-report upstream-tx-report]))

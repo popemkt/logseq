@@ -9,6 +9,7 @@
             [frontend.db :as db]
             [frontend.db.async :as db-async]
             [frontend.db.conn :as conn]
+            [frontend.db.file-based.model :as file-model]
             [frontend.db.model :as db-model]
             [frontend.db.query-custom :as query-custom]
             [frontend.db.query-dsl :as query-dsl]
@@ -222,7 +223,7 @@
   (fn [path ^js data]
     (let [repo ""
           path (util/node-path.join path "package.json")]
-      (fs/write-file! repo nil path (js/JSON.stringify data nil 2) {:skip-compare? true}))))
+      (fs/write-plain-text-file! repo nil path (js/JSON.stringify data nil 2) {:skip-compare? true}))))
 
 (def ^:export save_focused_code_editor_content
   (fn []
@@ -242,7 +243,7 @@
           user-path-root (util/node-path.dirname user-path)
           exist?         (fs/file-exists? user-path-root "")
           _              (when-not exist? (fs/mkdir-recur! user-path-root))
-          _              (fs/write-file! repo nil user-path content {:skip-compare? true})]
+          _              (fs/write-plain-text-file! repo nil user-path content {:skip-compare? true})]
     user-path))
 
 (defn ^:export write_dotdir_file
@@ -378,7 +379,7 @@
             path (plugin-handler/get-ls-dotdir-root)
             path (util/node-path.join path "preferences.json")]
         (if (util/electron?)
-          (fs/write-file! repo nil path (js/JSON.stringify data nil 2) {:skip-compare? true})
+          (fs/write-plain-text-file! repo nil path (js/JSON.stringify data nil 2) {:skip-compare? true})
           (idb/set-item! path data))))))
 
 (def ^:export load_plugin_user_settings
@@ -665,7 +666,6 @@
                           :journal? journal
                           :create-first-block? (if (boolean? createFirstBlock) createFirstBlock true)
                           :format format}
-
                           (not db-base?)
                           (assoc :properties properties))))
             _ (when (and db-base? (seq properties))
@@ -718,8 +718,9 @@
 (defn- <ensure-page-loaded
   [block-uuid-or-page-name]
   (p/let [repo (state/get-current-repo)
-          result (db-async/<get-block repo (str block-uuid-or-page-name))
-          block (if (:block result) (:block result) result)
+          block (db-async/<get-block repo (str block-uuid-or-page-name)
+                                     {:children-props '[*]
+                                      :nested-children? true})
           _ (when-let [page-id (:db/id (:block/page block))]
               (when-let [page-uuid (:block/uuid (db/entity page-id))]
                 (db-async/<get-block repo page-uuid)))]
@@ -793,8 +794,7 @@
             (some-> (editor-handler/insert-block-tree-after-target
                      (:db/id block) sibling bb (get block :block/format :markdown) keep-uuid?)
                     (p/then (fn [results]
-                              (some-> results (ldb/read-transit-str)
-                                      :blocks (sdk-utils/normalize-keyword-for-json) (bean/->js)))))))))))
+                              (some-> results :blocks (sdk-utils/normalize-keyword-for-json) (bean/->js)))))))))))
 
 (def ^:export remove_block
   (fn [block-uuid ^js _opts]
@@ -855,7 +855,7 @@
     (p/let [id (sdk-utils/uuid-or-throw-error block-uuid)
             block (<pull-block id)
             ;; Load all children blocks
-            _ (api-block/sync-children-blocks! block)]
+            _ (api-block/<sync-children-blocks! block)]
       (when block
         (when-let [sibling (ldb/get-left-sibling (db/entity (:db/id block)))]
           (get_block (:block/uuid sibling) opts))))))
@@ -865,7 +865,7 @@
     (p/let [id (sdk-utils/uuid-or-throw-error block-uuid)
             block (<pull-block id)
             ;; Load all children blocks
-            _ (api-block/sync-children-blocks! block)]
+            _ (api-block/<sync-children-blocks! block)]
       (when block
         (p/let [sibling (ldb/get-right-sibling (db/entity (:db/id block)))]
           (get_block (:block/uuid sibling) opts))))))
@@ -903,7 +903,10 @@
   [k]
   (this-as this
            (p/let [prop (-get-property this k)]
-             (bean/->js (sdk-utils/normalize-keyword-for-json prop)))))
+             (-> prop
+                 (assoc :type (:logseq.property/type prop))
+                 (sdk-utils/normalize-keyword-for-json)
+                 (bean/->js)))))
 
 (defn ^:export upsert_property
   "schema:
@@ -929,7 +932,8 @@
                                 (string? (:cardinality schema))
                                 (update :cardinality keyword)
                                 (string? (:type schema))
-                                (update :type keyword))
+                                (-> (assoc :logseq.property/type (keyword (:type schema)))
+                                    (dissoc :type)))
                        p (db-property-handler/upsert-property! k schema
                                                                (cond-> opts
                                                                  name
@@ -1042,13 +1046,13 @@
 (defn ^:export get_pages_from_namespace
   [ns]
   (when-let [repo (and ns (state/get-current-repo))]
-    (when-let [pages (db-model/get-namespace-pages repo ns)]
+    (when-let [pages (file-model/get-namespace-pages repo ns)]
       (bean/->js (sdk-utils/normalize-keyword-for-json pages)))))
 
 (defn ^:export get_pages_tree_from_namespace
   [ns]
   (when-let [repo (and ns (state/get-current-repo))]
-    (when-let [pages (db-model/get-namespace-hierarchy repo ns)]
+    (when-let [pages (file-model/get-namespace-hierarchy repo ns)]
       (bean/->js (sdk-utils/normalize-keyword-for-json pages)))))
 
 (defn- first-child-of-block
@@ -1066,7 +1070,7 @@
                                                                        :create-first-block? false
                                                                        :format              (state/get-preferred-format)}))]
     (when-let [block (db-model/get-page uuid-or-page-name)]
-      (-> (api-block/sync-children-blocks! block)
+      (-> (api-block/<sync-children-blocks! block)
           (p/then (fn []
                     (let [block' (first-child-of-block block)
                           opts (bean/->clj opts)

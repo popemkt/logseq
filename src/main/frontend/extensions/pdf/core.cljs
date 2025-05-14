@@ -14,13 +14,13 @@
             [frontend.extensions.pdf.windows :as pdf-windows]
             [frontend.handler.notification :as notification]
             [frontend.handler.property :as property-handler]
-            [frontend.hooks :as hooks]
             [frontend.modules.shortcut.core :as shortcut]
             [frontend.rum :refer [use-atom]]
             [frontend.state :as state]
             [frontend.ui :as ui]
             [frontend.util :as util]
             [goog.functions :refer [debounce]]
+            [logseq.shui.hooks :as hooks]
             [logseq.shui.ui :as shui]
             [medley.core :as medley]
             [promesa.core :as p]
@@ -688,15 +688,15 @@
        (when-let [grouped-hls (and (sequential? highlights) (group-by :page highlights))]
          (doseq [page loaded-pages]
            (when-let [^js/HTMLDivElement hls-layer (pdf-utils/resolve-hls-layer! viewer page)]
-             (let [page-hls (get grouped-hls page)]
-
-               (rum/mount
-                (pdf-highlights-region-container
-                 viewer page-hls {:show-ctx-menu! show-ctx-menu!
-                                  :upd-hl!        upd-hl!})
-
-                hls-layer)))))
-
+             (let [page-hls (get grouped-hls page)
+                   hls-render (pdf-highlights-region-container
+                               viewer page-hls {:show-ctx-menu! show-ctx-menu!
+                                                :upd-hl! upd-hl!})
+                   ^js mounted-root (.-mountedRoot hls-layer)]
+               (if (nil? mounted-root)
+                 (->> (rum/mount hls-render hls-layer)
+                      (set! (. hls-layer -mountedRoot)))
+                 (.render mounted-root hls-render))))))
        ;; destroy
        #())
      [loaded-pages highlights])

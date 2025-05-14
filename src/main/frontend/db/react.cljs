@@ -6,14 +6,11 @@
   "
   (:require [clojure.core.async :as async]
             [datascript.core :as d]
-            [frontend.date :as date]
             [frontend.db.async.util :as db-async-util]
             [frontend.db.conn :as conn]
             [frontend.db.utils :as db-utils]
             [frontend.state :as state]
             [frontend.util :as util]
-            [logseq.common.util :as common-util]
-            [logseq.db :as ldb]
             [promesa.core :as p]))
 
 ;; Query atom of map of Key ([repo q inputs]) -> atom
@@ -85,12 +82,17 @@
     (:result result)))
 
 (defn- <q-aux
-  [repo db query-fn inputs-fn k query inputs]
+  [repo db query-fn inputs-fn k query inputs built-in-query?]
   (let [kv? (and (vector? k) (= :kv (second k)))
-        journals? (and (vector? k) (= :frontend.worker.react/journals (last k)))
-        q (if (or journals? util/node-test?)
+        q (if util/node-test?
             (fn [query inputs] (apply d/q query db inputs))
-            (fn [query inputs] (apply db-async-util/<q repo {} (cons query inputs))))]
+            (fn [query inputs]
+              (let [q-f #(apply db-async-util/<q repo {:transact-db? false} (cons query inputs))]
+                (if built-in-query?
+                  ;; delay built-in-queries to not block journal rendering
+                  (p/let [_ (p/delay 100)]
+                    (q-f))
+                  (q-f)))))]
     (when (or query-fn query kv?)
       (cond
         query-fn
@@ -110,7 +112,8 @@
         (q query nil)))))
 
 (defn q
-  [repo k {:keys [use-cache? transform-fn query-fn inputs-fn disable-reactive? return-promise?]
+  [repo k {:keys [use-cache? transform-fn query-fn inputs-fn
+                  disable-reactive? return-promise? built-in-query?]
            :or {use-cache? true
                 transform-fn identity}} query & inputs]
   ;; {:pre [(s/valid? :frontend.worker.react/block k)]}
@@ -125,7 +128,7 @@
         (if (and use-cache? result-atom)
           result-atom
           (let [result-atom (or result-atom (atom nil))
-                p-or-value (<q-aux repo db query-fn inputs-fn k query inputs)]
+                p-or-value (<q-aux repo db query-fn inputs-fn k query inputs built-in-query?)]
             (when-not disable-reactive?
               (add-q! k query inputs result-atom transform-fn query-fn inputs-fn))
             (cond
@@ -145,29 +148,17 @@
                 (set! (.-state result-atom) result')
                 result-atom))))))))
 
-(defn get-current-page
-  []
-  (let [match (:route-match @state/state)
-        route-name (get-in match [:data :name])
-        page (case route-name
-               :page
-               (get-in match [:path-params :name])
-               (date/journal-name))]
-    (when page
-      (if (common-util/uuid-string? page)
-        (db-utils/entity [:block/uuid (uuid page)])
-        (ldb/get-page (conn/get-db) page)))))
-
 (defn- execute-query!
-  [graph db k {:keys [query inputs transform-fn query-fn inputs-fn result]
+  [graph db k {:keys [query inputs transform-fn query-fn inputs-fn result built-in-query?]
                :or {transform-fn identity}}]
-  (p/let [p-or-value (<q-aux graph db query-fn inputs-fn k query inputs)
+  (p/let [p-or-value (<q-aux graph db query-fn inputs-fn k query inputs built-in-query?)
           result' (transform-fn p-or-value)]
     (when-not (= result' result)
       (set-new-result! k result'))))
 
 (defn refresh-affected-queries!
-  [repo-url affected-keys]
+  [repo-url affected-keys & {:keys [skip-kv-custom-keys?]
+                             :or {skip-kv-custom-keys? false}}]
   (util/profile
    "refresh!"
    (let [db (conn/get-db repo-url)
@@ -180,7 +171,8 @@
                                 [k' cache]))) @query-state)
                     (into {}))
          all-keys (concat (distinct affected-keys)
-                          (filter #(contains? #{:custom :kv} (first %)) (keys state)))]
+                          (when-not skip-kv-custom-keys?
+                            (filter #(contains? #{:custom :kv} (first %)) (keys state))))]
      (doseq [k all-keys]
        (when-let [cache (get state k)]
          (let [{:keys [query query-fn]} cache
@@ -188,7 +180,8 @@
            (when (or query query-fn)
              (try
                (let [f #(execute-query! repo-url db (vec (cons repo-url k)) cache)]
-                 (when-not custom?
+                 (if custom?
+                   (async/put! (state/get-reactive-custom-queries-chan) [f query])
                    (f)))
                (catch :default e
                  (js/console.error e)

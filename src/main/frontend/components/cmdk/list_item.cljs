@@ -2,8 +2,8 @@
   (:require
    ["remove-accents" :as remove-accents]
    [clojure.string :as string]
-   [frontend.hooks :as hooks]
    [goog.string :as gstring]
+   [logseq.shui.hooks :as hooks]
    [logseq.shui.ui :as shui]
    [rum.core :as rum]))
 
@@ -40,7 +40,7 @@
             highlighted-text (string/replace normal-text query-re "<:hlmarker>$1<:hlmarker>")
             segs (string/split highlighted-text #"<:hlmarker>")]
         (if (seq segs)
-          (into [:span]
+          (into [:span {:data-testid text-string}]
                 (map-indexed (fn [i seg]
                                (if (even? i)
                                  [:span seg]

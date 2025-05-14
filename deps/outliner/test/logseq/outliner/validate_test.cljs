@@ -1,7 +1,7 @@
 (ns logseq.outliner.validate-test
   (:require [cljs.test :refer [are deftest is testing]]
             [datascript.core :as d]
-            [logseq.db.frontend.entity-plus :as entity-plus]
+            [logseq.db.common.entity-plus :as entity-plus]
             [logseq.db.test.helper :as db-test]
             [logseq.outliner.validate :as outliner-validate]))
 
@@ -138,7 +138,7 @@
     (is (thrown-with-msg?
          js/Error
          #"Can't set tag.*Priority"
-         (outliner-validate/validate-tags-property @conn [(:db/id block)] :logseq.task/priority))
+         (outliner-validate/validate-tags-property @conn [(:db/id block)] :logseq.property/priority))
         "Nodes can't be tagged with built-in non tags")))
 
 ;; Try as many of the validations against a new graph to confirm

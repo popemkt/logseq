@@ -48,7 +48,6 @@
  :relaunch-confirm-to-work "Sie sollten die App neu starten, damit sie funktioniert. Möchten Sie sie jetzt neu starten?"
  :remove-background "Hintergrund entfernen"
  :remove-heading "Überschrift entfernen"
- :remove-orphaned-pages "Nie referenzierte Seiten löschen?"
  :save "Speichern"
  :settings "Einstellungen"
  :settings-of-plugins "Plugins"
@@ -245,8 +244,6 @@
  :page/open-in-finder "Im Verzeichnis öffnen"
  :page/open-with-default-app "Mit Standard-Anwendung öffnen"
  :page/page-already-exists "Die Seite “{1}” existiert bereits!"
- :page/slide-view "Als Slides anzeigen"
- :page/slide-view-tip-go-fullscreen (fn [] [[:span.opacity-70 "Tipp: Drücken Sie "] [:code "f"] [:span.opacity-70 ", um zum Vollbild zu wechseln"]])
  :page/something-went-wrong "Es ist etwas schief gelaufen."
  :page/step "Schritt {1}"
  :page/try "Versuch"
@@ -355,8 +352,6 @@
  :settings-page/update-available "Neue Version gefunden: "
  :settings-page/update-error-1 "⚠️ Ups, Etwas ist schiefgelaufen!"
  :settings-page/update-error-2 " Überprüfen Sie den "
-
- :settings-permission/start-granting "Erlauben"
 
  :tips/all-done "Alles erledigt!"
 

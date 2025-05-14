@@ -18,7 +18,6 @@
             [frontend.handler.page :as page-handler]
             [frontend.handler.route :as route-handler]
             [frontend.handler.whiteboard :as whiteboard-handler]
-            [frontend.hooks :as hooks]
             [frontend.mixins :as mixins]
             [frontend.modules.shortcut.core :as shortcut]
             [frontend.modules.shortcut.utils :as shortcut-utils]
@@ -36,6 +35,7 @@
             [logseq.common.util.block-ref :as block-ref]
             [logseq.db :as ldb]
             [logseq.graph-parser.text :as text]
+            [logseq.shui.hooks :as hooks]
             [logseq.shui.ui :as shui]
             [promesa.core :as p]
             [rum.core :as rum]))
@@ -58,7 +58,7 @@
   (let [current-page (state/get-current-page)]
     (->>
      [(when current-page
-        {:filter {:group :current-page} :text "Search only current page" :info "Add filter to search" :icon-theme :gray :icon "page"})
+        {:filter {:group :current-page} :text "Search only current page" :info "Add filter to search" :icon-theme :gray :icon "file"})
       {:filter {:group :nodes} :text "Search only nodes" :info "Add filter to search" :icon-theme :gray :icon "letter-n"}
       {:filter {:group :commands} :text "Search only commands" :info "Add filter to search" :icon-theme :gray :icon "command"}
       {:filter {:group :files} :text "Search only files" :info "Add filter to search" :icon-theme :gray :icon "file"}
@@ -112,16 +112,23 @@
                             (take (get-group-limit group) items))))
         node-exists? (let [blocks-result (keep :source-block (get-in results [:nodes :items]))]
                        (when-not (string/blank? input)
-                         (or (some-> (text/get-namespace-last-part input)
-                                     string/trim
-                                     db/get-page)
+                         (or (let [page (some-> (text/get-namespace-last-part input)
+                                                string/trim
+                                                db/get-page)
+                                   parent-title (:block/title (:logseq.property/parent page))
+                                   namespace? (string/includes? input "/")]
+                               (and page
+                                    (or (not namespace?)
+                                        (and
+                                         parent-title
+                                         (= (util/page-name-sanity-lc parent-title)
+                                            (util/page-name-sanity-lc (nth (reverse (string/split input "/")) 1)))))))
                              (some (fn [block]
                                      (and
                                       (:block/tags block)
                                       (= input (util/page-name-sanity-lc (:block/title block))))) blocks-result))))
         include-slash? (or (string/includes? input "/")
                            (string/starts-with? input "/"))
-        db-based? (config/db-based-graph?)
         order* (cond
                  (= search-mode :graph)
                  []
@@ -150,8 +157,7 @@
                      ["Create"         :create       (create-items input)])
                    ["Current page"     :current-page   (visible-items :current-page)]
                    ["Nodes"            :nodes         (visible-items :nodes)]
-                   (when (and db-based? (string/blank? input))
-                     ["Recently updated" :recently-updated-pages (visible-items :recently-updated-pages)])
+                   ["Recently updated" :recently-updated-pages (visible-items :recently-updated-pages)]
                    ["Commands"         :commands       (visible-items :commands)]
                    ["Files"            :files          (visible-items :files)]
                    ["Filters"          :filters        (visible-items :filters)]]
@@ -194,23 +200,22 @@
     (ldb/property? entity)
     "letter-p"
     (ldb/whiteboard? entity)
-    "whiteboard"
+    "writing"
     :else
-    "page"))
+    "file"))
 
 (defmethod load-results :initial [_ state]
-  (let [!results (::results state)]
-    (if (config/db-based-graph?)
-      (let [recent-pages (map (fn [block]
-                                (let [text (block-handler/block-unique-title block)
-                                      icon (get-page-icon block)]
-                                  {:icon icon
-                                   :icon-theme :gray
-                                   :text text
-                                   :source-block block}))
-                              (ldb/get-recent-updated-pages (db/get-db)))]
-        (reset! !results (assoc-in default-results [:recently-updated-pages :items] recent-pages)))
-      !results)))
+  (when-let [db (db/get-db)]
+    (let [!results (::results state)
+          recent-pages (map (fn [block]
+                              (let [text (block-handler/block-unique-title block)
+                                    icon (get-page-icon block)]
+                                {:icon icon
+                                 :icon-theme :gray
+                                 :text text
+                                 :source-block block}))
+                            (ldb/get-recent-updated-pages db))]
+      (reset! !results (assoc-in default-results [:recently-updated-pages :items] recent-pages)))))
 
 ;; The commands search uses the command-palette handler
 (defmethod load-results :commands [group state]
@@ -409,8 +414,9 @@
 
 (defmethod handle-action :open-page [_ state _event]
   (when-let [page-name (get-highlighted-page-uuid-or-name state)]
-    (let [page (db/get-page page-name)]
-      (route-handler/redirect-to-page! (:block/uuid page)))
+    (let [page-uuid (get (db/get-page page-name) :block/uuid
+                         (when (uuid? page-name) page-name))]
+      (route-handler/redirect-to-page! page-uuid))
     (shui/dialog-close! :ls-dialog-cmdk)))
 
 (defmethod handle-action :open-block [_ state _event]
@@ -498,12 +504,11 @@
 
 (defmethod handle-action :trigger [_ state _event]
   (let [command (some-> state state->highlighted-item :source-command)
-        dont-close-commands #{:graph/open :graph/remove :dev/replace-graph-with-db-file
-                              :ui/toggle-settings :go/flashcards :misc/import-edn-data}]
+        dont-close-commands #{:graph/open :graph/remove :dev/replace-graph-with-db-file :misc/import-edn-data}]
     (when-let [action (:action command)]
-      (action)
       (when-not (contains? dont-close-commands (:id command))
-        (shui/dialog-close! :ls-dialog-cmdk)))))
+        (shui/dialog-close! :ls-dialog-cmdk))
+      (util/schedule #(action) 32))))
 
 (defmethod handle-action :create [_ state _event]
   (let [item (state->highlighted-item state)
@@ -521,7 +526,7 @@
                      create-page? (page-handler/<create! @!input {:redirect? true}))]
       (shui/dialog-close! :ls-dialog-cmdk)
       (when (and create-class? result)
-        (state/pub-event! [:class/configure result])))))
+        (state/sidebar-add-block! (state/get-current-repo) (:db/id result) :block)))))
 
 (defn- get-filter-user-input
   [input]
@@ -625,7 +630,7 @@
       [:div.search-results
        (for [item visible-items
              :let [highlighted? (= item highlighted-item)
-                   page? (= "page" (some-> item :icon))
+                   page? (= "file" (some-> item :icon))
                    text (some-> item :text)
                    source-page (some-> item :source-page)
                    hls-page? (and page? (pdf-utils/hls-file? (:block/title source-page)))]]
@@ -803,7 +808,7 @@
                                   (handle-input-change state e)
                                   (when-let [on-change (:on-input-change opts)]
                                     (on-change new-value))))
-                              100)
+                              200)
                              [])]
     ;; use-effect [results-ordered input] to check whether the highlighted item is still in the results,
     ;; if not then clear that puppy out!

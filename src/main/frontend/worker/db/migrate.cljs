@@ -109,18 +109,110 @@
                               [:db/add id new prop-value]]))))
             old-new-props)))
 
+(defn- rename-properties-aux
+  [db props-to-rename]
+  (let [property-tx (map
+                     (fn [[old new]]
+                       (let [e-new (d/entity db new)
+                             e-old (d/entity db old)]
+                         (if e-new
+                           (when e-old
+                             [:db/retractEntity (:db/id e-old)])
+                           (merge {:db/id (:db/id (d/entity db old))
+                                   :db/ident new}
+                                  (when-let [new-title (get-in db-property/built-in-properties [new :title])]
+                                    {:block/title new-title
+                                     :block/name (common-util/page-name-sanity-lc new-title)})))))
+                     props-to-rename)
+        titles-tx (->> (d/datoms db :avet :block/title)
+                       (keep (fn [d]
+                               (let [title (:v d)]
+                                 (if (string? title)
+                                   (when-let [props (seq (filter (fn [[old _new]] (string/includes? (:v d) (str old))) props-to-rename))]
+                                     (let [title' (reduce (fn [title [old new]]
+                                                            (string/replace title (str old) (str new))) title props)]
+                                       [:db/add (:e d) :block/title title']))
+                                   [:db/retract (:e d) :block/title])))))
+        sorting-tx (->> (d/datoms db :avet :logseq.property.table/sorting)
+                        (keep (fn [d]
+                                (when (coll? (:v d))
+                                  (when-let [props (seq (filter (fn [[old _new]]
+                                                                  (some (fn [item] (= old (:id item))) (:v d))) props-to-rename))]
+                                    (let [value (reduce
+                                                 (fn [sorting [old new]]
+                                                   (mapv
+                                                    (fn [item]
+                                                      (if (= old (:id item))
+                                                        (assoc item :id new)
+                                                        item))
+                                                    sorting))
+                                                 (:v d)
+                                                 props)]
+                                      [:db/add (:e d) :logseq.property.table/sorting value]))))))
+        sized-columns-tx (->> (d/datoms db :avet :logseq.property.table/sized-columns)
+                              (keep (fn [d]
+                                      (when (map? (:v d))
+                                        (when-let [props (seq (filter (fn [[old _new]] (get (:v d) old)) props-to-rename))]
+                                          (let [value (reduce
+                                                       (fn [sizes [old new]]
+                                                         (if-let [size (get sizes old)]
+                                                           (-> sizes
+                                                               (dissoc old)
+                                                               (assoc new size))
+                                                           sizes))
+                                                       (:v d)
+                                                       props)]
+                                            [:db/add (:e d) :logseq.property.table/sized-columns value]))))))
+        hidden-columns-tx (mapcat
+                           (fn [[old new]]
+                             (->> (d/datoms db :avet :logseq.property.table/hidden-columns old)
+                                  (mapcat (fn [d]
+                                            [[:db/retract (:e d) :logseq.property.table/hidden-columns old]
+                                             [:db/add (:e d) :logseq.property.table/hidden-columns new]]))))
+                           props-to-rename)
+        ordered-columns-tx (->> (d/datoms db :avet :logseq.property.table/ordered-columns)
+                                (keep (fn [d]
+                                        (when (coll? (:v d))
+                                          (when-let [props (seq (filter (fn [[old _new]] ((set (:v d)) old)) props-to-rename))]
+                                            (let [value (reduce
+                                                         (fn [col [old new]]
+                                                           (mapv (fn [v] (if (= old v) new v)) col))
+                                                         (:v d)
+                                                         props)]
+                                              [:db/add (:e d) :logseq.property.table/ordered-columns value]))))))
+        filters-tx (->> (d/datoms db :avet :logseq.property.table/filters)
+                        (keep (fn [d]
+                                (let [filters (:filters (:v d))]
+                                  (when (coll? filters)
+                                    (when-let [props (seq (filter (fn [[old _new]]
+                                                                    (some (fn [item] (and (vector? item)
+                                                                                          (= old (first item)))) filters)) props-to-rename))]
+                                      (let [value (update (:v d) :filters
+                                                          (fn [col]
+                                                            (reduce
+                                                             (fn [col [old new]]
+                                                               (mapv (fn [item]
+                                                                       (if (and (vector? item) (= old (first item)))
+                                                                         (vec (cons new (rest item)))
+                                                                         item))
+                                                                     col))
+                                                             col
+                                                             props)))]
+                                        [:db/add (:e d) :logseq.property.table/filters value])))))))]
+    (concat property-tx
+            titles-tx
+            sorting-tx
+            sized-columns-tx
+            hidden-columns-tx
+            ordered-columns-tx
+            filters-tx)))
+
 (defn- rename-properties
   [props-to-rename]
   (fn [conn _search-db]
     (when (ldb/db-based-graph? @conn)
-      (let [props-tx (mapv (fn [[old new]]
-                             (merge {:db/id (:db/id (d/entity @conn old))
-                                     :db/ident new}
-                                    (when-let [new-title (get-in db-property/built-in-properties [new :title])]
-                                      {:block/title new-title
-                                       :block/name (common-util/page-name-sanity-lc new-title)})))
-                           props-to-rename)]
-       ;; Property changes need to be in their own tx for subsequent uses of properties to take effect
+      (let [props-tx (rename-properties-aux @conn props-to-rename)]
+        ;; Property changes need to be in their own tx for subsequent uses of properties to take effect
         (ldb/transact! conn props-tx {:db-migrate? true})
 
         (mapcat (fn [[old new]]
@@ -651,6 +743,121 @@
                  (common-util/distinct-by :db/id (concat tags properties)))]
     tx-data))
 
+(defn- add-group-by-property-for-list-views
+  [conn _search-db]
+  (let [db @conn
+        list-type-id (:db/id (d/entity db :logseq.property.view/type.list))
+        list-views (d/datoms db :avet :logseq.property.view/type list-type-id)
+        block-page-prop-id (:db/id (d/entity db :block/page))]
+    (map (fn [view-datom]
+           [:db/add (:e view-datom) :logseq.property.view/group-by-property block-page-prop-id])
+         list-views)))
+
+(defn- cardinality-one-multiple-values
+  [conn _search-db]
+  (let [db @conn
+        attrs (keep (fn [[k v]]
+                      (when (and (keyword? k)
+                                 (not= :db.cardinality/many (:db/cardinality v))
+                                 (not= :db.cardinality/many (:db/cardinality (d/entity db k)))
+                                 (or (get db-schema/schema k)
+                                     (ldb/property? (d/entity db k))))
+                        k)) (:schema db))
+        block-ids (map :e (d/datoms db :avet :block/uuid))]
+    (->>
+     (mapcat
+      (fn [id]
+        (mapcat (fn [attr]
+                  (let [datoms (d/datoms db :eavt id attr)]
+                    (when (> (count datoms) 1)
+                      (map (fn [datom]
+                             [:db/retract (:e datom) (:a datom) (:v datom)])
+                           (butlast datoms))))) attrs))
+      block-ids)
+     (remove nil?))))
+
+(defn- rename-repeated-properties
+  [conn search-db]
+  (when (ldb/db-based-graph? @conn)
+    (let [closed-values-tx (mapv (fn [[old new]]
+                                   {:db/id (:db/id (d/entity @conn old))
+                                    :db/ident new})
+                                 {:logseq.task/recur-unit.minute :logseq.property.repeat/recur-unit.minute
+                                  :logseq.task/recur-unit.hour :logseq.property.repeat/recur-unit.hour
+                                  :logseq.task/recur-unit.day :logseq.property.repeat/recur-unit.day
+                                  :logseq.task/recur-unit.week :logseq.property.repeat/recur-unit.week
+                                  :logseq.task/recur-unit.month :logseq.property.repeat/recur-unit.month
+                                  :logseq.task/recur-unit.year :logseq.property.repeat/recur-unit.year})]
+      (ldb/transact! conn closed-values-tx {:db-migrate? true})))
+
+  ;; This needs to be last as the returned tx are used
+  ((rename-properties {:logseq.task/recur-frequency :logseq.property.repeat/recur-frequency
+                       :logseq.task/recur-unit :logseq.property.repeat/recur-unit
+                       :logseq.task/repeated? :logseq.property.repeat/repeated?
+                       :logseq.task/scheduled-on-property :logseq.property.repeat/temporal-property
+                       :logseq.task/recur-status-property :logseq.property.repeat/checked-property})
+   conn search-db))
+
+(defn- rename-task-properties
+  [conn search-db]
+  (when (ldb/db-based-graph? @conn)
+    (let [db @conn
+          new-idents {:logseq.task/status.backlog :logseq.property/status.backlog
+                      :logseq.task/status.todo :logseq.property/status.todo
+                      :logseq.task/status.doing :logseq.property/status.doing
+                      :logseq.task/status.in-review :logseq.property/status.in-review
+                      :logseq.task/status.done :logseq.property/status.done
+                      :logseq.task/status.canceled :logseq.property/status.canceled
+                      :logseq.task/priority.low :logseq.property/priority.low
+                      :logseq.task/priority.medium :logseq.property/priority.medium
+                      :logseq.task/priority.high :logseq.property/priority.high
+                      :logseq.task/priority.urgent :logseq.property/priority.urgent}
+          closed-values-tx (mapv (fn [[old new]]
+                                   (let [e-new (d/entity @conn new)
+                                         e-old (d/entity @conn old)]
+                                     (if e-new
+                                       (when e-old
+                                         [:db/retractEntity (:db/id e-old)])
+                                       {:db/id (:db/id (d/entity @conn old))
+                                        :db/ident new})))
+                                 new-idents)
+          filters-tx (->> (d/datoms db :avet :logseq.property.table/filters)
+                          (keep (fn [d]
+                                  (let [filters (:filters (:v d))]
+                                    (when (some (fn [item]
+                                                  (and (vector? item) (contains? #{:logseq.task/status :logseq.task/priority}
+                                                                                 (first item)))) filters)
+                                      (let [value (update (:v d) :filters
+                                                          (fn [col]
+                                                            (reduce
+                                                             (fn [col property]
+                                                               (vec
+                                                                (keep (fn [item]
+                                                                        (if (and (vector? item) (= property (first item)))
+                                                                          (let [[p o v] item
+                                                                                f (fn [id]
+                                                                                    (when-let [new-ident (get new-idents (:db/ident (d/entity db [:block/uuid id])))]
+                                                                                      (common-uuid/gen-uuid :db-ident-block-uuid new-ident)))
+                                                                                v' (if (set? v)
+                                                                                     (when-let [v' (seq (keep f v))]
+                                                                                       (set v'))
+                                                                                     (f v))]
+                                                                            (when v'
+                                                                              [p o v']))
+                                                                          item))
+                                                                      col)))
+                                                             col
+                                                             [:logseq.task/status :logseq.task/priority])))]
+                                        [:db/add (:e d) :logseq.property.table/filters value]))))))]
+      (ldb/transact! conn (concat closed-values-tx filters-tx) {:db-migrate? true})))
+
+  ;; This needs to be last as the returned tx are used
+  ((rename-properties {:logseq.task/status :logseq.property/status
+                       :logseq.task/priority :logseq.property/priority
+                       :logseq.task/deadline :logseq.property/deadline
+                       :logseq.task/scheduled :logseq.property/scheduled})
+   conn search-db))
+
 (def ^:large-vars/cleanup-todo schema-version->updates
   "A vec of tuples defining datascript migrations. Each tuple consists of the
    schema version integer and a migration map. A migration map can have keys of :properties, :classes
@@ -757,7 +964,12 @@
    ["64.2" {:properties [:logseq.property.view/feature-type]
             :fix migrate-views}]
    ["64.3" {:properties [:logseq.property/used-template :logseq.property/template-applied-to]
-            :classes [:logseq.class/Template]}]])
+            :classes [:logseq.class/Template]}]
+   ["64.4" {:properties [:logseq.property/created-by-ref]}]
+   ["64.5" {:fix add-group-by-property-for-list-views}]
+   ["64.6" {:fix cardinality-one-multiple-values}]
+   ["64.7" {:fix rename-repeated-properties}]
+   ["64.8" {:fix rename-task-properties}]])
 
 (let [[major minor] (last (sort (map (comp (juxt :major :minor) db-schema/parse-schema-version first)
                                      schema-version->updates)))
@@ -873,7 +1085,7 @@
                (fn [d]
                  (let [entity (d/entity @conn (:e d))]
                    [(when-not (:block/title entity)
-                      [:db/add (:e d) :block/title (:v d)])
+                      [:db/add (:e d) :block/title (str (:v d))])
                     (when-not (:block/uuid entity)
                       [:db/add (:e d) :block/uuid (d/squuid)])]))
                (d/datoms @conn :avet :block/name))
@@ -960,6 +1172,98 @@
             (js/console.error e)
             (throw e)))))))
 
+(defn- build-invalid-tx [entity eid]
+  (cond
+    (:block/schema entity)
+    [[:db/retract eid :block/schema]]
+
+    (and (nil? (:block/uuid entity))
+         (or (:block/title entity)
+             (:logseq.property.asset/size entity)
+             (:logseq.property.asset/type entity)
+             (:logseq.property.asset/checksum entity)))
+    [[:db/retractEntity eid]]
+
+    (and (:db/ident entity) (= "logseq.property.attribute" (namespace (:db/ident entity))))
+    [[:db/retractEntity (:db/id entity)]]
+
+    (and (:logseq.property.history/property entity)
+         (nil? (:logseq.property.history/block entity)))
+    [[:db/retractEntity (:db/id entity)]]
+
+    (and (:db/valueType entity)
+         (not (or (:db/ident entity)
+                  (:db/cardinality entity))))
+    [[:db/retract eid :db/valueType]
+     [:db/retract eid :db/cardinality]]
+
+    (= #{:block/tx-id} (set (keys entity)))
+    [[:db/retractEntity (:db/id entity)]]
+
+    (and (seq (:block/refs entity))
+         (not (or (:block/title entity) (:block/content entity) (:property.value/content entity))))
+    [[:db/retractEntity (:db/id entity)]]
+
+    (:logseq.property.node/type entity)
+    [[:db/retract eid :logseq.property.node/type]
+     [:db/retractEntity :logseq.property.node/type]
+     [:db/add eid :logseq.property.node/display-type (:logseq.property.node/type entity)]]
+
+    (and (:db/cardinality entity) (not (ldb/property? entity)))
+    [[:db/add eid :block/tags :logseq.class/Property]
+     [:db/retract eid :block/tags :logseq.class/Page]]
+
+                                ;; (when-let [schema (:block/schema entity)]
+                                ;;   (or (:cardinality schema) (:classes schema)))
+                                ;; (let [schema (:block/schema entity)]
+                                ;;   [[:db/add eid :block/schema (dissoc schema :cardinality :classes)]])
+
+    (and (:logseq.property.asset/type entity)
+         (or (nil? (:logseq.property.asset/checksum entity))
+             (nil? (:logseq.property.asset/size entity))))
+    [[:db/retractEntity eid]]
+
+                                ;; add missing :db/ident for classes && properties
+    (and (ldb/class? entity) (nil? (:db/ident entity)))
+    [[:db/add (:db/id entity) :db/ident (db-class/create-user-class-ident-from-name (:block/title entity))]]
+
+                                ;; fix blocks missing title
+    (and (:block/parent entity) (nil? (:block/title entity)))
+    [[:db/add (:db/id entity) :block/title ""]]
+
+    (and (ldb/property? entity) (nil? (:db/ident entity)))
+    [[:db/add (:db/id entity) :db/ident (db-property/create-user-property-ident-from-name (:block/title entity))]]
+
+                                ;; remove #Page for classes/properties/journals
+    (and (ldb/internal-page? entity) (or (ldb/class? entity) (ldb/property? entity) (ldb/journal? entity)))
+    [[:db/retract (:db/id entity) :block/tags :logseq.class/Page]]
+
+                                ;; remove file entities
+    (and (:file/path entity)
+         (not (contains? #{"logseq/custom.css" "logseq/config.js"  "logseq/config.edn"} (:file/path entity))))
+    [[:db/retractEntity (:db/id entity)]]
+
+                                ;; remove page-less blocks
+    (and (:block/uuid entity) (nil? (:block/title entity)) (nil? (:block/page entity)))
+    [[:db/retractEntity (:db/id entity)]]
+
+    (:block/properties-order entity)
+    [[:db/retract (:db/id entity) :block/properties-order]]
+
+    (:block/macros entity)
+    [[:db/retract (:db/id entity) :block/macros]]
+
+    (and (seq (:block/tags entity)) (not (every? ldb/class? (:block/tags entity))))
+    (let [tags (remove ldb/class? (:block/tags entity))]
+      (map
+       (fn [tag]
+         {:db/id (:db/id tag)
+          :db/ident (or (:db/ident tag) (db-class/create-user-class-ident-from-name (:block/title entity)))
+          :block/tags :logseq.class/Tag})
+       tags))
+    :else
+    nil))
+
 (defn fix-invalid-data!
   [conn invalid-entity-ids]
   (let [db @conn
@@ -981,78 +1285,7 @@
                                                     [:db/retract (:db/id entity) k]))))))
                                         (into {} entity))
                           eid (:db/id entity)
-                          fix (cond
-                                (and (:db/ident entity) (= "logseq.property.attribute" (namespace (:db/ident entity))))
-                                [[:db/retractEntity (:db/id entity)]]
-
-                                (and (:logseq.property.history/property entity)
-                                     (nil? (:logseq.property.history/block entity)))
-                                [[:db/retractEntity (:db/id entity)]]
-
-                                (and (:db/valueType entity)
-                                     (not (or (:db/ident entity)
-                                              (:db/cardinality entity))))
-                                [[:db/retract eid :db/valueType]
-                                 [:db/retract eid :db/cardinality]]
-
-                                (= #{:block/tx-id} (set (keys entity)))
-                                [[:db/retractEntity (:db/id entity)]]
-
-                                (and (seq (:block/refs entity))
-                                     (not (or (:block/title entity) (:block/content entity) (:property.value/content entity))))
-                                [[:db/retractEntity (:db/id entity)]]
-
-                                (:logseq.property.node/type entity)
-                                [[:db/retract eid :logseq.property.node/type]
-                                 [:db/retractEntity :logseq.property.node/type]
-                                 [:db/add eid :logseq.property.node/display-type (:logseq.property.node/type entity)]]
-
-                                (and (:db/cardinality entity) (not (ldb/property? entity)))
-                                [[:db/add eid :block/tags :logseq.class/Property]
-                                 [:db/retract eid :block/tags :logseq.class/Page]]
-
-                                ;; (when-let [schema (:block/schema entity)]
-                                ;;   (or (:cardinality schema) (:classes schema)))
-                                ;; (let [schema (:block/schema entity)]
-                                ;;   [[:db/add eid :block/schema (dissoc schema :cardinality :classes)]])
-
-                                (and (:logseq.property.asset/type entity)
-                                     (or (nil? (:logseq.property.asset/checksum entity))
-                                         (nil? (:logseq.property.asset/size entity))))
-                                [[:db/retractEntity eid]]
-
-                                ;; add missing :db/ident for classes && properties
-                                (and (ldb/class? entity) (nil? (:db/ident entity)))
-                                [[:db/add (:db/id entity) :db/ident (db-class/create-user-class-ident-from-name (:block/title entity))]]
-
-                                (and (ldb/property? entity) (nil? (:db/ident entity)))
-                                [[:db/add (:db/id entity) :db/ident (db-property/create-user-property-ident-from-name (:block/title entity))]]
-
-                                ;; remove #Page for classes/properties/journals
-                                (and (ldb/internal-page? entity) (or (ldb/class? entity) (ldb/property? entity) (ldb/journal? entity)))
-                                [[:db/retract (:db/id entity) :block/tags :logseq.class/Page]]
-
-                                ;; remove file entities
-                                (and (:file/path entity)
-                                     (not (contains? #{"logseq/custom.css" "logseq/config.js"  "logseq/config.edn"} (:file/path entity))))
-                                [[:db/retractEntity (:db/id entity)]]
-
-                                (:block/properties-order entity)
-                                [[:db/retract (:db/id entity) :block/properties-order]]
-
-                                (:block/macros entity)
-                                [[:db/retract (:db/id entity) :block/macros]]
-
-                                (and (seq (:block/tags entity)) (not (every? ldb/class? (:block/tags entity))))
-                                (let [tags (remove ldb/class? (:block/tags entity))]
-                                  (map
-                                   (fn [tag]
-                                     {:db/id (:db/id tag)
-                                      :db/ident (or (:db/ident tag) (db-class/create-user-class-ident-from-name (:block/title entity)))
-                                      :block/tags :logseq.class/Tag})
-                                   tags))
-                                :else
-                                nil)]
+                          fix (build-invalid-tx entity eid)]
                       (into fix wrong-choice)))
                   invalid-entity-ids)
                  distinct)]
@@ -1072,6 +1305,11 @@
       (fix-missing-page-tag! conn)
       ;; TODO: remove this after RTC db fixed
       (let [data (deprecate-logseq-user-ns conn nil)]
+        (when (seq data)
+          (d/transact! conn data {:fix-db? true})))
+      (let [data1 (rename-repeated-properties conn nil)
+            data2 (rename-task-properties conn nil)
+            data (concat data1 data2)]
         (when (seq data)
           (d/transact! conn data {:fix-db? true})))
       (when (seq invalid-entity-ids)

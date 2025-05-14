@@ -10,6 +10,7 @@
             [logseq.common.util.date-time :as date-time-util]
             [logseq.db :as ldb]
             [logseq.db.frontend.content :as db-content]
+            [logseq.db.common.entity-plus :as entity-plus]
             [logseq.db.frontend.malli-schema :as db-malli-schema]
             [logseq.db.frontend.rules :as rules]
             [logseq.db.frontend.validate :as db-validate]
@@ -19,8 +20,7 @@
             [logseq.graph-parser.test.docs-graph-helper :as docs-graph-helper]
             [logseq.graph-parser.test.helper :as test-helper :include-macros true :refer [deftest-async]]
             [logseq.outliner.db-pipeline :as db-pipeline]
-            [promesa.core :as p]
-            [logseq.db.frontend.entity-plus :as entity-plus]))
+            [promesa.core :as p]))
 
 ;; Helpers
 ;; =======
@@ -130,11 +130,18 @@
 
 (deftest-async ^:integration export-docs-graph-with-convert-all-tags
   (p/let [file-graph-dir "test/resources/docs-0.10.9"
+          start-time (cljs.core/system-time)
           _ (docs-graph-helper/clone-docs-repo-if-not-exists file-graph-dir "v0.10.9")
           conn (db-test/create-conn)
           _ (db-pipeline/add-listener conn)
           {:keys [import-state]}
-          (import-file-graph-to-db file-graph-dir conn {:convert-all-tags? true})]
+          (import-file-graph-to-db file-graph-dir conn {:convert-all-tags? true})
+          end-time (cljs.core/system-time)]
+
+    ;; Add multiplicative factor for CI as it runs about twice as slow
+    (let [max-time (-> 15 (* (if js/process.env.CI 2 1)))]
+      (is (< (-> end-time (- start-time) (/ 1000)) max-time)
+          (str "Importing large graph takes less than " max-time "s")))
 
     (is (empty? (map :entity (:errors (db-validate/validate-db! @conn))))
         "Created graph has no validation errors")
@@ -162,7 +169,7 @@
           "Created graph has no validation errors")
 
       ;; Counts
-      ;; Includes journals as property values e.g. :logseq.task/deadline
+      ;; Includes journals as property values e.g. :logseq.property/deadline
       (is (= 25 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Journal]] @conn))))
 
       (is (= 4 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Task]] @conn))))
@@ -281,13 +288,13 @@
 
       (is (= 20221126
              (-> (db-test/readable-properties (db-test/find-block-by-content @conn "only deadline"))
-                 :logseq.task/deadline
+                 :logseq.property/deadline
                  date-time-util/ms->journal-day))
           "deadline block has correct journal as property value")
 
       (is (= 20221125
              (-> (db-test/readable-properties (db-test/find-block-by-content @conn "only scheduled"))
-                 :logseq.task/scheduled
+                 :logseq.property/scheduled
                  date-time-util/ms->journal-day))
           "scheduled block converted to correct deadline")
 
@@ -297,17 +304,17 @@
                            @conn "Apr 1st, 2024")))
           "Only one journal page exists when deadline is on same day as journal")
 
-      (is (= {:logseq.task/priority :logseq.task/priority.high}
+      (is (= {:logseq.property/priority :logseq.property/priority.high}
              (db-test/readable-properties (db-test/find-block-by-content @conn "high priority")))
           "priority block has correct property")
 
-      (is (= {:logseq.task/status :logseq.task/status.doing
-              :logseq.task/priority :logseq.task/priority.medium
+      (is (= {:logseq.property/status :logseq.property/status.doing
+              :logseq.property/priority :logseq.property/priority.medium
               :block/tags [:logseq.class/Task]}
              (db-test/readable-properties (db-test/find-block-by-content @conn "status test")))
           "status block has correct task properties and class")
 
-      (is (= #{:logseq.task/status :block/tags}
+      (is (= #{:logseq.property/status :block/tags}
              (set (keys (db-test/readable-properties (db-test/find-block-by-content @conn "old todo block")))))
           "old task properties like 'todo' are ignored")
 
@@ -477,14 +484,14 @@
 
       (let [block (db-test/find-block-by-content @conn "old todo block")]
         (is (set/subset?
-             #{:logseq.task/status :logseq.class/Task}
+             #{:logseq.property/status :logseq.class/Task}
              (->> block
                   :block/refs
                   (map #(:db/ident (d/entity @conn (:db/id %))))
                   set))
             "Block has correct task tag and property :block/refs")
         (is (set/subset?
-             #{:logseq.task/status :logseq.class/Task}
+             #{:logseq.property/status :logseq.class/Task}
              (->> block
                   :block/path-refs
                   (map #(:db/ident (d/entity @conn (:db/id %))))

@@ -345,7 +345,7 @@
               (when namespace?
                 (let [namespace' (first (common-util/split-last "/" original-page-name))]
                   (when-not (string/blank? namespace')
-                    {:block/namespace {:block/name (common-util/page-name-sanity-lc namespace')}})))
+                    {:block/namespace {:block/name (string/trim (common-util/page-name-sanity-lc namespace'))}})))
               (when (and with-timestamp? (or skip-existing-page-check? (not page-entity))) ;; Only assign timestamp on creating new entity
                 (let [current-ms (common-util/time-ms)]
                   {:block/created-at current-ms
@@ -373,7 +373,7 @@
     as there's no chance to introduce timestamps via editing in page
    `skip-existing-page-check?`: if true, allows pages to have the same name"
   [original-page-name db with-timestamp? date-formatter
-   & {:keys [page-uuid class? created-by] :as options}]
+   & {:keys [page-uuid class?] :as options}]
   (when-not (and db (common-util/uuid-string? original-page-name)
                  (not (ldb/page? (d/entity db [:block/uuid (uuid original-page-name)]))))
     (let [db-based? (ldb/db-based-graph? db)
@@ -399,8 +399,7 @@
           (let [tags (if class? [:logseq.class/Tag]
                          (or (:block/tags page)
                              [:logseq.class/Page]))]
-            (cond-> (assoc page :block/tags tags)
-              created-by (assoc :logseq.property/created-by created-by)))
+            (assoc page :block/tags tags))
           (assoc page :block/type (or (:block/type page) "page")))))))
 
 (defn- db-namespace-page?

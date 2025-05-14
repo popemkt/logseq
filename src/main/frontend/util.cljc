@@ -530,14 +530,6 @@
                                 :block    "center"}))))))
 
 #?(:cljs
-   (defn bottom-reached?
-     [node threshold]
-     (let [full-height (gobj/get node "scrollHeight")
-           scroll-top' (gobj/get node "scrollTop")
-           client-height (gobj/get node "clientHeight")]
-       (<= (- full-height scroll-top' client-height) threshold))))
-
-#?(:cljs
    (defn link?
      [node]
      (contains?
@@ -787,10 +779,10 @@
 #?(:cljs
    (defn get-blocks-noncollapse
      ([]
-      (->> (d/sel "div:not(.reveal) .ls-block")
+      (->> (d/sel "div .ls-block")
            (filter (fn [b] (some? (gobj/get b "offsetParent"))))))
      ([blocks-container]
-      (->> (d/sel blocks-container "div:not(.reveal) .ls-block")
+      (->> (d/sel blocks-container "div .ls-block")
            (filter (fn [b] (some? (gobj/get b "offsetParent"))))))))
 
 #?(:cljs
@@ -830,11 +822,16 @@
   (keep-indexed #(when (not= %1 n) %2) coll))
 
 #?(:cljs
+   (defn atom? [v]
+     (instance? Atom v)))
+
+#?(:cljs
    (defn react
      [ref]
-     (if rum/*reactions*
-       (rum/react ref)
-       @ref)))
+     (when ref
+       (if rum/*reactions*
+         (rum/react ref)
+         @ref))))
 
 #?(:cljs
    (def time-ms common-util/time-ms))
@@ -882,13 +879,16 @@
      "Gets previous non-collapsed block. If given a container
       looks up blocks in that container e.g. for embed"
      ([block] (get-prev-block-non-collapsed block {}))
-     ([block {:keys [container up-down?]}]
+     ([block {:keys [container up-down? exclude-property?]}]
       (when-let [blocks (if container
                           (get-blocks-noncollapse container)
                           (get-blocks-noncollapse))]
-        (let [blocks (if up-down?
-                       (skip-same-top-blocks blocks block)
-                       blocks)]
+        (let [blocks (cond->>
+                      (if up-down?
+                        (skip-same-top-blocks blocks block)
+                        blocks)
+                       exclude-property?
+                       (remove (fn [node] (d/has-class? node "property-value-container"))))]
           (when-let [index (.indexOf blocks block)]
             (let [idx (dec index)]
               (when (>= idx 0)
@@ -906,11 +906,14 @@
 
 #?(:cljs
    (defn get-next-block-non-collapsed
-     [block {:keys [up-down?]}]
+     [block {:keys [up-down? exclude-property?]}]
      (when-let [blocks (and block (get-blocks-noncollapse))]
-       (let [blocks (if up-down?
-                      (skip-same-top-blocks blocks block)
-                      blocks)]
+       (let [blocks (cond->>
+                     (if up-down?
+                       (skip-same-top-blocks blocks block)
+                       blocks)
+                      exclude-property?
+                      (remove (fn [node] (d/has-class? node "property-value-container"))))]
          (when-let [index (.indexOf blocks block)]
            (let [idx (inc index)]
              (when (>= (count blocks) idx)
@@ -991,12 +994,15 @@
                    :clj nil))
 
 #?(:cljs
+   (defn get-blocks-by-id
+     [block-id]
+     (when (uuid-string? (str block-id))
+       (d/sel (format "[blockid='%s']" (str block-id))))))
+
+#?(:cljs
    (defn get-first-block-by-id
      [block-id]
-     (when block-id
-       (let [block-id (str block-id)]
-         (when (uuid-string? block-id)
-           (first (array-seq (js/document.getElementsByClassName (str "id" block-id)))))))))
+     (first (get-blocks-by-id block-id))))
 
 #?(:cljs
    (defn url-encode
@@ -1246,7 +1252,7 @@
 #?(:cljs
    (defn scroll-editor-cursor
      [^js/HTMLElement el & {:keys [to-vw-one-quarter?]}]
-     (when (and el (or (mobile-util/native-platform?) (mobile?)))
+     (when (and el (mobile?))
        (let [box-rect    (.getBoundingClientRect el)
              box-top     (.-top box-rect)
              box-bottom  (.-bottom box-rect)
@@ -1258,7 +1264,7 @@
              scroll-top'  (.-scrollTop main-node)
 
              current-pos (get-selection-start el)
-             grapheme-pos (get-graphemes-pos (.-value (.textContent el)) current-pos)
+             grapheme-pos (get-graphemes-pos (.-value el) current-pos)
              mock-text   (some-> (gdom/getElement "mock-text")
                                  gdom/getChildren
                                  array-seq
@@ -1349,10 +1355,6 @@
 (defn collapsed?
   [block]
   (:block/collapsed? block))
-
-#?(:cljs
-   (defn atom? [v]
-     (instance? Atom v)))
 
 ;; https://stackoverflow.com/questions/32511405/how-would-time-ago-function-implementation-look-like-in-clojure
 #?(:cljs

@@ -13,7 +13,6 @@
             [frontend.db.transact :as db-transact]
             [frontend.flows :as flows]
             [frontend.mobile.util :as mobile-util]
-            [frontend.rum :as r]
             [frontend.spec.storage :as storage-spec]
             [frontend.storage :as storage]
             [frontend.util :as util]
@@ -22,16 +21,38 @@
             [goog.object :as gobj]
             [logseq.common.config :as common-config]
             [logseq.db :as ldb]
-            [logseq.db.frontend.entity-plus :as entity-plus]
+            [logseq.db.common.entity-plus :as entity-plus]
             [logseq.db.sqlite.util :as sqlite-util]
             [logseq.shui.dialog.core :as shui-dialog]
+            [logseq.shui.hooks :as hooks]
             [logseq.shui.ui :as shui]
+            [missionary.core :as m]
             [promesa.core :as p]
             [rum.core :as rum]))
 
 (defonce *profile-state (volatile! {}))
 
 (defonce *db-worker (atom nil))
+(defonce *editor-info (atom nil))
+
+(defn- <invoke-db-worker*
+  [qkw direct-pass-args? args-list]
+  (let [worker @*db-worker]
+    (when (nil? worker)
+      (prn :<invoke-db-worker-error qkw)
+      (throw (ex-info "db-worker has not been initialized" {})))
+    (apply worker qkw direct-pass-args? args-list)))
+
+(defn <invoke-db-worker
+  "invoke db-worker thread api"
+  [qkw & args]
+  (<invoke-db-worker* qkw false args))
+
+(defn <invoke-db-worker-direct-pass-args
+  "invoke db-worker thread api.
+  But directly pass args to db-worker(won't do transit-write on them)."
+  [qkw & args]
+  (<invoke-db-worker* qkw true args))
 
 ;; Stores main application state
 (defonce ^:large-vars/data-var state
@@ -41,7 +62,8 @@
                          (when graph (ipc/ipc "setCurrentGraph" graph))
                          graph)]
     (atom
-     {:route-match                           nil
+     {:client-id                             (str (random-uuid))
+      :route-match                           nil
       :today                                 nil
       :system/events                         (async/chan 1000)
       :file/unlinked-dirs                    #{}
@@ -49,18 +71,16 @@
       :notification/show?                    false
       :notification/content                  nil
       :repo/loading-files?                   {}
-      :nfs/user-granted?                     {}
       :nfs/refreshing?                       nil
       :instrument/disabled?                  (storage/get "instrument-disabled")
-     ;; TODO: how to detect the network reliably?
+      ;; TODO: how to detect the network reliably?
+      ;; NOTE: prefer to use flows/network-online-event-flow
       :network/online?         true
       :indexeddb/support?      true
       :me                      nil
       :git/current-repo        current-graph
       :draw?                   false
       :db/restoring?           nil
-
-      :journals-length                       3
 
       :search/q                              ""
       :search/mode                           nil ; nil -> global mode, :graph -> add graph filter, etc.
@@ -80,7 +100,7 @@
       :ui/navigation-item-collapsed?         {}
       :ui/recent-pages                       (or (storage/get :ui/recent-pages) {})
 
-     ;; right sidebar
+      ;; right sidebar
       :ui/handbooks-open?                    false
       :ui/help-open?                         false
       :ui/fullscreen?                        false
@@ -142,7 +162,7 @@
       :editor/on-paste?                      (atom false)
       :editor/last-key-code                  (atom nil)
       :ui/global-last-key-code               (atom nil)
-      :editor/block-op-type                  nil             ;; :cut, :copy
+      :editor/block-op-type                  nil ;; :cut, :copy
       :editor/block-refs                     (atom #{})
 
       ;; Stores deleted refed blocks, indexed by repo
@@ -198,10 +218,6 @@
       :mobile/show-toolbar?                  false
       :mobile/show-recording-bar?            false
       :mobile/show-tabbar?                   false
-;;; Used to monitor mobile app status,
-;;; value spec:
-;;; {:is-active? bool, :timestamp int}
-      :mobile/app-state-change                 (atom nil)
 
       ;; plugin
       :plugin/enabled                        (and util/plugin-platform?
@@ -231,7 +247,7 @@
       :plugin/navs-settings?                 true
       :plugin/focused-settings               nil ;; plugin id
 
-     ;; pdf
+      ;; pdf
       :pdf/system-win?                       false
       :pdf/current                           nil
       :pdf/ref-highlight                     nil
@@ -326,28 +342,8 @@
       :ui/highlight-recent-days              (atom (or (storage/get :ui/highlight-recent-days)
                                                        3))
       :favorites/updated?                    (atom 0)
-      :db/async-query-loading                (atom #{})
       :db/async-queries                      (atom {})
       :db/latest-transacted-entity-uuids     (atom {})})))
-
-;; Block ast state
-;; ===============
-
-;; block uuid -> {content(String) -> ast}
-(def blocks-ast-cache (atom {}))
-(defn add-block-ast-cache!
-  [block-uuid content ast]
-  (when (and block-uuid content ast)
-    (let [new-value (assoc-in @blocks-ast-cache [block-uuid content] ast)
-          new-value (if (> (count new-value) 10000)
-                      (into {} (take 5000 new-value))
-                      new-value)]
-      (reset! blocks-ast-cache new-value))))
-
-(defn get-block-ast
-  [block-uuid content]
-  (when (and block-uuid content)
-    (get-in @blocks-ast-cache [block-uuid content])))
 
 ;; User configuration getters under :config (and sometimes :me)
 ;; ========================================
@@ -624,21 +620,24 @@ should be done through this fn in order to get global config and config defaults
       (get-in @state [:me :settings :start-of-week])
       6))
 
-(defn get-ref-open-blocks-level
-  []
-  (or
-   (when-let [value (:ref/default-open-blocks-level (get-config))]
-     (when (integer? value)
-       value))
-   2))
+;; TODO: support this later
+(comment
+  (defn get-ref-open-blocks-level
+    []
+    (or
+     (when-let [value (:ref/default-open-blocks-level (get-config))]
+       (when (integer? value)
+         value))
+     2)))
 
-(defn get-linked-references-collapsed-threshold
-  []
-  (or
-   (when-let [value (:ref/linked-references-collapsed-threshold (get-config))]
-     (when (integer? value)
-       value))
-   100))
+(comment
+  (defn get-linked-references-collapsed-threshold
+    []
+    (or
+     (when-let [value (:ref/linked-references-collapsed-threshold (get-config))]
+       (when (integer? value)
+         value))
+     100)))
 
 (defn get-export-bullet-indentation
   []
@@ -685,15 +684,28 @@ Similar to re-frame subscriptions"
   [container-block]
   (reset! (:editor/editing? @state) {container-block true}))
 
+(defn- sub-flow-state
+  [flow watch-ref sub-value-f deps]
+  (let [checkf (hooks/use-callback sub-value-f deps)
+        init-value (checkf @watch-ref)
+        flow (hooks/use-memo
+              #(m/eduction
+                (map checkf)
+                (dedupe)
+                (drop-while (fn [x] (identical? x init-value)))
+                flow)
+              [init-value])]
+    (hooks/use-flow-state init-value flow)))
+
+(def ^:private editing-flow
+  (m/watch (:editor/editing? @state)))
+
 (defn sub-editing?
   [container-block]
-  (when container-block
-    (rum/react
-     (r/cached-derived-atom
-      (:editor/editing? @state)
-      [(get-current-repo) ::editing-block container-block]
-      (fn [s]
-        (get s container-block))))))
+  (sub-flow-state editing-flow
+                  (:editor/editing? @state)
+                  (fn [s] (boolean (get s container-block)))
+                  [container-block]))
 
 (defn sub-config
   "Sub equivalent to get-config which should handle all sub user-config access"
@@ -1022,16 +1034,6 @@ Similar to re-frame subscriptions"
   []
   @(get @state :editor/block))
 
-(defn set-edit-content!
-  ([input-id value] (set-edit-content! input-id value true))
-  ([input-id value set-input-value?]
-   (when input-id
-     (when set-input-value?
-       (when-let [input (gdom/getElement input-id)]
-         (util/set-change-value input value)))
-     (set-state! :editor/content value :path-in-sub-atom
-                 (or (:block/uuid (get-edit-block)) input-id)))))
-
 (defn editing?
   []
   (seq @(:editor/editing? @state)))
@@ -1049,6 +1051,17 @@ Similar to re-frame subscriptions"
               (when (string/starts-with? id "edit-block-")
                 id))))
         (catch :default _e)))))
+
+(defn set-edit-content!
+  ([value] (set-edit-content! (get-edit-input-id) value))
+  ([input-id value] (set-edit-content! input-id value true))
+  ([input-id value set-input-value?]
+   (when input-id
+     (when set-input-value?
+       (when-let [input (gdom/getElement input-id)]
+         (util/set-change-value input value)))
+     (set-state! :editor/content value :path-in-sub-atom
+                 (or (:block/uuid (get-edit-block)) input-id)))))
 
 (defn get-input
   []
@@ -1169,22 +1182,29 @@ Similar to re-frame subscriptions"
   []
   (get-selected-block-ids (get-selection-blocks)))
 
+(def ^:private block-selected-flow
+  (m/watch (:selection/blocks @state)))
+
 (defn sub-block-selected?
   [block-id]
   (assert (uuid? block-id))
-  (rum/react
-   (r/cached-derived-atom (:selection/blocks @state) [(get-current-repo) ::ui-selected block-id]
-                          (fn [blocks] (some #{block-id} (get-selected-block-ids blocks))))))
+  (sub-flow-state block-selected-flow
+                  (:selection/blocks @state)
+                  (fn [blocks]
+                    (some #{block-id} (get-selected-block-ids blocks)))
+                  [block-id]))
 
 (defn dom-clear-selection!
   []
-  (doseq [node (dom/by-class "ls-block selected")]
+  (doseq [node (dom/by-class "selected")]
     (dom/remove-class! node "selected")))
 
 (defn mark-dom-blocks-as-selected
   [nodes]
   (doseq [node nodes]
-    (dom/add-class! node "selected")))
+    (dom/add-class! node "selected")
+    (when (dom/has-class? node "ls-table-row")
+      (.focus node))))
 
 (defn get-events-chan
   []
@@ -1207,8 +1227,10 @@ Similar to re-frame subscriptions"
         removed (set/difference selected-ids new-ids)]
     (mark-dom-blocks-as-selected blocks)
     (doseq [id removed]
-      (doseq [node (array-seq (gdom/getElementsByClass (str "id" id)))]
-        (dom/remove-class! node "selected")))))
+      (doseq [node (dom/sel (util/format "[blockid='%s']" id))]
+        (dom/remove-class! node "selected")
+        (when (dom/has-class? node "ls-table-row")
+          (.blur node))))))
 
 (defn set-selection-blocks!
   ([blocks]
@@ -1217,7 +1239,9 @@ Similar to re-frame subscriptions"
    (when (seq blocks)
      (let [blocks (vec (remove nil? blocks))]
        (set-selection-blocks-aux! blocks)
-       (when direction (set-state! :selection/direction direction))))))
+       (when direction (set-state! :selection/direction direction))
+       (let [ids (get-selection-block-ids)]
+         (when (seq ids) (pub-event! [:editor/load-blocks ids])))))))
 
 (defn state-clear-selection!
   []
@@ -1500,11 +1524,6 @@ Similar to re-frame subscriptions"
   []
   (set-state! :ui/file-component nil))
 
-(defn set-journals-length!
-  [value]
-  (when value
-    (set-state! :journals-length value)))
-
 (defn save-scroll-position!
   ([value]
    (save-scroll-position! value js/window.location.hash))
@@ -1622,7 +1641,11 @@ Similar to re-frame subscriptions"
 
 (defn set-online!
   [value]
-  (set-state! :network/online? value))
+  (set-state! :network/online? value)
+  ;; to avoid watch whole big state atom,
+  ;; there's an atom flows/*network-online?,
+  ;; then we can use flows/network-online-event-flow
+  (reset! flows/*network-online? value))
 
 (defn get-plugins-slash-commands
   []
@@ -1951,50 +1974,44 @@ Similar to re-frame subscriptions"
   [edit-input-id content block cursor-range & {:keys [db move-cursor? container-id property-block direction event pos]
                                                :or {move-cursor? true}}]
   (when-not (exists? js/process)
-    (if (> (count content)
-           (block-content-max-length (get-current-repo)))
-      (let [elements (array-seq (js/document.getElementsByClassName (str "id" (:block/uuid block))))]
-        (when (first elements)
-          (util/scroll-to-element (gobj/get (first elements) "id")))
-        (exit-editing-and-set-selected-blocks! elements))
-      (when (and edit-input-id block
-                 (or
-                  (publishing-enable-editing?)
-                  (not common-config/PUBLISHING)))
-        (let [block-element (gdom/getElement (string/replace edit-input-id "edit-block" "ls-block"))
-              container (util/get-block-container block-element)
-              block (if container
-                      (assoc block
-                             :block.temp/container (gobj/get container "id"))
-                      block)
-              block (assoc block :block.editing/direction direction
-                           :block.editing/event event
-                           :block.editing/pos pos)
-              content (string/trim (or content ""))]
-          (assert (and container-id (:block/uuid block))
-                  "container-id or block uuid is missing")
-          (set-state! :editor/block-refs #{})
-          (if property-block
-            (set-editing-block-id! [container-id (:block/uuid property-block) (:block/uuid block)])
-            (set-editing-block-id! [container-id (:block/uuid block)]))
-          (set-state! :editor/container-id container-id)
-          (set-state! :editor/block block)
-          (set-state! :editor/content content :path-in-sub-atom (:block/uuid block))
-          (set-state! :editor/last-key-code nil)
-          (set-state! :editor/set-timestamp-block nil)
-          (set-state! :editor/cursor-range cursor-range)
-          (when (= :code (:logseq.property.node/display-type (d/entity db (:db/id block))))
-            (pub-event! [:editor/focus-code-editor block block-element]))
-          (when-let [input (gdom/getElement edit-input-id)]
-            (let [pos (count cursor-range)]
-              (when content
-                (util/set-change-value input content))
+    (when (and edit-input-id block
+               (or
+                (publishing-enable-editing?)
+                (not common-config/PUBLISHING)))
+      (let [block-element (gdom/getElement (string/replace edit-input-id "edit-block" "ls-block"))
+            container (util/get-block-container block-element)
+            block (if container
+                    (assoc block
+                           :block.temp/container (gobj/get container "id"))
+                    block)
+            block (assoc block :block.editing/direction direction
+                         :block.editing/event event
+                         :block.editing/pos pos)
+            content (string/trim (or content ""))]
+        (assert (and container-id (:block/uuid block))
+                "container-id or block uuid is missing")
+        (set-state! :editor/block-refs #{})
+        (if property-block
+          (set-editing-block-id! [container-id (:block/uuid property-block) (:block/uuid block)])
+          (set-editing-block-id! [container-id (:block/uuid block)]))
+        (set-state! :editor/container-id container-id)
+        (set-state! :editor/block block)
+        (set-state! :editor/content content :path-in-sub-atom (:block/uuid block))
+        (set-state! :editor/last-key-code nil)
+        (set-state! :editor/set-timestamp-block nil)
+        (set-state! :editor/cursor-range cursor-range)
+        (when (= :code (:logseq.property.node/display-type (d/entity db (:db/id block))))
+          (pub-event! [:editor/focus-code-editor block block-element]))
+        (when-let [input (gdom/getElement edit-input-id)]
+          (let [pos (count cursor-range)]
+            (when content
+              (util/set-change-value input content))
 
-              (when (and move-cursor? (not (block-component-editing?)))
-                (cursor/move-cursor-to input pos))
+            (when (and move-cursor? (not (block-component-editing?)))
+              (cursor/move-cursor-to input pos))
 
-              (when (or (util/mobile?) (mobile-util/native-platform?))
-                (set-state! :mobile/show-action-bar? false)))))))))
+            (when (or (util/mobile?) (mobile-util/native-platform?))
+              (set-state! :mobile/show-action-bar? false))))))))
 
 (defn action-bar-open?
   []
@@ -2207,12 +2224,6 @@ Similar to re-frame subscriptions"
                 (every? not-empty (vals agent-opts)))
       (str protocol "://" host ":" port))))
 
-(defn set-mobile-app-state-change
-  [is-active?]
-  (set-state! :mobile/app-state-change
-              {:is-active? is-active?
-               :timestamp (inst-ms (js/Date.))}))
-
 (defn get-sync-graph-by-id
   [graph-uuid]
   (when graph-uuid
@@ -2258,10 +2269,6 @@ Similar to re-frame subscriptions"
   []
   (:pdf/current @state))
 
-(defn nfs-user-granted?
-  [repo]
-  (get-in @state [:nfs/user-granted? repo]))
-
 (defn set-current-pdf!
   [inflated-file]
   (let [settle-file! #(set-state! :pdf/current inflated-file)]
@@ -2294,18 +2301,6 @@ Similar to re-frame subscriptions"
 (defn clear-user-info!
   []
   (storage/remove :user-groups))
-
-(defn sub-async-query-loading
-  [k]
-  (assert (or (string? k) (uuid? k)))
-  (let [k* (str k)]
-    (rum/react
-     (r/cached-derived-atom (:db/async-query-loading @state) [(get-current-repo) ::async-query k*]
-                            (fn [s] (contains? s k*))))))
-
-(defn clear-async-query-state!
-  []
-  (reset! (:db/async-query-loading @state) #{}))
 
 (defn set-color-accent! [color]
   (swap! state assoc :ui/radix-color color)

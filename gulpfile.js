@@ -59,7 +59,6 @@ const common = {
         'node_modules/html2canvas/dist/html2canvas.min.js',
         'node_modules/interactjs/dist/interact.min.js',
         'node_modules/photoswipe/dist/umd/*.js',
-        'node_modules/reveal.js/dist/reveal.js',
         'node_modules/shepherd.js/dist/js/shepherd.min.js',
         'node_modules/marked/marked.min.js',
         'node_modules/@highlightjs/cdn-assets/highlight.min.js',
@@ -72,6 +71,7 @@ const common = {
         'node_modules/react-dom/umd/react-dom.production.min.js',
         'node_modules/react-dom/umd/react-dom.development.js',
         'node_modules/prop-types/prop-types.min.js',
+        'node_modules/dompurify/dist/purify.js',
       ]).pipe(gulp.dest(path.join(outputPath, 'js'))),
       () => gulp.src([
         'node_modules/@tabler/icons-react/dist/umd/tabler-icons-react.min.js',
@@ -94,7 +94,6 @@ const common = {
       ]).pipe(gulp.dest(path.join(outputPath, 'js', 'pdfjs', 'cmaps'))),
       () => gulp.src([
         'node_modules/inter-ui/inter.css',
-        'node_modules/reveal.js/dist/theme/fonts/source-sans-pro/**',
       ]).pipe(gulp.dest(path.join(outputPath, 'css'))),
       () => gulp.src('node_modules/inter-ui/Inter (web)/*.*').
         pipe(gulp.dest(path.join(outputPath, 'css', 'Inter (web)'))),
@@ -161,7 +160,7 @@ const common = {
       stdio: 'inherit',
     })
 
-    cp.execSync(`npx cap run ${mode} --external`, {
+    cp.execSync(`npx cap run ${mode}`, {
       stdio: 'inherit',
       env: Object.assign(process.env, {
         LOGSEQ_APP_SERVER_URL,

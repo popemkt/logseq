@@ -9,13 +9,10 @@
             [logseq.common.util :as common-util]
             [logseq.common.uuid :as common-uuid]
             [logseq.db.common.order :as db-order]
-            [logseq.db.file-based.schema :as file-schema]
             [logseq.db.frontend.property :as db-property]
-            [logseq.db.frontend.property.type :as db-property-type]
-            [logseq.db.frontend.schema :as db-schema]))
+            [logseq.db.frontend.property.type :as db-property-type]))
 
 (defonce db-version-prefix "logseq_db_")
-(defonce file-version-prefix "logseq_local_")
 
 (def ^:private write-handlers (cljs-bean.transit/writer-handlers))
 (def ^:private read-handlers {})
@@ -43,6 +40,7 @@
       (try (transit/write writer o)
            (catch :default e
              (prn ::write-transit-str o)
+             (js/console.trace)
              (throw e))))))
 
 (def read-transit-str
@@ -50,24 +48,13 @@
                                    "datascript/Entity" identity)
                             (merge read-handlers))
         reader (transit/reader :json {:handlers read-handlers*})]
-    (fn read-transit-str* [s] (transit/read reader s))))
+    (fn read-transit-str* [s]
+      (transit/read reader s))))
 
 (defn db-based-graph?
   [graph-name]
   (when graph-name
     (string/starts-with? graph-name db-version-prefix)))
-
-(defn local-file-based-graph?
-  [s]
-  (and (string? s)
-       (string/starts-with? s file-version-prefix)))
-
-(defn get-schema
-  "Returns schema for given repo"
-  [repo]
-  (if (db-based-graph? repo)
-    db-schema/schema
-    file-schema/schema))
 
 (def block-with-timestamps common-util/block-with-timestamps)
 

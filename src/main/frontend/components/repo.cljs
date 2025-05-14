@@ -1,13 +1,12 @@
 (ns frontend.components.repo
   (:require [clojure.string :as string]
-            [electron.ipc :as ipc]
             [frontend.common.async-util :as async-util]
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
             [frontend.db :as db]
             [frontend.handler.db-based.rtc :as rtc-handler]
             [frontend.handler.db-based.rtc-flows :as rtc-flows]
-            [frontend.handler.file-based.nfs :as nfs-handler]
+            [frontend.handler.file-based.native-fs :as nfs-handler]
             [frontend.handler.file-sync :as file-sync]
             [frontend.handler.graph :as graph]
             [frontend.handler.notification :as notification]
@@ -69,14 +68,15 @@
         (sort-repos-with-metadata-local repos)
         :let [only-cloud? (and remote? (nil? root))
               db-based? (config/db-based-graph? url)]]
-    [:div.flex.justify-between.mb-4.items-center.group {:key (or url GraphUUID)}
+    [:div.flex.justify-between.mb-4.items-center.group {:key (or url GraphUUID)
+                                                        :data-testid url}
      [:div
       [:span.flex.items-center.gap-1
        (normalized-graph-label repo
                                (fn []
                                  (when-not (state/sub :rtc/downloading-graph-uuid)
                                    (cond
-                                     root                                         ; exists locally
+                                     root ; exists locally
                                      (state/pub-event! [:graph/switch url])
 
                                      (and db-based? remote?)
@@ -105,7 +105,7 @@
 
                      :else
                      "Removes Logseq's access to the local file path of your graph. It won't remove your local files.")]
-         (when-not (and only-cloud? (not manager?))
+         (when-not (and db-graph? only-cloud? (not manager?))
            [:a.text-gray-400.ml-4.font-medium.text-sm.whitespace-nowrap
             {:title title
              :on-click (fn []
@@ -203,12 +203,6 @@
                          (repo-handler/refresh-repos!))))]]
          (repos-inner remote-graphs)])]]))
 
-(defn- check-multiple-windows?
-  [state]
-  (when (util/electron?)
-    (p/let [multiple-windows? (ipc/ipc "graphHasMultipleWindows" (state/get-current-repo))]
-      (reset! (::electron-multiple-windows? state) multiple-windows?))))
-
 (defn- repos-dropdown-links [repos current-repo downloading-graph-id & {:as opts}]
   (let [switch-repos (if-not (nil? current-repo)
                        (remove (fn [repo] (= current-repo (:url repo))) repos) repos) ; exclude current repo
@@ -241,7 +235,8 @@
                                                        (not (and rtc-graph? remote?)))
                                                 (state/pub-event! [:graph/open-new-window url])
                                                 (cond
-                                                  (:root graph) ; exists locally
+                                                  ;; exists locally?
+                                                  (or (:root graph) (not rtc-graph?))
                                                   (state/pub-event! [:graph/switch url])
 
                                                   (and rtc-graph? remote?)
@@ -360,50 +355,6 @@
                     icon [:div title]]))))))]
      (repos-footer multiple-windows? db-based?)]))
 
-(rum/defcs repos-dropdown < rum/reactive
-  (rum/local false ::electron-multiple-windows?)
-  [state & {:as opts}]
-  (let [current-repo (state/sub :git/current-repo)
-        login? (boolean (state/sub :auth/id-token))]
-    (let [repos (state/sub [:me :repos])
-          remotes (state/sub [:file-sync/remote-graphs :graphs])
-          rtc-graphs (state/sub :rtc/graphs)
-          db-based? (config/db-based-graph? current-repo)
-          repos (sort-repos-with-metadata-local repos)
-          repos (distinct
-                 (if (and (or (seq remotes) (seq rtc-graphs)) login?)
-                   (repo-handler/combine-local-&-remote-graphs repos (concat remotes rtc-graphs)) repos))]
-      (let [remote? (and current-repo (:remote? (first (filter #(= current-repo (:url %)) repos))))
-            repo-name (when current-repo (db/get-repo-name current-repo))
-            short-repo-name (if current-repo
-                              (db/get-short-repo-name repo-name)
-                              "Select a Graph")]
-        (shui/trigger-as :a
-                         {:tab-index 0
-                          :class "item cp__repos-select-trigger"
-                          :on-pointer-down
-                          (fn [^js e]
-                            (check-multiple-windows? state)
-                            (some-> (.-target e)
-                                    (.closest "a.item")
-                                    (shui/popup-show!
-                                     (fn [{:keys [id]}] (repos-dropdown-content (assoc opts :contentid id)))
-                                     {:as-dropdown? true
-                                      :auto-focus? false
-                                      :align "start"
-                                      :content-props {:class "repos-list"
-                                                      :data-mode (when db-based? "db")}})))
-                          :title repo-name}      ;; show full path on hover
-                         [:div.flex.relative.graph-icon.rounded
-                          (shui/tabler-icon "database" {:size 15})]
-
-                         [:div.repo-switch.pr-2.whitespace-nowrap
-                          [:span.repo-name.font-medium
-                           [:span.repo-text.overflow-hidden.text-ellipsis
-                            (if (config/demo-graph? short-repo-name) "Demo" short-repo-name)]
-                           (when remote? [:span.pl-1 (ui/icon "cloud")])]
-                          [:span.dropdown-caret]])))))
-
 (rum/defcs graphs-selector < rum/reactive
   [_state]
   (let [current-repo (state/get-current-repo)
@@ -424,7 +375,7 @@
                                      {:as-dropdown? true
                                       :content-props {:class "repos-list"}
                                       :align :start}))}
-      [:span.thumb (shui/tabler-icon (if remote? "cloud" (if db-based? "database" "folder")) {:size 16})]
+      [:span.thumb (shui/tabler-icon (if remote? "cloud" (if db-based? "topology-star" "folder")) {:size 16})]
       [:strong short-repo-name]
       (shui/tabler-icon "selector" {:size 18})]]))
 

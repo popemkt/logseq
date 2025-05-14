@@ -16,9 +16,7 @@
             [frontend.handler.db-based.property :as db-property-handler]
             [frontend.handler.notification :as notification]
             [frontend.handler.property :as property-handler]
-            [frontend.handler.property.util :as pu]
             [frontend.handler.route :as route-handler]
-            [frontend.hooks :as hooks]
             [frontend.mixins :as mixins]
             [frontend.modules.shortcut.core :as shortcut]
             [frontend.state :as state]
@@ -31,6 +29,7 @@
             [logseq.db.frontend.property.type :as db-property-type]
             [logseq.outliner.core :as outliner-core]
             [logseq.outliner.property :as outliner-property]
+            [logseq.shui.hooks :as hooks]
             [logseq.shui.ui :as shui]
             [promesa.core :as p]
             [rum.core :as rum]))
@@ -145,11 +144,8 @@
                                             (when (= "Enter" (.-key e))
                                               (util/stop-propagation e)))} label)))))
      (when show-type-change-hints?
-       (ui/tippy {:html        "Changing the property type clears some property configurations."
-                  :class       "tippy-hover ml-2"
-                  :interactive true
-                  :disabled    false}
-                 (svg/info)))]))
+       (ui/tooltip (svg/info)
+                   [:span "Changing the property type clears some property configurations."]))]))
 
 (rum/defc property-select
   [exclude-properties select-opts]
@@ -159,7 +155,7 @@
     (hooks/use-effect!
      (fn []
        (p/let [repo (state/get-current-repo)
-               properties (db-async/<db-based-get-all-properties repo)
+               properties (db-async/db-based-get-all-properties repo)
                classes (->> (db-model/get-all-classes repo)
                             (remove ldb/built-in?))]
          (set-classes! classes)
@@ -294,6 +290,7 @@
                                                          (.focus input)))}
                                    :align "start"
                                    :as-dropdown? true}))}
+
    (:block/title property)))
 
 (rum/defc property-key-cp < rum/static
@@ -310,7 +307,7 @@
                                 (db-property-handler/set-block-property! (:db/id property)
                                                                          :logseq.property/icon icon)
                                 (db-property-handler/remove-block-property! (:db/id property)
-                                                                            (pu/get-pid :logseq.property/icon)))
+                                                                            :logseq.property/icon))
                               (shui/popup-hide! id))
                             :icon-value icon
                             :del-btn? (boolean icon)}))]
@@ -376,14 +373,16 @@
                         (and page? (not (contains? types :page)))
                         (conj :page)
                         (empty? types)
-                        #{:block}))
+                        (conj :block)))
         exclude-properties (fn [m]
                              (let [view-context (get m :logseq.property/view-context :all)]
                                (or (contains? #{:logseq.property/query} (:db/ident m))
                                    (and (not page?) (contains? #{:block/alias} (:db/ident m)))
                                    ;; Filters out properties from being in wrong :view-context and :never view-contexts
                                    (and (not= view-context :all) (not (contains? block-types view-context)))
-                                   (and (ldb/built-in? block) (contains? #{:logseq.property/parent} (:db/ident m))))))
+                                   (and (ldb/built-in? block) (contains? #{:logseq.property/parent} (:db/ident m)))
+                                   ;; Filters out adding buggy class properties e.g. Alias and Parent
+                                   (and class-schema? (ldb/public-built-in-property? m) (:logseq.property/view-context m)))))
         property (rum/react *property)
         property-key (rum/react *property-key)
         batch? (pv/batch-operation?)
@@ -505,7 +504,7 @@
          (let [class-properties? (= (:db/ident property) :logseq.property.class/properties)
                property-desc (when-not (= (:db/ident property) :logseq.property/description)
                                (:logseq.property/description property))]
-           [:div.property-value-container.flex.flex-row.gap-1.items-center
+           [:div.ls-block.property-value-container.flex.flex-row.gap-1.items-center
             (cond-> {}
               class-properties? (assoc :class (if (:logseq.property.class/properties block)
                                                 "ml-2 -mt-1"
@@ -568,7 +567,7 @@
                                                  {:db/id (:db/id block)})]
                                                {:outliner-op :save-block})))})))
 
-(rum/defc properties-section < rum/reactive db-mixins/query
+(rum/defc properties-section < rum/static
   [block properties opts]
   (when (seq properties)
       ;; Sort properties by :block/order
@@ -578,28 +577,13 @@
                                    (:block/order (db/entity k)))) properties)]
       (ordered-properties block properties' opts))))
 
-(defn- async-load-classes!
-  [block]
-  (let [repo (state/get-current-repo)
-        classes (concat (:block/tags block) (outliner-property/get-classes-parents (:block/tags block)))]
-    (doseq [class classes]
-      (db-async/<get-block repo (:db/id class) :children? false))
-    (when (ldb/class? block)
-      (doseq [property (:logseq.property.class/properties block)]
-        (db-async/<get-block repo (:db/id property) :children? false)))
-    classes))
-
 (rum/defcs ^:large-vars/cleanup-todo properties-area < rum/reactive db-mixins/query
   {:init (fn [state]
            (let [target-block (first (:rum/args state))
                  block (resolve-linked-block-if-exists target-block)]
              (assoc state
                     ::id (str (random-uuid))
-                    ::block block
-                    ::classes (async-load-classes! block))))
-   :will-remount (fn [state]
-                   (let [block (db/entity (:db/id (::block state)))]
-                     (assoc state ::classes (async-load-classes! block))))}
+                    ::block block)))}
   [state _target-block {:keys [sidebar-properties?] :as opts}]
   (let [id (::id state)
         db-id (:db/id (::block state))
@@ -608,8 +592,6 @@
                                             (and show?
                                                  (or (= mode :global)
                                                      (and (set? ids) (contains? ids (:block/uuid block))))))
-        _ (doseq [class (::classes state)]
-            (db/sub-block (:db/id class)))
         class? (ldb/class? block)
         properties (:block/properties block)
         remove-built-in-or-other-position-properties

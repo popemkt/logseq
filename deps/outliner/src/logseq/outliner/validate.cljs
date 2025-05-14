@@ -1,14 +1,14 @@
 (ns logseq.outliner.validate
   "Reusable DB graph validations for outliner level and above. Most validations
   throw errors so the user action stops immediately to display a notification"
-  (:require [clojure.string :as string]
+  (:require [clojure.set :as set]
+            [clojure.string :as string]
             [datascript.core :as d]
-            [logseq.db :as ldb]
-            [logseq.db.frontend.entity-util :as entity-util]
             [logseq.common.date :as common-date]
             [logseq.common.util.namespace :as ns-util]
-            [clojure.set :as set]
-            [logseq.db.frontend.class :as db-class]))
+            [logseq.db :as ldb]
+            [logseq.db.frontend.class :as db-class]
+            [logseq.db.frontend.entity-util :as entity-util]))
 
 (defn ^:api validate-page-title-characters
   "Validates characters that must not be in a page title"
@@ -69,7 +69,8 @@
   (cond
     (seq tags)
     (when-let [another-id (first
-                           (d/q (if (ldb/property? entity)
+                           (d/q (cond
+                                  (ldb/property? entity)
                                   ;; Property names are unique in that they can
                                   ;; have the same names as built-in property names
                                   '[:find [?b ...]
@@ -79,6 +80,18 @@
                                     [?b :block/tags ?tag-id]
                                     [(missing? $ ?b :logseq.property/built-in?)]
                                     [(not= ?b ?eid)]]
+                                  (:logseq.property/parent entity)
+                                  '[:find [?b ...]
+                                    :in $ ?eid ?title [?tag-id ...]
+                                    :where
+                                    [?b :block/title ?title]
+                                    [?b :block/tags ?tag-id]
+                                    [(not= ?b ?eid)]
+                                    ;; same parent
+                                    [?b :logseq.property/parent ?bp]
+                                    [?eid :logseq.property/parent ?ep]
+                                    [(= ?bp ?ep)]]
+                                  :else
                                   '[:find [?b ...]
                                     :in $ ?eid ?title [?tag-id ...]
                                     :where
@@ -164,36 +177,47 @@
     (when (and (:logseq.property/built-in? tag-ent)
                (not (ldb/class? tag-ent)))
       (throw (ex-info (str "Can't set tag with built-in page that isn't a tag " (pr-str (:block/title tag-ent)))
-                    {:type :notification
-                     :payload {:message (str "Can't set tag with built-in page that isn't a tag " (pr-str (:block/title tag-ent)))
-                               :type :error}
-                     :property-value v})))))
+                      {:type :notification
+                       :payload {:message (str "Can't set tag with built-in page that isn't a tag " (pr-str (:block/title tag-ent)))
+                                 :type :error}
+                       :property-value v})))))
 
 (defn- disallow-node-cant-tag-with-private-tags
-  [db block-eids v]
+  [db block-eids v & {:keys [delete?]}]
   (when (and (ldb/private-tags (:db/ident (d/entity db v)))
              ;; Allow assets to be tagged
              (not (and
                    (every? (fn [id] (ldb/asset? (d/entity db id))) block-eids)
                    (= :logseq.class/Asset (:db/ident (d/entity db v))))))
-    (throw (ex-info (str "Can't set tag with built-in #" (:block/title (d/entity db v)))
+    (throw (ex-info (str (if delete? "Can't remove tag" "Can't set tag")
+                         " with built-in #" (:block/title (d/entity db v)))
                     {:type :notification
-                     :payload {:message (str "Can't set tag with built-in #" (:block/title (d/entity db v)))
+                     :payload {:message (str (if delete? "Can't remove tag" "Can't set tag")
+                                             " with built-in #" (:block/title (d/entity db v)))
                                :type :error}
                      :property-id :block/tags
                      :property-value v}))))
 
 (defn- disallow-tagging-a-built-in-entity
-  [db block-eids]
+  [db block-eids & {:keys [delete?]}]
   (when-let [built-in-ent (some #(when (:logseq.property/built-in? %) %)
                                 (map #(d/entity db %) block-eids))]
-    (throw (ex-info (str "Can't add tag on built-in " (pr-str (:block/title built-in-ent)))
+    (throw (ex-info (str (if delete? "Can't remove tag" "Can't add tag")
+                         " on built-in " (pr-str (:block/title built-in-ent)))
                     {:type :notification
-                     :payload {:message (str "Can't add tag on built-in " (pr-str (:block/title built-in-ent)))
+                     :payload {:message (str (if delete? "Can't remove tag" "Can't add tag")
+                                             " on built-in " (pr-str (:block/title built-in-ent)))
                                :type :error}}))))
 
 (defn validate-tags-property
+  "Validates adding a property value to :block/tags for given blocks"
   [db block-eids v]
   (disallow-tagging-a-built-in-entity db block-eids)
   (disallow-node-cant-tag-with-private-tags db block-eids v)
   (disallow-node-cant-tag-with-built-in-non-tags db block-eids v))
+
+(defn validate-tags-property-deletion
+  "Validates deleting a property value from :block/tags for given blocks"
+  [db block-eids v]
+  (disallow-tagging-a-built-in-entity db block-eids {:delete? true})
+  (disallow-node-cant-tag-with-private-tags db block-eids v {:delete? true}))

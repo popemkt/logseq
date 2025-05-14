@@ -9,17 +9,18 @@
             [frontend.config :as config]
             [frontend.context.i18n :refer [t]]
             [frontend.db :as db]
+            [frontend.db-mixins :as db-mixins]
             [frontend.db.async :as db-async]
             [frontend.db.model :as model]
             [frontend.extensions.pdf.assets :as pdf-assets]
             [frontend.handler.assets :as assets-handler]
             [frontend.handler.editor :as editor-handler]
+            [frontend.handler.file-based.editor :as file-editor-handler]
             [frontend.handler.history :as history]
             [frontend.handler.notification :as notification]
             [frontend.handler.page :as page-handler]
             [frontend.handler.route :as route-handler]
             [frontend.handler.whiteboard :as whiteboard-handler]
-            [frontend.hooks :as hooks]
             [frontend.rum :as r]
             [frontend.search :as search]
             [frontend.state :as state]
@@ -28,6 +29,7 @@
             [frontend.util.text :as text-util]
             [goog.object :as gobj]
             [logseq.common.util :as common-util]
+            [logseq.shui.hooks :as hooks]
             [logseq.shui.ui :as shui]
             [promesa.core :as p]
             [rum.core :as rum]))
@@ -84,11 +86,11 @@
 
 (defn save-asset-handler
   [file]
-  (-> (editor-handler/file-based-save-assets! (state/get-current-repo) [(js->clj file)])
+  (-> (file-editor-handler/file-based-save-assets! (state/get-current-repo) [(js->clj file)])
       (p/then
        (fn [res]
          (when-let [[asset-file-name _ full-file-path] (and (seq res) (first res))]
-           (editor-handler/resolve-relative-path (or full-file-path asset-file-name)))))))
+           (file-editor-handler/resolve-relative-path (or full-file-path asset-file-name)))))))
 
 (defn references-count
   [props]
@@ -129,7 +131,7 @@
    :exportToImage (fn [page-uuid-str options]
                     (assert (common-util/uuid-string? page-uuid-str))
                     (shui/dialog-open!
-                     #(export/export-blocks (uuid page-uuid-str) (merge (js->clj options :keywordize-keys true) {:whiteboard? true}))))
+                     #(export/export-blocks [(uuid page-uuid-str)] (merge (js->clj options :keywordize-keys true) {:whiteboard? true}))))
    :isWhiteboardPage (fn [page-name]
                        (when-let [entity (db/get-page page-name)]
                          (model/whiteboard-page? entity)))
@@ -233,35 +235,39 @@
             :onPersist #(on-persist page-uuid %1 %2)
             :model data})])
 
-(rum/defc tldraw-app-inner < rum/reactive
-  {:init (fn [state]
-           (let [page-uuid (first (:rum/args state))]
-             (db-async/<get-block (state/get-current-repo) page-uuid)
-             state))}
-  [page-uuid block-id loaded-app set-loaded-app]
-  (when-not (state/sub-async-query-loading (str page-uuid))
-    (let [populate-onboarding? (whiteboard-handler/should-populate-onboarding-whiteboard? page-uuid)
-          on-mount (fn [^js tln]
-                     (when tln
-                       (set! (.-appUndo tln) undo)
-                       (set! (.-appRedo tln) redo)
-                       (when-let [^js api (gobj/get tln "api")]
-                         (p/then (when populate-onboarding?
-                                   (whiteboard-handler/populate-onboarding-whiteboard api))
-                                 #(do (whiteboard-handler/cleanup! (.-currentPage tln))
-                                      (state/focus-whiteboard-shape tln block-id)
-                                      (set-loaded-app tln))))))
-          data (whiteboard-handler/get-page-tldr page-uuid)]
-      (when data
-        (tldraw-inner page-uuid data populate-onboarding? loaded-app on-mount)))))
+(rum/defc tldraw-app-react < rum/reactive db-mixins/query
+  [page-uuid populate-onboarding? loaded-app on-mount]
+  (let [data (whiteboard-handler/get-page-tldr page-uuid)]
+    (when data
+      (tldraw-inner page-uuid data populate-onboarding? loaded-app on-mount))))
 
 (rum/defc tldraw-app
   [page-uuid block-id]
-  (let [page-uuid (str page-uuid)
+  (let [[loading? set-loading!] (hooks/use-state true)
         [loaded-app set-loaded-app] (rum/use-state nil)]
-    (hooks/use-effect! (fn []
-                         (when (and loaded-app block-id)
-                           (state/focus-whiteboard-shape loaded-app block-id))
-                         #())
-                       [block-id loaded-app])
-    (tldraw-app-inner page-uuid block-id loaded-app set-loaded-app)))
+    (hooks/use-effect!
+     (fn []
+       (p/do!
+        (db-async/<get-block (state/get-current-repo) page-uuid)
+        (set-loading! false)))
+     [])
+
+    (hooks/use-effect!
+     (fn []
+       (when (and loaded-app block-id)
+         (state/focus-whiteboard-shape loaded-app block-id))
+       #())
+     [block-id loaded-app])
+    (when-not loading?
+      (let [populate-onboarding? (whiteboard-handler/should-populate-onboarding-whiteboard? page-uuid)
+            on-mount (fn [^js tln]
+                       (when tln
+                         (set! (.-appUndo tln) undo)
+                         (set! (.-appRedo tln) redo)
+                         (when-let [^js api (gobj/get tln "api")]
+                           (p/then (when populate-onboarding?
+                                     (whiteboard-handler/populate-onboarding-whiteboard api))
+                                   #(do (whiteboard-handler/cleanup! (.-currentPage tln))
+                                        (state/focus-whiteboard-shape tln block-id)
+                                        (set-loaded-app tln))))))]
+        (tldraw-app-react page-uuid populate-onboarding? loaded-app on-mount)))))

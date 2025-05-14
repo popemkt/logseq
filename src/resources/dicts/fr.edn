@@ -132,9 +132,8 @@
     :linked-references/filter-excludes "Exclut : "
     :linked-references/filter-heading "Filtrer"
     :linked-references/filter-includes "Inclut : "
-    :linked-references/reference-count (fn [filtered-count total] (str filtered-count (when filtered-count (if (= filtered-count 1) " référence liée" " références liées")) " parmi " total))
     :linked-references/filter-search "Rechercher dans les pages liées"
- :page/add-to-favorites "Ajouter aux Favoris"
+    :page/add-to-favorites "Ajouter aux Favoris"
     :page/backlinks "Rétro-lien"
     :page/copy-page-url "Copier l'URL de la page"
     :page/created-at "Créée le"
@@ -374,7 +373,6 @@
     :export-transparent-background "Arrière-plan transparent"
     :home "Accueil"
     :new-page "Nouvelle page :"
-    :remove-orphaned-pages "Supprimer les pages orphelines ?"
     :toggle-theme "Changer le thème"
     :whiteboards "Tableaux blancs"
     :bug-report/clipboard-inspector-title "Inspecteur du presse-papier"
@@ -483,7 +481,6 @@
     :tips/all-done "Tout est complété !"
     :shortcut.category/whiteboard "Tableau blanc"
     :shortcut.category/plugins "Plugins"
-    :settings-permission/start-granting "Permettre"
     :settings-page/update-error-2 "Vérifiez le/la"
     :settings-page/update-error-1 "⚠️ Oups, quelque chose s'est mal passé !"
     :settings-page/update-available "Nouvelle mise à jour trouvée"
@@ -506,7 +503,6 @@
     :on-boarding/quick-tour-journal-page-title "📆 Page du journal quotidien"
     :on-boarding/quick-tour-left-sidebar-desc "Ouvrir le panneau latéral gauche pour explorer des éléments du menu impor…"
     :on-boarding/quick-tour-left-sidebar-title "👀 Panneau latéral gauche"
-    :page/slide-view-tip-go-fullscreen "(fn [] [[:span.opacity-70 \"Conseil: appuyer \"] [:code \"f\"] [:span.opacity-70 \" pour entrer en mode plein écran\"]])"
     :bug-report/inspector-page-placeholder "Appuyer longuement ici pour coller si vous êtes sur mobile"
     :bug-report/inspector-page-tip "Quelque chose ne va pas ? Pas de problème, cliquez pour retourner à…"
     :bug-report/main-desc "Pouvez-vous nous aider en signalant un bogue ? Nous…"
@@ -634,7 +630,6 @@
     :page/illegal-page-name "Nom de page interdit !"
     :page/logseq-is-having-a-problem "Logseq a un problème. Pour essayer de le ravoir…"
     :page/page-already-exists "Page “{1}” existe déjà !"
-    :page/slide-view "Visualiser en diapositives"
     :page/something-went-wrong "Quelque chose s'est mal passé"
     :page/step "Étape {1}"
     :page/try "Essayer"
@@ -714,4 +709,4 @@
     :settings-page/auto-chmod "Automatiquement changer les permissions du fichier"
     :settings-page/auto-chmod-desc "Désactiver pour permettre l'édition par plusieurs utilisateurs avec les permissions données par l'appartenance au groupe."
     :settings-page/tab-keymap "Raccourcis"
-    :unlinked-references/reference-count  (fn [total] (str total (if (= total 1) " référence non liée" " références non liées")))}
+ }
