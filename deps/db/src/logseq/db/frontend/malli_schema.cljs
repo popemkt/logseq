@@ -3,9 +3,9 @@
   (:require [clojure.set :as set]
             [clojure.string :as string]
             [datascript.core :as d]
+            [logseq.db.common.entity-plus :as entity-plus]
             [logseq.db.common.order :as db-order]
             [logseq.db.frontend.class :as db-class]
-            [logseq.db.common.entity-plus :as entity-plus]
             [logseq.db.frontend.entity-util :as entity-util]
             [logseq.db.frontend.property :as db-property]
             [logseq.db.frontend.property.type :as db-property-type]
@@ -460,7 +460,11 @@
 (def property-value-placeholder
   [:map
    [:db/ident [:= :logseq.property/empty-placeholder]]
-   [:block/tx-id {:optional true} :int]])
+   [:block/uuid :uuid]
+   [:block/tx-id {:optional true} :int]
+   [:block/created-at {:optional true} :int]
+   [:block/updated-at {:optional true} :int]
+   [:block/properties {:optional true} block-properties]])
 
 (defn entity-dispatch-key [db ent]
   (let [d (if (:block/uuid ent) (d/entity db [:block/uuid (:block/uuid ent)]) ent)
@@ -482,18 +486,14 @@
                        :file-block
                        (:logseq.property.history/block d)
                        :property-history-block
-
                        (:block/closed-value-property d)
                        :closed-value-block
-
-                       (and (:logseq.property/created-from-property d)
-                            (:logseq.property/value d))
+                       (and (:logseq.property/created-from-property d) (:logseq.property/value d))
                        :property-value-block
-
-                       (:block/uuid d)
-                       :block
                        (= (:db/ident d) :logseq.property/empty-placeholder)
                        :property-value-placeholder
+                       (:block/uuid d)
+                       :block
                        (:db/ident d)
                        :db-ident-key-value)]
     dispatch-key))

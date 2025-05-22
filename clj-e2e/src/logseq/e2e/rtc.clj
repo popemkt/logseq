@@ -19,7 +19,7 @@
          tx# (max local-tx# remote-tx#)]
      ~@body
      (loop [i# 5]
-       (when (zero? i#) (throw (ex-info "wait-tx-updated failed" {:data m#})))
+       (when (zero? i#) (throw (ex-info "wait-tx-updated failed" {:old m# :new (get-rtc-tx)})))
        (util/wait-timeout 1000)
        (let [new-m# (get-rtc-tx)
              new-local-tx# (or (:local-tx new-m#) 0)
@@ -33,6 +33,7 @@
 
 (defn wait-tx-update-to
   [new-tx]
+  (assert (int? new-tx))
   (loop [i 5]
     (when (zero? i) (throw (ex-info "wait-tx-update-to" {:update-to new-tx})))
     (util/wait-timeout 1000)
@@ -43,3 +44,11 @@
       (if (>= local-tx new-tx)
         local-tx
         (recur (dec i))))))
+
+(defn rtc-start
+  []
+  (util/search-and-click "(Dev) RTC Start"))
+
+(defn rtc-stop
+  []
+  (util/search-and-click "(Dev) RTC Stop"))

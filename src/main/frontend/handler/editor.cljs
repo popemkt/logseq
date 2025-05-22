@@ -35,7 +35,6 @@
             [frontend.modules.outliner.op :as outliner-op]
             [frontend.modules.outliner.tree :as tree]
             [frontend.modules.outliner.ui :as ui-outliner-tx]
-            [frontend.util.ref :as ref]
             [frontend.search :as search]
             [frontend.state :as state]
             [frontend.template :as template]
@@ -44,6 +43,7 @@
             [frontend.util.file-based.drawer :as drawer]
             [frontend.util.keycode :as keycode]
             [frontend.util.list :as list]
+            [frontend.util.ref :as ref]
             [frontend.util.text :as text-util]
             [frontend.util.thingatpt :as thingatpt]
             [goog.dom :as gdom]
@@ -1242,15 +1242,22 @@
 
 (defonce *action-bar-timeout (atom nil))
 
+(defn popup-exists?
+  [id]
+  (some->> (shui-popup/get-popups)
+           (some #(some-> % (:id) (str) (string/includes? (str id))))))
+
 (defn show-action-bar!
   [& {:keys [delay]
       :or {delay 200}}]
-  (when (config/db-based-graph?)
+  (when (and (config/db-based-graph?) (not (popup-exists? :selection-action-bar)))
     (when-let [timeout @*action-bar-timeout]
       (js/clearTimeout timeout))
     (state/pub-event! [:editor/hide-action-bar])
-    (let [timeout (js/setTimeout #(state/pub-event! [:editor/show-action-bar]) delay)]
-      (reset! *action-bar-timeout timeout))))
+    (when (seq (remove (fn [b] (dom/has-class? b "ls-table-cell"))
+                       (state/get-selection-blocks)))
+      (let [timeout (js/setTimeout #(state/pub-event! [:editor/show-action-bar]) delay)]
+        (reset! *action-bar-timeout timeout)))))
 
 (defn- select-block-up-down
   [direction]
@@ -1336,11 +1343,18 @@
    (doseq [[block value] blocks]
      (save-block-if-changed! block value))))
 
+(defonce *auto-save-timeout (atom nil))
+(defn- clear-block-auto-save-timeout!
+  []
+  (when @*auto-save-timeout
+    (js/clearTimeout @*auto-save-timeout)))
+
 (defn save-current-block!
   "skip-properties? if set true, when editing block is likely be properties, skip saving"
   ([]
    (save-current-block! {}))
   ([{:keys [force? skip-properties? current-block] :as opts}]
+   (clear-block-auto-save-timeout!)
    ;; non English input method
    (when-not (or (state/editor-in-composition?)
                  (state/get-editor-action))
@@ -1796,15 +1810,13 @@
             new-value (string/replace value full_text new-full-text)]
         (save-block-aux! block new-value {})))))
 
-(defonce *auto-save-timeout (atom nil))
 (defn edit-box-on-change!
   [e block id]
   (when (= (:db/id block) (:db/id (state/get-edit-block)))
     (let [value (util/evalue e)
           repo (state/get-current-repo)]
       (state/set-edit-content! id value false)
-      (when @*auto-save-timeout
-        (js/clearTimeout @*auto-save-timeout))
+      (clear-block-auto-save-timeout!)
       (block-handler/mark-last-input-time! repo)
       (reset! *auto-save-timeout
               (js/setTimeout
@@ -1814,7 +1826,7 @@
                             (not (and
                                   (config/db-based-graph? repo)
                                   (re-find #"#\S+" value))))
-                 ; don't auto-save for page's properties block
+                   ; don't auto-save for page's properties block
                    (save-current-block! {:skip-properties? true})))
                450)))))
 
@@ -3322,11 +3334,6 @@
           ;; simulate text selection
           (cursor/select-up-down input direction anchor cursor-rect)))
       (select-block-up-down direction))))
-
-(defn popup-exists?
-  [id]
-  (some->> (shui-popup/get-popups)
-           (some #(some-> % (:id) (str) (string/includes? (str id))))))
 
 (defn editor-commands-popup-exists?
   []

@@ -28,10 +28,10 @@
             [frontend.worker.search :as search]
             [frontend.worker.shared-service :as shared-service]
             [frontend.worker.state :as worker-state]
+            [frontend.worker.thread-atom]
             [frontend.worker.util :as worker-util]
             [goog.object :as gobj]
             [lambdaisland.glogi.console :as glogi-console]
-            [logseq.common.log :as log]
             [logseq.common.util :as common-util]
             [logseq.db :as ldb]
             [logseq.db.common.entity-plus :as entity-plus]
@@ -117,7 +117,7 @@
 
 (defn- rebuild-db-from-datoms!
   "Persistent-sorted-set has been broken, used addresses can't be found"
-  [datascript-conn sqlite-db import-type]
+  [datascript-conn sqlite-db]
   (let [datoms (get-all-datoms-from-sqlite-db sqlite-db)
         db (d/init-db [] db-schema/schema
                       {:storage (storage/storage @datascript-conn)})
@@ -125,13 +125,18 @@
                       (map (fn [d]
                              [:db/add (:e d) (:a d) (:v d) (:t d)]) datoms))]
     (prn :debug :rebuild-db-from-datoms :datoms-count (count datoms))
-    ;; export db first
-    (when-not import-type
-      (worker-util/post-message :notification ["The SQLite db will be exported to avoid any data-loss." :warning false])
-      (worker-util/post-message :export-current-db []))
+    (worker-util/post-message :notification ["The SQLite db will be exported to avoid any data-loss." :warning false])
+    (worker-util/post-message :export-current-db [])
     (.exec sqlite-db #js {:sql "delete from kvs"})
     (d/reset-conn! datascript-conn db)
     (db-migrate/fix-db! datascript-conn)))
+
+(defn- fix-broken-graph
+  [graph]
+  (let [conn (worker-state/get-datascript-conn graph)
+        sqlite-db (worker-state/get-sqlite-conn graph)]
+    (when (and conn sqlite-db)
+      (rebuild-db-from-datoms! conn sqlite-db))))
 
 (comment
   (defn- gc-kvs-table!
@@ -157,7 +162,7 @@
                                             :bind #js [addr]}))))))))
 
 (defn- find-missing-addresses
-  [^Object db]
+  [conn ^Object db & {:keys [delete-addrs]}]
   (let [schema (some->> (.exec db #js {:sql "select content from kvs where addr = 0"
                                        :rowMode "array"})
                         bean/->clj
@@ -166,54 +171,81 @@
         result (->> (.exec db #js {:sql "select addr, addresses from kvs"
                                    :rowMode "array"})
                     bean/->clj
-                    (map (fn [[addr addresses]]
-                           [addr (bean/->clj (js/JSON.parse addresses))])))
-        used-addresses (set (concat (mapcat second result)
-                                    [0 1 (:eavt schema) (:avet schema) (:aevt schema)]))
+                    (keep (fn [[addr addresses]]
+                            (when-not (and delete-addrs (delete-addrs addr))
+                              [addr (bean/->clj (js/JSON.parse addresses))]))))
+        used-addresses (-> (set (concat (mapcat second result)
+                                        [0 1 (:eavt schema) (:avet schema) (:aevt schema)]))
+                           (clojure.set/difference delete-addrs))
         missing-addresses (clojure.set/difference used-addresses (set (map first result)))]
     (when (seq missing-addresses)
-      (worker-util/post-message :capture-error
-                                {:error "db-missing-addresses"
-                                 :payload {:missing-addresses missing-addresses}})
-      (prn :error :missing-addresses missing-addresses))
+      (let [version-in-db (when conn (db-schema/parse-schema-version (or (:kv/value (d/entity @conn :logseq.kv/schema-version)) 0)))
+            compare-result (when version-in-db (db-schema/compare-schema-version version-in-db "64.8"))]
+        (when (and compare-result (not (neg? compare-result))) ; >= 64.8
+          (worker-util/post-message :capture-error
+                                    {:error "db-missing-addresses-v2"
+                                     :payload {:missing-addresses (str missing-addresses)
+                                               :db-schema-version (str version-in-db)}}))))
     missing-addresses))
+
+(def get-to-delete-unused-addresses-sql
+  "WITH to_delete(addr) AS (
+     SELECT value
+     FROM json_each(?)
+   ),
+  referenced(addr) AS (
+    SELECT json_each.value
+    FROM kvs
+    JOIN json_each(kvs.addresses)
+    WHERE kvs.addr NOT IN (SELECT addr FROM to_delete)
+      AND json_each.value IN (SELECT addr FROM to_delete)
+  )
+  SELECT addr FROM to_delete
+  WHERE addr NOT IN (SELECT addr FROM referenced)")
 
 (defn upsert-addr-content!
   "Upsert addr+data-seq. Update sqlite-cli/upsert-addr-content! when making changes"
-  [repo data delete-addrs & {:keys [client-ops-db?] :or {client-ops-db? false}}]
-  (let [^Object db (worker-state/get-sqlite-conn repo (if client-ops-db? :client-ops :db))]
+  [db data delete-addrs*]
+  (let [delete-addrs (clojure.set/difference (set delete-addrs*) #{0 1})]
     (assert (some? db) "sqlite db not exists")
     (.transaction db (fn [tx]
                        (doseq [item data]
                          (.exec tx #js {:sql "INSERT INTO kvs (addr, content, addresses) values ($addr, $content, $addresses) on conflict(addr) do update set content = $content, addresses = $addresses"
                                         :bind item}))))
     (when (seq delete-addrs)
-      (.transaction db (fn [tx]
-                         ;; (prn :debug :delete-addrs delete-addrs)
-                         (doseq [addr delete-addrs]
-                           (.exec tx #js {:sql "Delete from kvs WHERE addr = ? AND NOT EXISTS (SELECT 1 FROM json_each(addresses) WHERE value = ?);"
-                                          :bind #js [addr]})))))))
+      (let [result (.exec db #js {:sql get-to-delete-unused-addresses-sql
+                                  :bind (js/JSON.stringify (clj->js delete-addrs))
+                                  :rowMode "array"})
+            non-refed-addrs (map #(aget % 0) result)]
+        (when (seq non-refed-addrs)
+          (.transaction db (fn [tx]
+                             (doseq [addr non-refed-addrs]
+                               (.exec tx #js {:sql "Delete from kvs where addr = ?"
+                                              :bind #js [addr]}))))))
+      (let [missing-addrs (when worker-util/dev?
+                            (seq (find-missing-addresses nil db {:delete-addrs delete-addrs})))]
+        (when (seq missing-addrs)
+          (worker-util/post-message :notification [(str "Bug!! Missing addresses: " missing-addrs) :error false]))))))
 
 (defn restore-data-from-addr
   "Update sqlite-cli/restore-data-from-addr when making changes"
-  [repo addr & {:keys [client-ops-db?] :or {client-ops-db? false}}]
-  (let [^Object db (worker-state/get-sqlite-conn repo (if client-ops-db? :client-ops :db))]
-    (assert (some? db) "sqlite db not exists")
-    (when-let [result (-> (.exec db #js {:sql "select content, addresses from kvs where addr = ?"
-                                         :bind #js [addr]
-                                         :rowMode "array"})
-                          first)]
-      (let [[content addresses] (bean/->clj result)
-            addresses (when addresses
-                        (js/JSON.parse addresses))
-            data (sqlite-util/transit-read content)]
-        (if (and addresses (map? data))
-          (assoc data :addresses addresses)
-          data)))))
+  [db addr]
+  (assert (some? db) "sqlite db not exists")
+  (when-let [result (-> (.exec db #js {:sql "select content, addresses from kvs where addr = ?"
+                                       :bind #js [addr]
+                                       :rowMode "array"})
+                        first)]
+    (let [[content addresses] (bean/->clj result)
+          addresses (when addresses
+                      (js/JSON.parse addresses))
+          data (sqlite-util/transit-read content)]
+      (if (and addresses (map? data))
+        (assoc data :addresses addresses)
+        data))))
 
 (defn new-sqlite-storage
   "Update sqlite-cli/new-sqlite-storage when making changes"
-  [repo _opts]
+  [^Object db]
   (reify IStorage
     (-store [_ addr+data-seq delete-addrs]
       (let [used-addrs (set (mapcat
@@ -233,36 +265,10 @@
                            :$content (sqlite-util/transit-write data')
                            :$addresses addresses}))
                   addr+data-seq)]
-        (upsert-addr-content! repo data delete-addrs)))
+        (upsert-addr-content! db data delete-addrs)))
 
     (-restore [_ addr]
-      (restore-data-from-addr repo addr))))
-
-(defn new-sqlite-client-ops-storage
-  [repo]
-  (reify IStorage
-    (-store [_ addr+data-seq delete-addrs]
-      (let [used-addrs (set (mapcat
-                             (fn [[addr data]]
-                               (cons addr
-                                     (when (map? data)
-                                       (:addresses data))))
-                             addr+data-seq))
-            delete-addrs (remove used-addrs delete-addrs)
-            data (map
-                  (fn [[addr data]]
-                    (let [data' (if (map? data) (dissoc data :addresses) data)
-                          addresses (when (map? data)
-                                      (when-let [addresses (:addresses data)]
-                                        (js/JSON.stringify (bean/->js addresses))))]
-                      #js {:$addr addr
-                           :$content (sqlite-util/transit-write data')
-                           :$addresses addresses}))
-                  addr+data-seq)]
-        (upsert-addr-content! repo data delete-addrs :client-ops-db? true)))
-
-    (-restore [_ addr]
-      (restore-data-from-addr repo addr :client-ops-db? true))))
+      (restore-data-from-addr db addr))))
 
 (defn- close-db-aux!
   [repo ^Object db ^Object search ^Object client-ops]
@@ -322,8 +328,9 @@
   [repo {:keys [config import-type datoms]}]
   (when-not (worker-state/get-sqlite-conn repo)
     (p/let [[db search-db client-ops-db :as dbs] (get-dbs repo)
-            storage (new-sqlite-storage repo {})
-            client-ops-storage (when-not @*publishing? (new-sqlite-client-ops-storage repo))
+            storage (new-sqlite-storage db)
+            client-ops-storage (when-not @*publishing?
+                                 (new-sqlite-storage client-ops-db))
             db-based? (sqlite-util/db-based-graph? repo)]
       (swap! *sqlite-conns assoc repo {:db db
                                        :search search-db
@@ -358,20 +365,14 @@
                                                                         (when import-type {:import-type import-type}))]
             (d/transact! conn initial-data {:initial-db? true})))
 
-        (try
-          (when-not import-type
-            (when-let [missing-addresses (seq (find-missing-addresses db))]
-              (throw (ex-info "DB missing addresses" {:missing-addresses missing-addresses}))))
+        ;; TODO: remove this once we can ensure there's no bug for missing addresses
+        ;; because it's slow for large graphs
+        (when-not import-type
+          (when-let [missing-addresses (seq (find-missing-addresses conn db))]
+            (worker-util/post-message :notification ["It seems that the DB has been broken, please export a backup and contact Logseq team for help." :error false])
+            (throw (ex-info "DB missing addresses" {:missing-addresses missing-addresses}))))
 
-          (db-migrate/migrate conn search-db)
-
-          (catch :default e
-            (log/error "DB migrate failed, error: " e)
-            (if (and db-based? (= (.-message e) "DB missing addresses"))
-              (do
-                (rebuild-db-from-datoms! conn db import-type)
-                (db-migrate/migrate conn search-db))
-              (throw e))))
+        (db-migrate/migrate conn search-db)
 
         (db-listener/listen-db-changes! repo (get @*datascript-conns repo))))))
 
@@ -789,6 +790,10 @@
 (def-thread-api :thread-api/get-all-page-titles
   [repo]
   (get-all-page-titles-with-cache repo))
+
+(def-thread-api :thread-api/fix-broken-graph
+  [graph]
+  (fix-broken-graph graph))
 
 (comment
   (def-thread-api :general/dangerousRemoveAllDbs

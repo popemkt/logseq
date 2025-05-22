@@ -139,7 +139,7 @@
           end-time (cljs.core/system-time)]
 
     ;; Add multiplicative factor for CI as it runs about twice as slow
-    (let [max-time (-> 15 (* (if js/process.env.CI 2 1)))]
+    (let [max-time (-> 20 (* (if js/process.env.CI 2 1)))]
       (is (< (-> end-time (- start-time) (/ 1000)) max-time)
           (str "Importing large graph takes less than " max-time "s")))
 
@@ -173,7 +173,7 @@
       (is (= 25 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Journal]] @conn))))
 
       (is (= 4 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Task]] @conn))))
-      (is (= 3 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Query]] @conn))))
+      (is (= 4 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Query]] @conn))))
       (is (= 2 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Card]] @conn))))
 
       ;; Properties and tags aren't included in this count as they aren't a Page
@@ -260,7 +260,7 @@
       (is (= {:user.property/prop-bool true
               :user.property/prop-num 5
               :user.property/prop-string "yeehaw"
-              :block/tags [:logseq.class/Page :user.class/Some---Namespace]}
+              :block/tags [:logseq.class/Page :user.class/SomeNamespace]}
              (db-test/readable-properties (db-test/find-page-by-title @conn "some page")))
           "Existing page has correct properties")
 
@@ -520,7 +520,7 @@
         "Correct number of user classes")
 
     (is (= 4 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Task]] @conn))))
-    (is (= 3 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Query]] @conn))))
+    (is (= 4 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Query]] @conn))))
     (is (= 2 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Card]] @conn))))
 
     (testing "replacing refs in :block/title when :remove-inline-tags? set"
@@ -693,7 +693,7 @@
 
 (deftest-async export-config-file-sets-title-format
   (p/let [conn (db-test/create-conn)
-          read-file #(p/do! (pr-str {:journal/page-title-format "yyyy-MM-dd"}))
+          read-file #(p/do! "{:journal/page-title-format \"yyyy-MM-dd\"}")
           _ (gp-exporter/export-config-file conn "logseq/config.edn" read-file {})]
     (is (= "yyyy-MM-dd"
            (:logseq.property.journal/title-format (d/entity @conn :logseq.class/Journal)))

@@ -16,6 +16,7 @@
             [logseq.db.common.order :as db-order]
             [logseq.db.frontend.class :as db-class]
             [logseq.db.frontend.content :as db-content]
+            [logseq.db.frontend.malli-schema :as db-malli-schema]
             [logseq.db.frontend.property :as db-property]
             [logseq.db.frontend.property.build :as db-property-build]
             [logseq.db.frontend.schema :as db-schema]
@@ -858,6 +859,12 @@
                        :logseq.task/scheduled :logseq.property/scheduled})
    conn search-db))
 
+
+(defn- empty-placeholder-add-block-uuid
+  [_conn _search-db]
+  [{:db/ident :logseq.property/empty-placeholder
+    :block/uuid (common-uuid/gen-uuid :builtin-block-uuid :logseq.property/empty-placeholder)}])
+
 (def ^:large-vars/cleanup-todo schema-version->updates
   "A vec of tuples defining datascript migrations. Each tuple consists of the
    schema version integer and a migration map. A migration map can have keys of :properties, :classes
@@ -957,8 +964,8 @@
    [62 {:fix remove-block-schema}]
    [63 {:properties [:logseq.property.table/pinned-columns]}]
    [64 {:fix update-view-filter}]
-   ;;;; schema-version format: "<major>.<minor>"
-   ;;;; int number equals to "<major>" (without <minor>)
+;;;; schema-version format: "<major>.<minor>"
+;;;; int number equals to "<major>" (without <minor>)
    ["64.1" {:properties [:logseq.property.view/group-by-property]
             :fix add-view-icons}]
    ["64.2" {:properties [:logseq.property.view/feature-type]
@@ -969,7 +976,8 @@
    ["64.5" {:fix add-group-by-property-for-list-views}]
    ["64.6" {:fix cardinality-one-multiple-values}]
    ["64.7" {:fix rename-repeated-properties}]
-   ["64.8" {:fix rename-task-properties}]])
+   ["64.8" {:fix rename-task-properties}]
+   ["64.9" {:fix empty-placeholder-add-block-uuid}]])
 
 (let [[major minor] (last (sort (map (comp (juxt :major :minor) db-schema/parse-schema-version first)
                                      schema-version->updates)))
@@ -979,14 +987,15 @@
   (when (neg? compare-result)
     (js/console.warn (str "Current db schema-version is " db-schema/version ", max available schema-version is " max-schema-version))))
 
-(defn- ensure-built-in-data-exists!
+(defn ensure-built-in-data-exists!
   [conn]
   (let [*uuids (atom {})
         data (->> (sqlite-create-graph/build-db-initial-data "")
                   (keep (fn [data]
                           (if (map? data)
                             (cond
-                              (= (:db/ident data) :logseq.kv/schema-version)
+                              ;; Already created db-idents like :logseq.kv/graph-initial-schema-version should not be overwritten
+                              (= "logseq.kv" (some-> (:db/ident data) namespace))
                               nil
 
                               (= (:block/title data) "Contents")
@@ -1172,8 +1181,11 @@
             (js/console.error e)
             (throw e)))))))
 
-(defn- build-invalid-tx [entity eid]
+(defn- build-invalid-tx [db entity eid]
   (cond
+    (nil? (db-malli-schema/entity-dispatch-key db entity))
+    [[:db/retractEntity eid]]
+
     (:block/schema entity)
     [[:db/retract eid :block/schema]]
 
@@ -1200,7 +1212,8 @@
     (= #{:block/tx-id} (set (keys entity)))
     [[:db/retractEntity (:db/id entity)]]
 
-    (and (seq (:block/refs entity))
+    (and (or (seq (:block/refs entity))
+             (:logseq.property.table/filters entity))
          (not (or (:block/title entity) (:block/content entity) (:property.value/content entity))))
     [[:db/retractEntity (:db/id entity)]]
 
@@ -1285,7 +1298,7 @@
                                                     [:db/retract (:db/id entity) k]))))))
                                         (into {} entity))
                           eid (:db/id entity)
-                          fix (build-invalid-tx entity eid)]
+                          fix (build-invalid-tx db entity eid)]
                       (into fix wrong-choice)))
                   invalid-entity-ids)
                  distinct)]

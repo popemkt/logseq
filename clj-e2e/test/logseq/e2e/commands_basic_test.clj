@@ -1,4 +1,4 @@
-(ns logseq.e2e.commands-test
+(ns logseq.e2e.commands-basic-test
   (:require
    [clj-time.core :as t]
    [clj-time.local :as tl]
@@ -15,7 +15,9 @@
 
 (use-fixtures :once fixtures/open-page)
 
-(use-fixtures :each fixtures/new-logseq-page)
+(use-fixtures :each
+  fixtures/new-logseq-page
+  fixtures/validate-graph)
 
 (deftest command-trigger-test
   (testing "/command trigger popup"
@@ -43,7 +45,7 @@
       (k/enter)
       (is (string/includes? (util/get-edit-content) "[["))
       (util/exit-edit)
-      (is (= "b1" (util/get-text ".block-ref"))))))
+      (is (= "b1" (.textContent (second (w/query "a.page-ref"))))))))
 
 (deftest link-test
   (testing "/link"

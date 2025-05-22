@@ -19,6 +19,7 @@
             [frontend.handler.paste :as paste-handler]
             [frontend.handler.plugin :as plugin-handler]
             [frontend.handler.plugin-config :as plugin-config-handler]
+            [frontend.handler.repo :as repo-handler]
             [frontend.handler.route :as route-handler]
             [frontend.handler.search :as search-handler]
             [frontend.handler.ui :as ui-handler]
@@ -592,6 +593,11 @@
                 :inactive (not (util/electron?))
                 :fn commit/show-commit-modal!}
 
+   :dev/fix-broken-graph {:binding []
+                          :inactive (not (state/developer-mode?))
+                          :db-graph? true
+                          :fn #(repo-handler/fix-broken-graph! (state/get-current-repo))}
+
    :dev/replace-graph-with-db-file {:binding []
                                     :inactive (or (not (util/electron?)) (not (state/developer-mode?)))
                                     :fn :frontend.handler.common.developer/replace-graph-with-db-file}
@@ -631,7 +637,15 @@
    :dev/validate-db   {:binding []
                        :db-graph? true
                        :inactive (not (state/developer-mode?))
-                       :fn :frontend.handler.common.developer/validate-db}})
+                       :fn :frontend.handler.common.developer/validate-db}
+   :dev/rtc-stop {:binding []
+                  :db-graph? true
+                  :inactive (not (state/developer-mode?))
+                  :fn :frontend.handler.common.developer/rtc-stop}
+   :dev/rtc-start {:binding []
+                   :db-graph? true
+                   :inactive (not (state/developer-mode?))
+                   :fn :frontend.handler.common.developer/rtc-start}})
 
 (let [keyboard-commands
       {::commands (set (keys all-built-in-keyboard-shortcuts))
@@ -859,6 +873,9 @@
           :dev/show-page-ast
           :dev/replace-graph-with-db-file
           :dev/validate-db
+          :dev/fix-broken-graph
+          :dev/rtc-stop
+          :dev/rtc-start
           :ui/customize-appearance])
         (with-meta {:before m/enable-when-not-editing-mode!}))
 
@@ -1051,6 +1068,9 @@
      :dev/show-page-ast
      :dev/replace-graph-with-db-file
      :dev/validate-db
+     :dev/fix-broken-graph
+     :dev/rtc-stop
+     :dev/rtc-start
      :ui/clear-all-notifications]
 
     :shortcut.category/plugins

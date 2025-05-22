@@ -33,6 +33,7 @@
             [lambdaisland.glogi :as log]
             [logseq.common.util.macro :as macro-util]
             [logseq.db :as ldb]
+            [logseq.db.frontend.content :as db-content]
             [logseq.db.frontend.entity-util :as entity-util]
             [logseq.db.frontend.property :as db-property]
             [logseq.db.frontend.property.type :as db-property-type]
@@ -613,20 +614,26 @@
       :else
       id)))
 
-(defn- select-aux
+(defn- sort-select-items
+  [property selected-choices items]
+  (if (:property/closed-values property)
+    items                   ; sorted by order
+    (sort-by
+     (juxt (fn [item] (not (selected-choices (:db/id item))))
+           db-property/property-value-content)
+     items)))
+
+(rum/defc select-aux
   [block property {:keys [items selected-choices multiple-choices?] :as opts}]
   (let [selected-choices (->> selected-choices
                               (remove nil?)
-                              (remove #(= :logseq.property/empty-placeholder %)))
+                              (remove #(= :logseq.property/empty-placeholder %))
+                              set)
         clear-value (str "No " (:block/title property))
         clear-value-label [:div.flex.flex-row.items-center.gap-1.text-sm
                            (ui/icon "x" {:size 14})
                            [:div clear-value]]
-        items (if (:property/closed-values property)
-                items                   ; sorted by order
-                (sort-by (fn [item]
-                           (db-property/property-value-content item))
-                         items))
+        [items _] (hooks/use-state (sort-select-items property selected-choices items))
         items' (->>
                 (if (and (seq selected-choices)
                          (not multiple-choices?)
@@ -748,7 +755,7 @@
                              id (:db/id node)
                              [header label] (if (integer? id)
                                               (let [node-title (if (seq (:logseq.property/classes property))
-                                                                 (:block/title node)
+                                                                 (db-content/recur-replace-uuid-in-block-title node)
                                                                  (block-handler/block-unique-title node))
                                                     title (subs node-title 0 256)
                                                     node (or (db/entity id) node)
@@ -756,7 +763,7 @@
                                                     header (when-not (db/page? node)
                                                              (when-let [breadcrumb (state/get-component :block/breadcrumb)]
                                                                [:div.text-xs.opacity-70
-                                                                (breadcrumb {:search? true} (state/get-current-repo) (:block/uuid block) {})]))
+                                                                (breadcrumb {:search? true} (state/get-current-repo) (:block/uuid node) {})]))
                                                     label [:div.flex.flex-row.items-center.gap-1
                                                            (when-not (or (:logseq.property/classes property)
                                                                          (= (:db/ident property) :block/tags))
@@ -1092,10 +1099,7 @@
        (closed-value-item value opts)
 
        (or (entity-util/page? value)
-           (and (seq (:block/tags value))
-                ;; FIXME: page-cp should be renamed to node-cp and
-                ;; support this case and maybe other complex cases.
-                (not (string/includes? (:block/title value) "[["))))
+           (seq (:block/tags value)))
        (when value
          (let [opts {:disable-preview? true
                      :tag? tag?
@@ -1158,7 +1162,7 @@
     (if editing?
       (popup-content nil)
       (let [show! (fn [e]
-                    (util/stop e)
+                    (state/clear-selection!)
                     (let [target (when e (.-target e))]
                       (when-not (or config/publishing?
                                     (util/shift-key? e)
@@ -1173,7 +1177,7 @@
          {:ref *el
           :id trigger-id
           :tabIndex 0
-          :on-click show!
+          :on-pointer-down show!
           :on-key-down (fn [e]
                          (case (util/ekey e)
                            ("Backspace" "Delete")
@@ -1237,7 +1241,9 @@
                                  (set-editing! false))))]
     [:div.ls-number.flex.flex-1.jtrigger
      {:ref *ref
-      :on-click #(set-editing! true)}
+      :on-click #(do
+                   (state/clear-selection!)
+                   (set-editing! true))}
      (if editing?
        (shui/input
         {:ref *input-ref
@@ -1460,7 +1466,8 @@
                   (and (:db/id block)
                        (= p-block (:db/id block))
                        (= p-property (:db/id property))))
-              (not= :logseq.class/Tag (:db/ident block)))
+              (not= :logseq.class/Tag
+                    (:db/ident (db/entity (:db/id block)))))
        [:div.flex.flex-row.items-center.gap-1
         [:div.warning "Self reference"]
         (shui/button {:variant :outline
