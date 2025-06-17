@@ -586,11 +586,6 @@ should be done through this fn in order to get global config and config defaults
     "LATER"
     "TODO"))
 
-(defn get-filename-format
-  ([] (get-filename-format (get-current-repo)))
-  ([repo]
-   (:file/name-format (get-config repo))))
-
 (defn get-date-formatter
   []
   (let [repo (get-current-repo)]
@@ -1991,11 +1986,11 @@ Similar to re-frame subscriptions"
         (assert (and container-id (:block/uuid block))
                 "container-id or block uuid is missing")
         (set-state! :editor/block-refs #{})
+        (set-state! :editor/block block)
         (if property-block
           (set-editing-block-id! [container-id (:block/uuid property-block) (:block/uuid block)])
           (set-editing-block-id! [container-id (:block/uuid block)]))
         (set-state! :editor/container-id container-id)
-        (set-state! :editor/block block)
         (set-state! :editor/content content :path-in-sub-atom (:block/uuid block))
         (set-state! :editor/last-key-code nil)
         (set-state! :editor/set-timestamp-block nil)

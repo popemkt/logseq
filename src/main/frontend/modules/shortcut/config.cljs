@@ -291,9 +291,11 @@
    :editor/move-block-down                  {:binding (if mac? "mod+shift+down" "alt+shift+down")
                                              :fn      (editor-handler/move-up-down false)}
 
-   ;; FIXME: add open edit in non-selection mode
    :editor/open-edit                        {:binding "enter"
-                                             :fn      (partial editor-handler/open-selected-block! :right)}
+                                             :fn      (fn [e]
+                                                        (editor-handler/open-selected-block! :right e))}
+   :editor/open-selected-blocks-in-sidebar  {:binding "shift+enter"
+                                             :fn      editor-handler/open-selected-blocks-in-sidebar!}
 
    :editor/select-block-up                  {:binding "alt+up"
                                              :fn      (editor-handler/on-select-block :up)}
@@ -594,7 +596,6 @@
                 :fn commit/show-commit-modal!}
 
    :dev/fix-broken-graph {:binding []
-                          :inactive (not (state/developer-mode?))
                           :db-graph? true
                           :fn #(repo-handler/fix-broken-graph! (state/get-current-repo))}
 
@@ -782,6 +783,7 @@
           :editor/move-block-up
           :editor/move-block-down
           :editor/open-edit
+          :editor/open-selected-blocks-in-sidebar
           :editor/select-block-up
           :editor/select-block-down
           :editor/select-parent
@@ -974,6 +976,7 @@
 
     :shortcut.category/block-selection
     [:editor/open-edit
+     :editor/open-selected-blocks-in-sidebar
      :editor/select-all-blocks
      :editor/select-parent
      :editor/select-block-up

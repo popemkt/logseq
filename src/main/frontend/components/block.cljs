@@ -2131,8 +2131,9 @@
         own-number-list?   (:own-order-number-list? config)
         order-list?        (boolean own-number-list?)
         order-list-idx     (:own-order-list-index config)
+        page-title?        (:page-title? config)
         collapsable?       (editor-handler/collapsable? uuid {:semantic? true
-                                                              :ignore-children? (:page-title? config)})
+                                                              :ignore-children? page-title?})
         link?              (boolean (:original-block config))
         icon-size          (if collapsed? 12 14)
         icon               (icon-component/get-node-icon-cp block {:size icon-size :color? true})
@@ -2147,7 +2148,8 @@
                                 :is-with-icon  with-icon?
                                 :bullet-closed collapsed?
                                 :bullet-hidden (:hide-bullet? config)}])}
-     (when (and (or (not fold-button-right?) collapsable?) (not (:table? config)))
+     (when (and (or (not fold-button-right?) collapsable?)
+                (not (:table? config)))
        [:a.block-control
         {:id       (str "control-" uuid)
          :on-click (fn [event]
@@ -2162,7 +2164,7 @@
                      (when (and (state/developer-mode?) (.-metaKey event))
                        (js/console.debug "[block config]==" config)))}
         [:span {:class (if (or (and control-show? (or collapsed? collapsable?))
-                               (and collapsed? (or order-list? config/publishing?)))
+                               (and collapsed? (or page-title? order-list? config/publishing?)))
                          "control-show cursor-pointer"
                          "control-hide")}
          (ui/rotating-arrow collapsed?)]])
@@ -2609,6 +2611,7 @@
 
             :else
             (let [block (or (db/entity [:block/uuid (:block/uuid block)]) block)]
+              (util/mobile-keep-keyboard-open)
               (editor-handler/clear-selection!)
               (editor-handler/unhighlight-blocks!)
               (let [f #(p/do!
@@ -2690,12 +2693,11 @@
   (let [*hover? (::hover? state)
         *hover-container? (::hover-container? state)
         private-tag? (ldb/private-tags (:db/ident tag))]
-    [:div.block-tag.items-center.relative
+    [:div.block-tag
      {:key (str "tag-" (:db/id tag))
-      :class (if @*hover?
-               (str "bg-gray-03 rounded "
-                    (if private-tag? "px-1" "pr-1"))
-               "pl-2 pr-1")
+      :class (str (when private-tag? "private-tag ")
+                  (when @*hover?
+                    (if private-tag? "!px-1" "!pl-0")))
       :on-mouse-over #(reset! *hover-container? true)
       :on-mouse-out #(reset! *hover-container? false)}
      [:div.flex.items-center
@@ -3073,50 +3075,52 @@
       :data-node-type (some-> (:logseq.property.node/display-type block) name)}
      (when (and db-based? (not table?)) (block-positioned-properties config block :block-left))
      [:div.block-content-or-editor-inner
-      [:div.flex.flex-1.flex-row.gap-1.items-center
-       (if (and editor-box edit? (not type-block-editor?))
-         [:div.editor-wrapper.flex.flex-1
-          {:id editor-id
-           :class (util/classnames [{:opacity-50 (boolean (or (ldb/built-in? block) (ldb/journal? block)))}])}
-          (ui/catch-error
-           (ui/block-error "Something wrong in the editor" {})
-           (editor-box {:block block
-                        :block-id uuid
-                        :block-parent-id block-id
-                        :format format}
-                       edit-input-id
-                       config))]
-         [:div.flex.flex-1.w-full.block-content-wrapper
-          {:style {:display "flex"}}
-          (when-let [actions-cp (:page-title-actions-cp config)]
-            (actions-cp block))
-          (block-content-with-error config block edit-input-id block-id *show-query? editor-box)
+      [:div.block-row.flex.flex-1.flex-row.gap-1.items-center
+       (let [content-cp [:div.flex.flex-1.w-full.block-content-wrapper
+                         {:style {:display "flex"}}
+                         (when-let [actions-cp (:page-title-actions-cp config)]
+                           (actions-cp block))
+                         (block-content-with-error config block edit-input-id block-id *show-query? editor-box)
 
-          (when (and (not hide-block-refs-count?)
-                     (not named?)
-                     (not (:table-block-title? config)))
-            [:div.flex.flex-row.items-center
-             (when (and (:embed? config)
-                        (:embed-parent config))
-               [:a.opacity-70.hover:opacity-100.svg-small.inline
-                {:on-pointer-down (fn [e]
-                                    (util/stop e)
-                                    (when-let [block (:embed-parent config)]
-                                      (editor-handler/edit-block! block :max)))}
-                svg/edit])
+                         (when (and (not hide-block-refs-count?)
+                                    (not named?)
+                                    (not (:table-block-title? config)))
+                           [:div.flex.flex-row.items-center
+                            (when (and (:embed? config)
+                                       (:embed-parent config))
+                              [:a.opacity-70.hover:opacity-100.svg-small.inline
+                               {:on-pointer-down (fn [e]
+                                                   (util/stop e)
+                                                   (when-let [block (:embed-parent config)]
+                                                     (editor-handler/edit-block! block :max)))}
+                               svg/edit])
 
-             (when block-reference-only?
-               [:a.opacity-70.hover:opacity-100.svg-small.inline
-                {:on-pointer-down (fn [e]
-                                    (util/stop e)
-                                    (editor-handler/edit-block! block :max))}
-                svg/edit])])
+                            (when block-reference-only?
+                              [:a.opacity-70.hover:opacity-100.svg-small.inline
+                               {:on-pointer-down (fn [e]
+                                                   (util/stop e)
+                                                   (editor-handler/edit-block! block :max))}
+                               svg/edit])])
 
-          (when-not (or (:table? config) (:property? config) (:page-title? config))
-            (block-refs-count block refs-count *hide-block-refs?))])
+                         (when-not (or (:table? config) (:property? config) (:page-title? config))
+                           (block-refs-count block refs-count *hide-block-refs?))]
+             editor-cp [:div.editor-wrapper.flex.flex-1.w-full
+                        {:id editor-id
+                         :class (util/classnames [{:opacity-50 (boolean (or (ldb/built-in? block) (ldb/journal? block)))}])}
+                        (ui/catch-error
+                         (ui/block-error "Something wrong in the editor" {})
+                         (editor-box {:block block
+                                      :block-id uuid
+                                      :block-parent-id block-id
+                                      :format format}
+                                     edit-input-id
+                                     config))]]
+         (if (and editor-box edit? (not type-block-editor?))
+           editor-cp
+           content-cp))
 
        (when-not (:table-block-title? config)
-         [:div.flex.flex-row.items-center.self-start.gap-1
+         [:div.ls-block-right.flex.flex-row.items-center.self-start.gap-1
           (when (and db-based? (not table?))
             [:div.opacity-70.hover:opacity-100
              (block-positioned-properties config block :block-right)])
@@ -3497,7 +3501,6 @@
         edit-input-id (str "edit-block-" (:block/uuid block))
         container-id (:container-id config*)
         table? (:table? config*)
-        sidebar? (:sidebar? config*)
         property? (:property? config*)
         custom-query? (boolean (:custom-query? config*))
         ref-or-custom-query? (or ref? custom-query?)
@@ -3665,14 +3668,14 @@
                                          :hide-block-refs-count? hide-block-refs-count?
                                          :*show-query? *show-query?}))])]
 
-         (when (and db-based? (not collapsed?) (not (or table? property?)))
+         (when (and db-based? (not collapsed?) (not (or table? property? (:page-title? config))))
            (block-positioned-properties config block :block-below))]
 
         (when (and @*show-right-menu? (not in-whiteboard?) (not (or table? property?)))
           (block-right-menu config block editing?))])
 
      (when (and db-based?
-                (or sidebar? (not collapsed?))
+                (not collapsed?)
                 (not (or table? property?)))
        [:div (when-not (:page-title? config) {:style {:padding-left 45}})
         (db-properties-cp config block {:in-block-container? true})])

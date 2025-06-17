@@ -14,11 +14,13 @@
             [frontend.common.missionary :as c.m]
             [frontend.common.thread-api :as thread-api :refer [def-thread-api]]
             [frontend.worker.db-listener :as db-listener]
+            [frontend.worker.db-metadata :as worker-db-metadata]
             [frontend.worker.db.fix :as db-fix]
             [frontend.worker.db.migrate :as db-migrate]
             [frontend.worker.db.validate :as worker-db-validate]
             [frontend.worker.export :as worker-export]
             [frontend.worker.file :as file]
+            [frontend.worker.file.reset :as file-reset]
             [frontend.worker.handler.page :as worker-page]
             [frontend.worker.handler.page.file-based.rename :as file-worker-page-rename]
             [frontend.worker.rtc.asset-db-listener]
@@ -136,7 +138,8 @@
   (let [conn (worker-state/get-datascript-conn graph)
         sqlite-db (worker-state/get-sqlite-conn graph)]
     (when (and conn sqlite-db)
-      (rebuild-db-from-datoms! conn sqlite-db))))
+      (rebuild-db-from-datoms! conn sqlite-db)
+      (worker-util/post-message :notification ["The graph has been successfully rebuilt." :success false]))))
 
 (comment
   (defn- gc-kvs-table!
@@ -188,44 +191,30 @@
                                                :db-schema-version (str version-in-db)}}))))
     missing-addresses))
 
-(def get-to-delete-unused-addresses-sql
-  "WITH to_delete(addr) AS (
-     SELECT value
-     FROM json_each(?)
-   ),
-  referenced(addr) AS (
-    SELECT json_each.value
-    FROM kvs
-    JOIN json_each(kvs.addresses)
-    WHERE kvs.addr NOT IN (SELECT addr FROM to_delete)
-      AND json_each.value IN (SELECT addr FROM to_delete)
-  )
-  SELECT addr FROM to_delete
-  WHERE addr NOT IN (SELECT addr FROM referenced)")
-
 (defn upsert-addr-content!
   "Upsert addr+data-seq. Update sqlite-cli/upsert-addr-content! when making changes"
   [db data delete-addrs*]
-  (let [delete-addrs (clojure.set/difference (set delete-addrs*) #{0 1})]
+  (let [_delete-addrs (clojure.set/difference (set delete-addrs*) #{0 1})]
     (assert (some? db) "sqlite db not exists")
     (.transaction db (fn [tx]
                        (doseq [item data]
                          (.exec tx #js {:sql "INSERT INTO kvs (addr, content, addresses) values ($addr, $content, $addresses) on conflict(addr) do update set content = $content, addresses = $addresses"
                                         :bind item}))))
-    (when (seq delete-addrs)
-      (let [result (.exec db #js {:sql get-to-delete-unused-addresses-sql
-                                  :bind (js/JSON.stringify (clj->js delete-addrs))
-                                  :rowMode "array"})
-            non-refed-addrs (map #(aget % 0) result)]
-        (when (seq non-refed-addrs)
-          (.transaction db (fn [tx]
-                             (doseq [addr non-refed-addrs]
-                               (.exec tx #js {:sql "Delete from kvs where addr = ?"
-                                              :bind #js [addr]}))))))
-      (let [missing-addrs (when worker-util/dev?
-                            (seq (find-missing-addresses nil db {:delete-addrs delete-addrs})))]
-        (when (seq missing-addrs)
-          (worker-util/post-message :notification [(str "Bug!! Missing addresses: " missing-addrs) :error false]))))))
+    ;; (when (seq delete-addrs)
+    ;;   (let [result (.exec db #js {:sql get-to-delete-unused-addresses-sql
+    ;;                               :bind (js/JSON.stringify (clj->js delete-addrs))
+    ;;                               :rowMode "array"})
+    ;;         non-refed-addrs (map #(aget % 0) result)]
+    ;;     (when (seq non-refed-addrs)
+    ;;       (.transaction db (fn [tx]
+    ;;                          (doseq [addr non-refed-addrs]
+    ;;                            (.exec tx #js {:sql "Delete from kvs where addr = ?"
+    ;;                                           :bind #js [addr]})))))
+    ;;     (let [missing-addrs (when worker-util/dev?
+    ;;                           (seq (find-missing-addresses nil db {:delete-addrs non-refed-addrs})))]
+    ;;       (when (seq missing-addrs)
+    ;;         (worker-util/post-message :notification [(str "Bug!! Missing addresses: " missing-addrs) :error false])))))
+    ))
 
 (defn restore-data-from-addr
   "Update sqlite-cli/restore-data-from-addr when making changes"
@@ -325,7 +314,7 @@
   (.exec db "PRAGMA journal_mode=WAL"))
 
 (defn- create-or-open-db!
-  [repo {:keys [config import-type datoms]}]
+  [repo {:keys [config import-type datoms] :as opts}]
   (when-not (worker-state/get-sqlite-conn repo)
     (p/let [[db search-db client-ops-db :as dbs] (get-dbs repo)
             storage (new-sqlite-storage db)
@@ -362,14 +351,14 @@
         (when (and db-based? (not initial-data-exists?) (not datoms))
           (let [config (or config "")
                 initial-data (sqlite-create-graph/build-db-initial-data config
-                                                                        (when import-type {:import-type import-type}))]
+                                                                        (select-keys opts [:import-type :graph-git-sha]))]
             (d/transact! conn initial-data {:initial-db? true})))
 
         ;; TODO: remove this once we can ensure there's no bug for missing addresses
         ;; because it's slow for large graphs
         (when-not import-type
           (when-let [missing-addresses (seq (find-missing-addresses conn db))]
-            (worker-util/post-message :notification ["It seems that the DB has been broken, please export a backup and contact Logseq team for help." :error false])
+            (worker-util/post-message :notification ["It seems that the DB has been broken. Please run the command `Fix current broken graph`." :error false])
             (throw (ex-info "DB missing addresses" {:missing-addresses missing-addresses}))))
 
         (db-migrate/migrate conn search-db)
@@ -406,13 +395,14 @@
 
 (defn- <list-all-dbs
   []
-  (let [dir? #(= (.-kind %) "directory")]
+  (let [dir? #(= (.-kind %) "directory")
+        db-dir-prefix ".logseq-pool-"]
     (p/let [^js root (.getDirectory js/navigator.storage)
             values-iter (when (dir? root) (.values root))
             values (when values-iter (iter->vec values-iter))
             current-dir-dirs (filter dir? values)
             db-dirs (filter (fn [file]
-                              (string/starts-with? (.-name file) ".logseq-pool-"))
+                              (string/starts-with? (.-name file) db-dir-prefix))
                             current-dir-dirs)]
       (prn :debug
            :db-dirs (map #(.-name %) db-dirs)
@@ -423,9 +413,8 @@
                                            ;; TODO: DRY
                                            (string/replace "+3A+" ":")
                                            (string/replace "++" "/"))
-                            metadata-file-handle (.getFileHandle dir "metadata.edn" #js {:create true})
-                            metadata-file (.getFile metadata-file-handle)
-                            metadata (.text metadata-file)]
+                            repo (str sqlite-util/db-version-prefix graph-name)
+                            metadata (worker-db-metadata/<get repo)]
                       {:name graph-name
                        :metadata (edn/read-string metadata)})) db-dirs)))))
 
@@ -466,7 +455,6 @@
 ;; [graph service]
 (defonce *service (atom []))
 (defonce fns {"remoteInvoke" thread-api/remote-function})
-(declare <init-service!)
 
 (defn- start-db!
   [repo {:keys [close-other-db?]
@@ -795,6 +783,12 @@
   [graph]
   (fix-broken-graph graph))
 
+(def-thread-api :thread-api/reset-file
+  [repo file-path content opts]
+  ;; (prn :debug :reset-file :file-path file-path :opts opts)
+  (when-let [conn (worker-state/get-datascript-conn repo)]
+    (file-reset/reset-file! repo conn file-path content opts)))
+
 (comment
   (def-thread-api :general/dangerousRemoveAllDbs
     []
@@ -845,12 +839,12 @@
            (js/console.error (str "DB is not found for " repo))))))))
 
 (defn- on-become-master
-  [repo config import?]
+  [repo start-opts]
   (js/Promise.
    (m/sp
      (c.m/<? (init-sqlite-module!))
-     (when-not import?
-       (c.m/<? (start-db! repo {:config config}))
+     (when-not (:import-type start-opts)
+       (c.m/<? (start-db! repo start-opts))
        (assert (some? (worker-state/get-datascript-conn repo))))
      (m/? (rtc.core/new-task--rtc-start true)))))
 
@@ -865,7 +859,7 @@
          :rtc-sync-state])))
 
 (defn- <init-service!
-  [graph config import?]
+  [graph start-opts]
   (let [[prev-graph service] @*service]
     (some-> prev-graph close-db!)
     (when graph
@@ -873,9 +867,9 @@
         service
         (p/let [service (shared-service/<create-service graph
                                                         (bean/->js fns)
-                                                        #(on-become-master graph config import?)
+                                                        #(on-become-master graph start-opts)
                                                         broadcast-data-types
-                                                        {:import? import?})]
+                                                        {:import? (:import-type? start-opts)})]
           (assert (p/promise? (get-in service [:status :ready])))
           (reset! *service [graph service])
           service)))))
@@ -896,7 +890,7 @@
                                 ;; because shared-service operates at the graph level,
                                 ;; creating a new database or switching to another one requires re-initializing the service.
                                 (let [[graph opts] (ldb/read-transit-str (last args))]
-                                  (p/let [service (<init-service! graph (:config opts) (some? (:import-type opts)))]
+                                  (p/let [service (<init-service! graph opts)]
                                     (get-in service [:status :ready])
                                     ;; wait for service ready
                                     (js-invoke (:proxy service) k args)))
