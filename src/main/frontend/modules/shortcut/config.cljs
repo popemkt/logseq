@@ -261,7 +261,7 @@
 
    :editor/replace-block-reference-at-point {:binding "mod+shift+r"
                                              :fn      editor-handler/replace-block-reference-with-content-at-point}
-   :editor/copy-embed                       {:binding "mod+e"
+   :editor/copy-embed                       {:binding "mod+shift+e"
                                              :fn      editor-handler/copy-current-block-embed}
 
    :editor/paste-text-in-one-block-at-point {:binding "mod+shift+v"
@@ -462,9 +462,11 @@
                                              :binding []}
 
    :graph/add                               {:fn      (fn [] (route-handler/redirect! {:to :graphs}))
+                                             :inactive config/publishing?
                                              :binding []}
 
    :graph/db-add                            {:fn #(state/pub-event! [:graph/new-db-graph])
+                                             :inactive config/publishing?
                                              :binding false}
 
    :graph/db-save                           {:fn #(state/pub-event! [:graph/save-db-to-disk])
@@ -539,6 +541,10 @@
    :command/toggle-favorite                 {:binding "mod+shift+f"
                                              :fn      page-handler/toggle-favorite!}
 
+   :editor/quick-add                        {:binding (if mac? "mod+e" "mod+alt+e")
+                                             :db-graph? true
+                                             :inactive config/publishing?
+                                             :fn      editor-handler/quick-add}
    :editor/jump                             {:binding "mod+j"
                                              :fn      jump-handler/jump-to}
    :editor/open-file-in-default-app         {:binding  "mod+d mod+a"
@@ -598,6 +604,10 @@
    :dev/fix-broken-graph {:binding []
                           :db-graph? true
                           :fn #(repo-handler/fix-broken-graph! (state/get-current-repo))}
+
+   :dev/gc-graph {:binding []
+                  :inactive (not (state/developer-mode?))
+                  :fn #(repo-handler/gc-graph! (state/get-current-repo))}
 
    :dev/replace-graph-with-db-file {:binding []
                                     :inactive (or (not (util/electron?)) (not (state/developer-mode?)))
@@ -807,6 +817,7 @@
           :editor/toggle-number-list
           :editor/undo
           :editor/redo
+          :editor/quick-add
           :ui/toggle-brackets
           :go/search-in-page
           :go/search
@@ -876,6 +887,7 @@
           :dev/replace-graph-with-db-file
           :dev/validate-db
           :dev/fix-broken-graph
+          :dev/gc-graph
           :dev/rtc-stop
           :dev/rtc-start
           :ui/customize-appearance])
@@ -908,7 +920,8 @@
      :editor/redo
      :editor/copy
      :editor/copy-text
-     :editor/cut]
+     :editor/cut
+     :editor/quick-add]
 
     :shortcut.category/formatting
     [:editor/bold
@@ -1072,6 +1085,7 @@
      :dev/replace-graph-with-db-file
      :dev/validate-db
      :dev/fix-broken-graph
+     :dev/gc-graph
      :dev/rtc-stop
      :dev/rtc-start
      :ui/clear-all-notifications]

@@ -1,6 +1,7 @@
 (ns logseq.e2e.util
   (:refer-clojure :exclude [type])
-  (:require [clojure.test :refer [is]]
+  (:require [clojure.string :as string]
+            [clojure.test :refer [is]]
             [logseq.e2e.assert :as assert]
             [logseq.e2e.keyboard :as k]
             [logseq.e2e.locator :as loc]
@@ -98,11 +99,11 @@
 (defn blocks-count
   "Blocks count including page title"
   []
-  (count-elements ".ls-block"))
+  (count-elements ".ls-block:not(.block-add-button)"))
 
 (defn page-blocks-count
   []
-  (count-elements ".ls-page-blocks .ls-block"))
+  (count-elements ".ls-page-blocks .page-blocks-inner .ls-block"))
 
 (defn exit-edit
   []
@@ -132,7 +133,7 @@
 
 (defn get-page-blocks-contents
   []
-  (w/all-text-contents ".ls-page-blocks .ls-block .block-title-wrap"))
+  (w/all-text-contents ".ls-page-blocks .ls-block:not(.block-add-button) .block-title-wrap"))
 
 (def mac? (= "Mac OS X" (System/getProperty "os.name")))
 
@@ -182,11 +183,12 @@
   (press-seq " #" {:delay 20})
   (press-seq tag)
   (w/click (first (w/query (format "a.menu-link:has-text(\"%s\")" tag))))
-  ;; wait tag added on ui
-  (assert/assert-is-visible
-   (-> ".ls-block"
-       (loc/filter :has ".editor-wrapper textarea")
-       (loc/filter :has (format ".block-tag :text('%s')" tag)))))
+  (when (not= (string/lower-case tag) "task")
+    ;; wait tag added on ui
+    (assert/assert-is-visible
+     (-> ".ls-block:not(.block-add-button)"
+         (loc/filter :has ".editor-wrapper textarea")
+         (loc/filter :has (format ".block-tag :text('%s')" tag))))))
 
 (defn -query-last
   [q]

@@ -1,6 +1,7 @@
 (ns frontend.components.imports
   "Import data into Logseq."
-  (:require [cljs-time.core :as t]
+  (:require ["path" :as node-path]
+            [cljs-time.core :as t]
             [cljs.pprint :as pprint]
             [clojure.string :as string]
             [frontend.components.onboarding.setups :as setups]
@@ -26,7 +27,9 @@
             [goog.functions :refer [debounce]]
             [goog.object :as gobj]
             [lambdaisland.glogi :as log]
+            [logseq.common.config :as common-config]
             [logseq.common.path :as path]
+            [logseq.db.frontend.asset :as db-asset]
             [logseq.db.frontend.validate :as db-validate]
             [logseq.graph-parser.exporter :as gp-exporter]
             [logseq.shui.dialog.core :as shui-dialog]
@@ -297,6 +300,13 @@
                         :info false)
     (log/error :import-ignored-files {:msg (str "Import ignored " (count ignored-files) " file(s)")})
     (pprint/pprint ignored-files))
+  (when-let [ignored-assets (seq @(:ignored-assets import-state))]
+    (notification/show! (str "Import ignored " (count ignored-assets) " "
+                             (if (= 1 (count ignored-assets)) "asset" "assets")
+                             ". See the javascript console for more details.")
+                        :info false)
+    (log/error :import-ignored-assets {:msg (str "Import ignored " (count ignored-assets) " asset(s)")})
+    (pprint/pprint ignored-assets))
   (when-let [ignored-props (seq @(:ignored-properties import-state))]
     (notification/show!
      [:.mb-2
@@ -338,14 +348,33 @@
         (log/error :import-error ex-data)))
     (notification/show! msg :warning false)))
 
-(defn- copy-asset [repo repo-dir file]
+(defn- read-asset [file assets]
   (-> (.arrayBuffer (:file-object file))
       (p/then (fn [buffer]
-                (let [content (js/Uint8Array. buffer)
-                      parent-dir (path/path-join repo-dir (path/dirname (:path file)))]
+                (p/let [checksum (db-asset/<get-file-array-buffer-checksum buffer)
+                        byte-array (js/Uint8Array. buffer)]
+                  (swap! assets assoc
+                         (gp-exporter/asset-path->name (:path file))
+                         {:size (.-size (:file-object file))
+                          :checksum checksum
+                          :type (db-asset/asset-path->type (:path file))
+                          :path (:path file)
+                          ;; Save array to avoid reading asset twice
+                          ::byte-array byte-array})
+                  byte-array)))))
+
+(defn- copy-asset [repo repo-dir asset-m]
+  (-> (::byte-array asset-m)
+      (p/then (fn [content]
+                (let [assets-dir (path/path-join repo-dir common-config/local-assets-dir)]
                   (p/do!
-                   (fs/mkdir-if-not-exists parent-dir)
-                   (fs/write-plain-text-file! repo repo-dir (:path file) content {:skip-transact? true})))))))
+                   (fs/mkdir-if-not-exists assets-dir)
+                   (if (:block/uuid asset-m)
+                     (fs/write-plain-text-file! repo assets-dir (str (:block/uuid asset-m) "." (:type asset-m)) content {:skip-transact? true})
+                     (when-not (:pdf-annotation? asset-m)
+                       (println "Copied asset" (pr-str (node-path/basename (:path asset-m)))
+                                "by its name since it was unused.")
+                       (fs/write-plain-text-file! repo assets-dir (node-path/basename (:path asset-m)) content {:skip-transact? true})))))))))
 
 (defn- import-file-graph
   [*files
@@ -375,6 +404,7 @@
                    :<save-logseq-file (fn save-logseq-file [_ path content]
                                         (db-editor-handler/save-file! path content))
                    ;; asset file options
+                   :<read-asset read-asset
                    :<copy-asset #(copy-asset repo (config/get-repo-dir repo) %)
                    ;; doc file options
                    ;; Write to frontend first as writing to worker first is poor ux with slow streaming changes
