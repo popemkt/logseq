@@ -9,6 +9,11 @@
             [logseq.db.frontend.db-ident :as db-ident]
             [logseq.db.frontend.property.type :as db-property-type]))
 
+(def ^:private property-ignore-rtc
+  {:rtc/ignore-attr-when-init-upload true
+   :rtc/ignore-attr-when-init-download true
+   :rtc/ignore-attr-when-syncing true})
+
 ;; Main property vars
 ;; ==================
 
@@ -101,12 +106,6 @@
                                      :cardinality :many
                                      :public? false
                                      :hide? true}}
-     :block/path-refs      {:title "Node path references"
-                            :attribute :block/path-refs
-                            :schema {:type :entity
-                                     :cardinality :many
-                                     :public? false
-                                     :hide? true}}
      :block/link           {:title "Node links to"
                             :attribute :block/link
                             :schema {:type :entity
@@ -122,6 +121,12 @@
                                     :schema {:type :entity
                                              :public? false
                                              :hide? true}}
+     :block/journal-day    {:title "Journal date"
+                            :attribute :block/journal-day
+                            :schema {:type :raw-number
+                                     :public? false
+                                     :hide? true}
+                            :queryable? true}
      :block/created-at     {:title "Node created at"
                             :attribute :block/created-at
                             :schema {:type :datetime
@@ -195,7 +200,7 @@
                                  {:logseq.property/description "Provides a way for a page to associate to another page i.e. backward compatible tagging."}}
      :logseq.property/background-color {:title "Background color"
                                         :schema {:type :default :hide? true}}
-   ;; number (1-6) or boolean for auto heading
+     ;; number (1-6) or boolean for auto heading
      :logseq.property/heading {:title "Heading"
                                :schema {:type :any :hide? true}
                                :queryable? true}
@@ -208,8 +213,8 @@
      :logseq.property/asset   {:title "Asset"
                                :schema {:type :entity
                                         :hide? true}}
-   ;; used by pdf and whiteboard
-   ;; TODO: remove ls-type
+     ;; used by pdf and whiteboard
+     ;; TODO: remove ls-type
      :logseq.property/ls-type {:schema {:type :keyword
                                         :hide? true}}
 
@@ -234,7 +239,7 @@
                                     :schema {:type :entity :hide? true}}
      :logseq.property.pdf/hl-value {:title "Annotation data"
                                     :schema {:type :map :hide? true}}
-   ;; FIXME: :logseq.property/order-list-type should updated to closed values
+     ;; FIXME: :logseq.property/order-list-type should updated to closed values
      :logseq.property/order-list-type {:title "List type"
                                        :schema {:type :default
                                                 :hide? true}}
@@ -254,7 +259,7 @@
                                     :schema {:type :map
                                              :hide? true}}
 
-   ;; Journal props
+     ;; Journal props
      :logseq.property.journal/title-format {:title "Title Format"
                                             :schema
                                             {:type :string
@@ -369,7 +374,7 @@
       :schema {:type :property
                :hide? true}}
 
-;; TODO: Add more props :Assignee, :Estimate, :Cycle, :Project
+     ;; TODO: Add more props :Assignee, :Estimate, :Cycle, :Project
 
      :logseq.property/icon {:title "Icon"
                             :schema {:type :map}}
@@ -420,17 +425,26 @@
        :hide? true}
       :queryable? true}
 
+     :logseq.property.view/sort-groups-by-property {:title "View sort groups by"
+                                                    :schema
+                                                    {:type :property
+                                                     :hide? true
+                                                     :public? false}
+                                                    :rtc property-ignore-rtc}
+     :logseq.property.view/sort-groups-desc? {:title "View sort groups DESC"
+                                              :schema
+                                              {:type :checkbox
+                                               :hide? true
+                                               :public? false}
+                                              :properties {:logseq.property/scalar-default-value true}
+                                              :rtc property-ignore-rtc}
+
      :logseq.property.table/sorting {:title "View sorting"
                                      :schema
                                      {:type :coll
                                       :hide? true
                                       :public? false}
-                                     ;; ignore this property when rtc,
-                                     ;; since users frequently click the sort button to view table content temporarily,
-                                     ;; but this action does not need to be synchronized with other clients.
-                                     :rtc {:rtc/ignore-attr-when-init-upload true
-                                           :rtc/ignore-attr-when-init-download true
-                                           :rtc/ignore-attr-when-syncing true}}
+                                     :rtc property-ignore-rtc}
 
      :logseq.property.table/filters {:title "View filters"
                                      :schema
@@ -485,17 +499,13 @@
                                              :schema {:type :raw-number
                                                       :hide? true
                                                       :public? false}
-                                             :rtc {:rtc/ignore-attr-when-init-upload true
-                                                   :rtc/ignore-attr-when-init-download true
-                                                   :rtc/ignore-attr-when-syncing true}}
+                                             :rtc property-ignore-rtc}
      :logseq.property.asset/remote-metadata {:title "File remote metadata"
                                              :schema
                                              {:type :map
                                               :hide? true
                                               :public? false}
-                                             :rtc {:rtc/ignore-attr-when-init-upload true
-                                                   :rtc/ignore-attr-when-init-download true
-                                                   :rtc/ignore-attr-when-syncing true}}
+                                             :rtc property-ignore-rtc}
      :logseq.property.asset/resize-metadata {:title "Asset resize metadata"
                                              :schema {:type :map
                                                       :hide? true
@@ -543,9 +553,6 @@
      :logseq.property.history/scalar-value {:title "History scalar value"
                                             :schema {:type :any
                                                      :hide? true}}
-     :logseq.property/created-by {:title "Node created by(deprecated)"
-                                  :schema {:type :string
-                                           :hide? true}}
      :logseq.property/created-by-ref {:title "Node created by"
                                       :schema {:type :entity
                                                :hide? true}
@@ -559,14 +566,20 @@
                                            :schema {:type :class
                                                     :cardinality :many
                                                     :public? true}
-                                           :queryable? true})))
+                                           :queryable? true}
+     :logseq.property.embedding/hnsw-label-updated-at {:title "HNSW label updated-at"
+                                                       :schema {:type :datetime
+                                                                :public? false
+                                                                :hide? true}
+                                                       :queryable? false
+                                                       :rtc property-ignore-rtc})))
 
 (def db-attribute-properties
   "Internal properties that are also db schema attributes"
   #{:block/alias :block/tags :block/parent
     :block/order :block/collapsed? :block/page
-    :block/refs :block/path-refs :block/link
-    :block/title :block/closed-value-property
+    :block/refs :block/link
+    :block/title :block/closed-value-property :block/journal-day
     :block/created-at :block/updated-at})
 
 (assert (= db-attribute-properties
@@ -611,7 +624,7 @@
     "logseq.property.linked-references" "logseq.property.asset" "logseq.property.table" "logseq.property.node"
     "logseq.property.code" "logseq.property.repeat"
     "logseq.property.journal" "logseq.property.class" "logseq.property.view"
-    "logseq.property.user" "logseq.property.history"})
+    "logseq.property.user" "logseq.property.history" "logseq.property.embedding"})
 
 (defn logseq-property?
   "Determines if keyword is a logseq property"

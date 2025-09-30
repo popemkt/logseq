@@ -1,6 +1,7 @@
 (ns frontend.worker.db.validate
   "Validate db"
   (:require [datascript.core :as d]
+            [frontend.worker.db.migrate :as db-migrate]
             [frontend.worker.shared-service :as shared-service]
             [logseq.db :as ldb]
             [logseq.db.frontend.validate :as db-validate]))
@@ -18,6 +19,12 @@
                      (fn [{:keys [entity dispatch-key]}]
                        (let [entity (d/entity db (:db/id entity))]
                          (cond
+                           (= :block/path-refs (:db/ident entity))
+                           (concat [[:db/retractEntity (:db/id entity)]]
+                                   (try
+                                     (db-migrate/remove-block-path-refs-datoms db)
+                                     (catch :default _e
+                                       nil)))
                            (and (= dispatch-key :block) (nil? (:block/title entity)))
                            [[:db/retractEntity (:db/id entity)]]
 
@@ -44,8 +51,9 @@
                                                 (into {}))]
                              [[:db/add (:db/id entity) :logseq.property.table/sized-columns new-value]])
 
-                           (:block.temp/fully-loaded? entity)
-                           [[:db/retract (:db/id entity) :block.temp/fully-loaded?]]
+                           (some (fn [k] (= "block.temp" (namespace k))) (keys entity))
+                           (let [ks (filter (fn [k] (= "block.temp" (namespace k))) (keys entity))]
+                             (mapv (fn [k] [:db/retract (:db/id entity) k]) ks))
                            (and (:block/page entity) (not (:block/parent entity)))
                            [[:db/add (:db/id entity) :block/parent (:db/id (:block/page entity))]]
                            (and (not (:block/page entity)) (not (:block/parent entity)) (not (:block/name entity)))
@@ -56,6 +64,10 @@
                            [[:db/add (:db/id entity) :logseq.property.class/extends :logseq.class/Root]]
                            (and (or (ldb/class? entity) (ldb/property? entity)) (ldb/internal-page? entity))
                            [[:db/retract (:db/id entity) :block/tags :logseq.class/Page]]
+
+                           (and (:logseq.property.asset/remote-metadata entity) (nil? (:logseq.property.asset/type entity)))
+                           [[:db/retractEntity (:db/id entity)]]
+
                            :else
                            nil)))
                      errors)
@@ -82,7 +94,7 @@
                                                 [[:db/retract (:e d) (:a d) (:v d)]]))))))
         tx-data (concat fix-tx-data class-as-properties)]
     (when (seq tx-data)
-      (ldb/transact! conn tx-data {:fix-db? true}))))
+      (d/transact! conn tx-data {:fix-db? true}))))
 
 (defn validate-db
   [conn]

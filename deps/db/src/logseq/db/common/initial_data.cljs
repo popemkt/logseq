@@ -14,17 +14,13 @@
             [logseq.db.frontend.entity-util :as entity-util]
             [logseq.db.frontend.rules :as rules]))
 
-(defn- get-pages-by-name
-  [db page-name]
-  (d/datoms db :avet :block/name (common-util/page-name-sanity-lc page-name)))
-
 ;; FIXME: For DB graph built-in pages, look up by name -> uuid like
 ;; get-built-in-page instead of this approach which is more error prone
 (defn get-first-page-by-name
   "Return the oldest page's db id for :block/name"
   [db page-name]
   (when (and db (string? page-name))
-    (first (sort (map :e (get-pages-by-name db page-name))))))
+    (first (sort (map :e (entity-util/get-pages-by-name db page-name))))))
 
 (defn get-first-page-by-title
   "Return the oldest page's db id for :block/title"
@@ -145,8 +141,7 @@
             identity
             (fn [e]
               (keep (fn [[k v]]
-                      (when (and (not (contains? #{:block/path-refs} k))
-                                 (or (empty? properties) (properties k)))
+                      (when (or (empty? properties) (properties k))
                         (let [v' (cond
                                    (= k :block/parent)
                                    (:db/id v)
@@ -220,7 +215,8 @@
                   nil))
         block-refs-count? (some #{:block.temp/refs-count} properties)]
     (when block
-      ;; (prn :debug :get-block (:db/id block) (:block/title block) :children? children?)
+      ;; (prn :debug :get-block (:db/id block) (:block/title block) :children? children?
+      ;;      :include-collapsed-children? include-collapsed-children?)
       (let [children (when children?
                        (let [children-blocks (get-block-children db (:block/uuid block) {:include-collapsed-children? include-collapsed-children?})
                              large-page? (>= (count children-blocks) 100)
@@ -247,7 +243,13 @@
                      block-refs-count?
                      (assoc :block.temp/refs-count (get-block-refs-count db (:db/id block)))
                      true
-                     (assoc :block.temp/load-status (if (and children? (empty? properties)) :full :self)))]
+                     (assoc :block.temp/load-status (cond
+                                                      (and children? include-collapsed-children? (empty? properties))
+                                                      :full
+                                                      (and children? (empty? properties))
+                                                      :children
+                                                      :else
+                                                      :self)))]
         (cond->
          {:block block'}
           children?
@@ -348,6 +350,7 @@
                         :logseq.kv/graph-uuid
                         :logseq.kv/latest-code-lang
                         :logseq.kv/graph-backup-folder
+                        :logseq.kv/graph-text-embedding-model-name
                         :logseq.property/empty-placeholder])
         favorites (when db-graph? (get-favorites db))
         views (when db-graph? (get-views-data db))

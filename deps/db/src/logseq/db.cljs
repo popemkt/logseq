@@ -7,6 +7,7 @@
             [clojure.walk :as walk]
             [datascript.core :as d]
             [datascript.impl.entity :as de]
+            [logseq.common.config :as common-config]
             [logseq.common.util :as common-util]
             [logseq.common.uuid :as common-uuid]
             [logseq.db.common.delete-blocks :as delete-blocks] ;; Load entity extensions
@@ -101,12 +102,13 @@
        ;; (cljs.pprint/pprint tx-data)
        ;; (js/console.trace)
 
-       (let [f (or @*transact-fn d/transact!)]
+       (if-let [transact-fn @*transact-fn]
+         (transact-fn repo-or-conn tx-data tx-meta)
          (try
-           (f repo-or-conn tx-data tx-meta)
+           (d/transact! repo-or-conn tx-data tx-meta)
            (catch :default e
              (js/console.trace)
-             (prn :debug-tx-data tx-data)
+             (prn :debug :transact-failed :tx-meta tx-meta :tx-data tx-data)
              (throw e))))))))
 
 (def page? common-entity-util/page?)
@@ -135,8 +137,8 @@
              :as opts}]
   (if-let [children (sort-by-order
                      (if include-property-block?
-                       (:block/_raw-parent entity)
-                       (:block/_parent entity)))]
+                       (entity-plus/lookup-kv-then-entity entity :block/_raw-parent)
+                       (entity-plus/lookup-kv-then-entity entity :block/_parent)))]
     (cons entity (mapcat #(get-block-and-children-aux % opts) children))
     [entity]))
 
@@ -217,7 +219,7 @@
 (defn page-exists?
   "Returns truthy value if page exists.
    For db graphs, returns all page db ids that given title and one of the given `tags`.
-   For file graphs, returns page entity if it exists"
+   For file graphs, returns page db/id vector if it exists"
   [db page-name tags]
   (when page-name
     (if (db-based-graph? db)
@@ -248,7 +250,8 @@
             db
             (common-util/page-name-sanity-lc page-name)
             tags'))))
-      (d/entity db [:block/name (common-util/page-name-sanity-lc page-name)]))))
+      (when-let [id (:db/id (d/entity db [:block/name (common-util/page-name-sanity-lc page-name)]))]
+        [id]))))
 
 (defn get-page
   "Get a page given its unsanitized name or uuid"
@@ -272,6 +275,9 @@
 (def get-built-in-page db-db/get-built-in-page)
 
 (def library? db-db/library?)
+(defn get-library-page
+  [db]
+  (get-built-in-page db common-config/library-page-name))
 
 (defn get-case-page
   "Case sensitive version of get-page. For use with DB graphs"
@@ -575,3 +581,19 @@
   (if (sqlite-util/db-based-graph? repo)
     db-schema/schema
     file-schema/schema))
+
+(defn page-in-library?
+  "Check whether a `page` exists on the Library page"
+  [db page]
+  (when (page? page)
+    (when-let [library-page (get-built-in-page db common-config/library-page-name)]
+      (loop [parent (:block/parent page)]
+        (cond
+          (nil? parent)
+          false
+          (= (:db/id parent) (:db/id library-page))
+          true
+          :else
+          (recur (:block/parent parent)))))))
+
+(def get-class-title-with-extends db-db/get-class-title-with-extends)

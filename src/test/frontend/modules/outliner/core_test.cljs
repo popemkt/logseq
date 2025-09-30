@@ -12,7 +12,9 @@
             [frontend.test.fixtures :as fixtures]
             [frontend.test.helper :as test-helper :refer [load-test-files]]
             [frontend.worker.db-listener :as worker-db-listener]
+            [logseq.common.util :as common-util]
             [logseq.db :as ldb]
+            [logseq.db.frontend.class :as db-class]
             [logseq.db.test.helper :as db-test]
             [logseq.graph-parser.block :as gp-block]
             [logseq.outliner.core :as outliner-core]
@@ -169,7 +171,8 @@
      (transact-opts)
      (outliner-core/move-blocks! test-db
                                  (db/get-db test-db false)
-                                 [(get-block 3)] (get-block 14) true))
+                                 [(get-block 3)] (get-block 14)
+                                 {:sibling? true}))
     (is (= [6 9] (get-children 2)))
     (is (= [13 14 3 15] (get-children 12))))
 
@@ -192,7 +195,8 @@
        (transact-opts)
        (outliner-core/move-blocks! test-db
                                    (db/get-db test-db false)
-                                   [(get-block 3)] (get-block 12) false))
+                                   [(get-block 3)] (get-block 12)
+                                   {:sibling? false}))
       (is (= [6 9] (get-children 2)))
       (is (= [3 13 14 15] (get-children 12))))))
 
@@ -205,7 +209,8 @@
      (transact-opts)
      (outliner-core/move-blocks! test-db
                                  (db/get-db test-db false)
-                                 [(get-block 3)] (get-block 2) true))
+                                 [(get-block 3)] (get-block 2)
+                                 {:sibling? true}))
     (is (= [4] (get-children 2)))
     (is (= [2 3 5] (get-children 22)))))
 
@@ -220,7 +225,8 @@
      (transact-opts)
      (outliner-core/move-blocks! test-db
                                  (db/get-db test-db false)
-                                 [(get-block 3) (get-block 6)] (get-block 2) true))
+                                 [(get-block 3) (get-block 6)] (get-block 2)
+                                 {:sibling? true}))
     (is (= [4] (get-children 2)))
     (is (= [2 3 6 5 7] (get-children 22)))))
 
@@ -236,7 +242,8 @@
      (transact-opts)
      (outliner-core/move-blocks! test-db
                                  (db/get-db test-db false)
-                                 [(get-block 3) (get-block 5)] (get-block 2) false))
+                                 [(get-block 3) (get-block 5)] (get-block 2)
+                                 {:sibling? false}))
     (is (= [3 5 4] (get-children 2)))
     (is (= [2 6 7 8] (get-children 22)))))
 
@@ -532,6 +539,45 @@
     (is (= [:logseq.class/Tag] (map :db/ident (:block/tags audio-tag)))
         "#audio has wrong tags")))
 
+(deftest do-not-save-inline-page-tag-when-save-block
+  (testing "Inline page class shouldn't be saved when save block"
+    (let [conn (db-test/create-conn-with-blocks
+                [{:page {:block/title "page1"} :blocks [{:block/title "test"}]}])
+          block (db-test/find-block-by-content @conn "test")
+          block' (d/entity @conn (:db/id block))]
+      (doseq [class-ident db-class/page-classes]
+        (let [class (d/entity @conn class-ident)]
+          (outliner-core/save-block! "logseq_db_test" conn
+                                     "MMM do, yyyy"
+                                     {:block/uuid (:block/uuid block)
+                                      :block/tags [(select-keys class [:block/name :block/title :block/uuid :db/ident])],
+                                      :block/title (common-util/format "test #[[%s]]" (str (:block/uuid class))),
+                                      :db/id (:db/id block)})
+          (is (= "test" (:block/title block')))
+          (is (empty? (:block/tags block'))))))))
+
+(deftest do-not-save-inline-page-tag-when-insert-blocks
+  (testing "Inline page class shouldn't be saved when insert blocks"
+    (let [conn (db-test/create-conn-with-blocks
+                [{:page {:block/title "page1"} :blocks [{:block/title "test"}]}])
+          block (db-test/find-block-by-content @conn "test")]
+      (doseq [class-ident db-class/page-classes]
+        (let [class (d/entity @conn class-ident)
+              new-block-id (random-uuid)
+              _ (outliner-tx/transact!
+                 (transact-opts)
+                 (outliner-core/insert-blocks! "logseq_db_test" conn
+                                               [{:block/uuid new-block-id
+                                                 :block/tags [(select-keys class [:block/name :block/title :block/uuid :db/ident])],
+                                                 :block/title (common-util/format "test #[[%s]]" (str (:block/uuid class))),
+                                                 :block/page (:db/id (:block/page block))}]
+                                               block
+                                               {:sibling? false
+                                                :keep-uuid? true}))
+              block' (d/entity @conn [:block/uuid new-block-id])]
+          (is (= "test" (:block/title block')))
+          (is (empty? (:block/tags block'))))))))
+
 (deftest save-test
   (load-test-files [{:file/path "pages/page1.md"
                      :file/content "alias:: foo, bar
@@ -706,7 +752,11 @@ tags:: tag1, tag2
           (when (seq blocks)
             (let [target (get-random-block)]
               (outliner-tx/transact! (transact-opts)
-                                     (outliner-core/move-blocks! test-db (db/get-db test-db false) blocks target (gen/generate gen/boolean)))
+                                     (outliner-core/move-blocks! test-db
+                                                                 (db/get-db test-db false)
+                                                                 blocks
+                                                                 target
+                                                                 {:sibling? (gen/generate gen/boolean)}))
               (let [total (get-blocks-count)]
                 (is (= total (count @*random-blocks)))))))))))
 
@@ -774,7 +824,9 @@ tags:: tag1, tag2
                    (outliner-tx/transact! (transact-opts)
                                           (outliner-core/move-blocks! test-db
                                                                       (db/get-db test-db false)
-                                                                      blocks (get-random-block) (gen/generate gen/boolean))))))
+                                                                      blocks
+                                                                      (get-random-block)
+                                                                      {:sibling? (gen/generate gen/boolean)})))))
 
              ;; move up down
              (fn []

@@ -14,13 +14,13 @@
   "Namespaces or parent namespaces _only_ for DB graphs. Use a '.' at end of a namespace for parent namespaces"
   (mapv escape-shell-regex
         ["logseq.db.sqlite." "logseq.db.frontend."
-         "logseq.outliner.property" "logseq.outliner.validate" "logseq.outliner.cli" "logseq.outliner.db-pipeline"
+         "logseq.outliner.property" "logseq.outliner.validate" "logseq.outliner.page" "logseq.outliner.cli" "logseq.outliner.db-pipeline"
          "electron.db"
          "frontend.handler.db-based."
-         "frontend.worker.handler.page.db-based"
-         "frontend.components.property" "frontend.components.class" "frontend.components.quick-add"
+         "frontend.inference-worker"
+         "frontend.components.property" "frontend.components.class" "frontend.components.quick-add" "frontend.components.vector-search"
          "frontend.components.db-based" "frontend.components.objects" "frontend.components.query.view"
-         "mobile.core" "mobile.events" "mobile.externals" "mobile.init" "mobile.ionic" "mobile.state"
+         "mobile.core" "mobile.events" "mobile.externals" "mobile.init" "mobile.state"
          "mobile.components"]))
 
 (def file-graph-ns
@@ -44,7 +44,7 @@
   ["deps/db/src/logseq/db/frontend"
    "deps/db/src/logseq/db/sqlite"
    "deps/outliner/src/logseq/outliner/property.cljs"
-   "src/main/frontend/worker/handler/page/db_based"])
+   "deps/outliner/src/logseq/outliner/page.cljs"])
 
 (def db-graph-paths
   "Paths _only_ for DB graphs"
@@ -52,14 +52,17 @@
         ["deps/outliner/src/logseq/outliner/cli.cljs"
          "deps/outliner/src/logseq/outliner/db_pipeline.cljs"
          "deps/outliner/src/logseq/outliner/validate.cljs"
+         "deps/outliner/src/logseq/outliner/page.cljs"
          "src/main/frontend/handler/db_based"
          "src/main/frontend/components/class.cljs"
          "src/main/frontend/components/property.cljs"
          "src/main/frontend/components/property"
          "src/main/frontend/components/objects.cljs"
          "src/main/frontend/components/quick_add.cljs"
+         "src/main/frontend/components/vector_search"
          "src/main/frontend/components/db_based"
          "src/main/frontend/components/query/view.cljs"
+         "src/main/frontend/inference_worker"
          "src/electron/electron/db.cljs"
          "src/main/mobile"]))
 

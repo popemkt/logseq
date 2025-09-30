@@ -99,8 +99,7 @@ independent of format as format specific heading characters are stripped"
                 (fn content-matches? [block-content external-content block-id]
                   (let [block (db-utils/entity repo block-id)
                         ref-tags (distinct (concat (:block/tags block) (:block/refs block)))]
-                    (= (-> block-content
-                           (db-content/id-ref->title-ref ref-tags)
+                    (= (-> (db-content/id-ref->title-ref block-content ref-tags)
                            (db-content/content-id-ref->page ref-tags)
                            heading-content->route-name)
                        (string/lower-case external-content))))
@@ -384,7 +383,8 @@ independent of format as format specific heading characters are stripped"
            '[:find [(pull ?block ?block-attrs) ...]
              :in $ [?ref-page ...] ?block-attrs
              :where
-             [?block :block/path-refs ?ref-page]]
+             [?r :block/name ?ref-page]
+             [?block :block/refs ?r]]
            db
            pages
            (butlast file-model/file-graph-block-attrs))
@@ -427,7 +427,8 @@ independent of format as format specific heading characters are stripped"
 (defn journal-page?
   "sanitized page-name only"
   [page-name]
-  (ldb/journal? (ldb/get-page (conn/get-db) page-name)))
+  (when (string? page-name)
+    (ldb/journal? (ldb/get-page (conn/get-db) page-name))))
 
 (defn get-all-referenced-blocks-uuid
   "Get all uuids of blocks with any back link exists."

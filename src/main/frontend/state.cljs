@@ -10,7 +10,6 @@
             [dommy.core :as dom]
             [electron.ipc :as ipc]
             [frontend.db.conn-state :as db-conn-state]
-            [frontend.db.transact :as db-transact]
             [frontend.flows :as flows]
             [frontend.mobile.util :as mobile-util]
             [frontend.spec.storage :as storage-spec]
@@ -33,7 +32,9 @@
 (defonce *profile-state (volatile! {}))
 
 (defonce *db-worker (atom nil))
+(defonce *db-worker-client-id (atom nil))
 (defonce *editor-info (atom nil))
+(defonce app-ready-promise (p/deferred))
 
 (def db-worker-ready-flow
   "`<invoke-db-worker` throws err if `*db-worker` not ready yet.
@@ -59,6 +60,8 @@
   But directly pass args to db-worker, and result from db-worker as well."
   [qkw & args]
   (<invoke-db-worker* qkw true args))
+
+(defonce *infer-worker (atom nil))
 
 ;; Stores main application state
 (defonce ^:large-vars/data-var state
@@ -101,6 +104,7 @@
 
       ;; ui
       :ui/viewport                           {}
+      :ui/show-property-dialog?              (atom false)
 
       ;; left sidebar
       :ui/navigation-item-collapsed?         {}
@@ -173,9 +177,6 @@
       ;; Stores deleted refed blocks, indexed by repo
       :editor/last-replace-ref-content-tx    nil
 
-      ;; for audio record
-      :editor/record-status                  "NONE"
-
       :editor/code-block-context             nil
       :editor/latest-shortcut                (atom nil)
 
@@ -221,7 +222,6 @@
       ;; mobile
       :mobile/container-urls                 nil
       :mobile/show-action-bar?               false
-      :mobile/show-recording-bar?            false
 
       ;; plugin
       :plugin/enabled                        (and util/plugin-platform?
@@ -317,6 +317,7 @@
       :rtc/graphs                            []
       :rtc/online-info                       (atom {})
       :rtc/asset-upload-download-progress    (atom {})
+      :rtc/users-info                        (atom {})
 
       :user/info                             {:UserGroups (storage/get :user-groups)}
       :encryption/graph-parsing?             false
@@ -346,7 +347,10 @@
                                                        3))
       :favorites/updated?                    (atom 0)
       :db/async-queries                      (atom {})
-      :db/latest-transacted-entity-uuids     (atom {})})))
+      :db/latest-transacted-entity-uuids     (atom {})
+
+      :vector-search/state                   (atom {})
+      :vector-search/load-model-progress     (atom nil)})))
 
 ;; User configuration getters under :config (and sometimes :me)
 ;; ========================================
@@ -725,7 +729,9 @@ Similar to re-frame subscriptions"
   ([]
    (enable-journals? (get-current-repo)))
   ([repo]
-   (not (false? (:feature/enable-journals? (sub-config repo))))))
+   (if (sqlite-util/db-based-graph? repo) ; db graphs rely on journals for quick capture/sharing/assets, etc.
+     true
+     (not (false? (:feature/enable-journals? (sub-config repo)))))))
 
 (defn enable-flashcards?
   ([]
@@ -2309,9 +2315,6 @@ Similar to re-frame subscriptions"
 (defn update-favorites-updated!
   []
   (update-state! :favorites/updated? inc))
-
-(def get-worker-next-request-id db-transact/get-next-request-id)
-(def add-worker-request! db-transact/add-request!)
 
 (defn get-next-container-id
   []

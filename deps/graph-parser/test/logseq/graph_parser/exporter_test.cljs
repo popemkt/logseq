@@ -1,7 +1,7 @@
 (ns ^:node-only logseq.graph-parser.exporter-test
   (:require ["fs" :as fs]
             ["path" :as node-path]
-            [cljs.test :refer [testing is are deftest]]
+            [cljs.test :refer [are deftest is testing]]
             [clojure.set :as set]
             [clojure.string :as string]
             [datascript.core :as d]
@@ -94,16 +94,23 @@
    ;; TODO: Add actual default
    :default-config {}})
 
-;; Copied from db-import
-(defn- <read-asset-file [file assets]
+;; tweaked from db-import
+(defn- <read-and-copy-asset [file assets buffer-handler *asset-ids]
   (p/let [buffer (fs/readFileSync (:path file))
-          checksum (db-asset/<get-file-array-buffer-checksum buffer)]
-    (swap! assets assoc
-           (gp-exporter/asset-path->name (:path file))
-           {:size (.-length buffer)
-            :checksum checksum
-            :type (db-asset/asset-path->type (:path file))
-            :path (:path file)})
+          checksum (db-asset/<get-file-array-buffer-checksum buffer)
+          asset-id (d/squuid)
+          asset-name (gp-exporter/asset-path->name (:path file))
+          asset-type (db-asset/asset-path->type (:path file))
+          {:keys [with-edn-content pdf-annotation?]} (buffer-handler buffer)]
+    (when-not pdf-annotation?
+      (swap! *asset-ids conj asset-id))
+    (swap! assets assoc asset-name
+           (with-edn-content
+             {:size (.-length buffer)
+              :type asset-type
+              :path (:path file)
+              :checksum checksum
+              :asset-id asset-id}))
     buffer))
 
 ;; Copied from db-import script and tweaked for an in-memory import
@@ -118,13 +125,8 @@
         options' (merge default-export-options
                         {:user-options (merge {:convert-all-tags? false} (dissoc options :assets :verbose))
                         ;; asset file options
-                         :<read-asset <read-asset-file
-                         :<copy-asset (fn copy-asset [m]
-                                        (if (:block/uuid m)
-                                          (swap! assets conj m)
-                                          (when-not (:pdf-annotation? m)
-                                            (println "[INFO]" "Asset" (pr-str (node-path/basename (:path m)))
-                                                     "does not have a :block/uuid"))))}
+                         :<read-and-copy-asset (fn [file *assets buffer-handler]
+                                                 (<read-and-copy-asset file *assets buffer-handler assets))}
                         (select-keys options [:verbose]))]
     (gp-exporter/export-file-graph conn conn config-file *files options')))
 
@@ -196,7 +198,7 @@
   ;; This graph will contain basic examples of different features to import
   (p/let [file-graph-dir "test/resources/exporter-test-graph"
           conn (db-test/create-conn)
-          ;; Calculate refs and path-refs like frontend
+          ;; Calculate refs like frontend
           _ (db-pipeline/add-listener conn)
           assets (atom [])
           {:keys [import-state]} (import-file-graph-to-db file-graph-dir conn {:assets assets :convert-all-tags? true})]
@@ -214,7 +216,7 @@
       (is (= 4 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Task]] @conn))))
       (is (= 4 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Query]] @conn))))
       (is (= 2 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Card]] @conn))))
-      (is (= 3 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Quote-block]] @conn))))
+      (is (= 4 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Quote-block]] @conn))))
       (is (= 2 (count (d/q '[:find ?b :where [?b :block/tags :logseq.class/Pdf-annotation]] @conn))))
 
       ;; Properties and tags aren't included in this count as they aren't a Page
@@ -587,16 +589,12 @@
       (is (= "multiline block\na 2nd\nand a 3rd" (:block/title (db-test/find-block-by-content @conn #"multiline block"))))
       (is (= "logbook block" (:block/title (db-test/find-block-by-content @conn #"logbook block")))))
 
-    (testing ":block/refs and :block/path-refs"
+    (testing ":block/refs"
       (let [page (db-test/find-page-by-title @conn "chat-gpt")]
         (is (set/subset?
              #{"type" "LargeLanguageModel"}
              (->> page :block/refs (map #(:block/title (d/entity @conn (:db/id %)))) set))
-            "Page has correct property and property value :block/refs")
-        (is (set/subset?
-             #{"type" "LargeLanguageModel"}
-             (->> page :block/path-refs (map #(:block/title (d/entity @conn (:db/id %)))) set))
-            "Page has correct property and property value :block/path-refs"))
+            "Page has correct property and property value :block/refs"))
 
       (let [block (db-test/find-block-by-content @conn "old todo block")]
         (is (set/subset?
@@ -605,14 +603,7 @@
                   :block/refs
                   (map #(:db/ident (d/entity @conn (:db/id %))))
                   set))
-            "Block has correct task tag and property :block/refs")
-        (is (set/subset?
-             #{:logseq.property/status :logseq.class/Task}
-             (->> block
-                  :block/path-refs
-                  (map #(:db/ident (d/entity @conn (:db/id %))))
-                  set))
-            "Block has correct task tag and property :block/path-refs")))
+            "Block has correct task tag and property :block/refs")))
 
     (testing "whiteboards"
       (let [block-with-props (db-test/find-block-by-content @conn #"block with props")]

@@ -25,14 +25,14 @@
   (when (string? s)
     (-> s
       ;; Normalize input: replace hyphens/spaces with underscores, collapse multiple underscores
-      (clojure.string/replace #"[-\s]+" "_")
+        (clojure.string/replace #"[-\s]+" "_")
       ;; Split on uppercase letters (except at start) and join with underscore
-      (clojure.string/replace #"(?<!^)([A-Z])" "_$1")
+        (clojure.string/replace #"(?<!^)([A-Z])" "_$1")
       ;; Remove redundant underscores and trim
-      (clojure.string/replace #"_+" "_")
-      (clojure.string/trim)
+        (clojure.string/replace #"_+" "_")
+        (clojure.string/trim)
       ;; Convert to lowercase
-      (clojure.string/lower-case))))
+        (clojure.string/lower-case))))
 
 (defn- ls-api-call!
   [tag & args]
@@ -61,9 +61,11 @@
     (page/new-page "test-block-apis")
     (ls-api-call! :ui.showMsg "hello world" "info")
     (let [ret (ls-api-call! :editor.appendBlockInPage "test-block-apis" "append-block-in-page-0")
+          ret1 (ls-api-call! :editor.appendBlockInPage "append-block-in-current-page-0")
+          _ (assert-api-ls-block! ret1)
           uuid' (assert-api-ls-block! ret)]
       (-> (ls-api-call! :editor.insertBlock uuid' "insert-0")
-        (assert-api-ls-block!))
+          (assert-api-ls-block!))
       (ls-api-call! :editor.updateBlock uuid' "append-but-updated-0")
       (k/esc)
       (w/wait-for ".block-title-wrap:text('append-but-updated-0')")
@@ -75,11 +77,13 @@
     (let [ret (ls-api-call! :editor.appendBlockInPage "test-block-properties-apis" "block-in-page-0" {:properties {:p1 1}})
           uuid' (assert-api-ls-block! ret)
           prop1 (ls-api-call! :editor.getBlockProperty uuid' "p1")
-          props1 (ls-api-call! :editor.getBlockProperties uuid' "p1")]
+          props1 (ls-api-call! :editor.getBlockProperties uuid' "p1")
+          props2 (ls-api-call! :editor.getPageProperties "test-block-properties-apis")]
       (w/wait-for ".property-k:text('p1')")
       (is (= 1 (get prop1 "value")))
       (is (= (get prop1 "ident") ":plugin.property._api/p1"))
       (is (= 1 (get props1 ":plugin.property._api/p1")))
+      (is (= ["Page"] (get props2 ":block/tags")))
       (ls-api-call! :editor.upsertBlockProperty uuid' "p2" "p2")
       (ls-api-call! :editor.upsertBlockProperty uuid' "p3" true)
       (ls-api-call! :editor.upsertBlockProperty uuid' "p4" {:a 1, :b [2, 3]})

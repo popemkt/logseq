@@ -113,7 +113,6 @@
       (js->clj :keywordize-keys true)))
 
 (defn zero-pad
-  "Copy of frontend.util/zero-pad. Too basic to couple to main app"
   [n]
   (if (< n 10)
     (str "0" n)
@@ -250,7 +249,7 @@
   {:malli/schema [:=> [:cat :any :string] [:or :nil :string [:vector [:maybe :string]]]]}
   [pattern s]
   (when-not (string? s)
-       ;; TODO: sentry
+    ;; TODO: sentry
     (js/console.trace))
   (when (string? s)
     (re-find pattern s)))

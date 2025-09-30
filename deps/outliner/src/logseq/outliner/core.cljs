@@ -10,6 +10,7 @@
             [logseq.common.util.page-ref :as page-ref]
             [logseq.common.uuid :as common-uuid]
             [logseq.db :as ldb]
+            [logseq.db.common.entity-plus :as entity-plus]
             [logseq.db.common.order :as db-order]
             [logseq.db.file-based.schema :as file-schema]
             [logseq.db.frontend.class :as db-class]
@@ -26,6 +27,8 @@
             [logseq.outliner.validate :as outliner-validate]
             [malli.core :as m]
             [malli.util :as mu]))
+
+;; TODO: remove `repo` usage, use db to check `entity-plus/db-based-graph?`
 
 (def ^:private block-map
   (mu/optional-keys
@@ -234,14 +237,45 @@
           [:db/retract eid :block/tags :logseq.class/Page]])))
    tags))
 
+(defn- remove-inline-page-classes
+  [db {:block/keys [tags] :as block}]
+  ;; Notice: should check `page?` for block from the current db
+  (if (ldb/page? (d/entity db (:db/id block)))
+    block
+    (let [page-class? (fn [t]
+                        (and (map? t) (contains? db-class/page-classes
+                                                 (or (:db/ident t)
+                                                     (when-let [id (:block/uuid t)]
+                                                       (:db/ident (d/entity db [:block/uuid id])))))))
+          page-classes (filter page-class? tags)]
+      (if (seq page-classes)
+        (-> block
+            (update :block/tags
+                    (fn [tags]
+                      (->> (remove page-class? tags)
+                           (remove nil?))))
+            (update :block/refs
+                    (fn [refs] (->> (remove page-class? refs)
+                                    (remove nil?))))
+            (update :block/title (fn [title]
+                                   (reduce
+                                    (fn [title page-class]
+                                      (-> (string/replace title (str "#" (page-ref/->page-ref (:block/uuid page-class))) "")
+                                          string/trim))
+                                    title
+                                    page-classes))))
+        block))))
+
 (extend-type Entity
   otree/INode
   (-save [this *txs-state db repo _date-formatter {:keys [retract-attributes? retract-attributes outliner-op]
                                                    :or {retract-attributes? true}}]
     (assert (ds/outliner-txs-state? *txs-state)
             "db should be satisfied outliner-tx-state?")
-    (let [data this
-          db-based? (sqlite-util/db-based-graph? repo)
+    (let [db-based? (sqlite-util/db-based-graph? repo)
+          data (cond->> this
+                 db-based?
+                 (remove-inline-page-classes db))
           data' (cond->
                  (if (de/entity? data)
                    (assoc (.-kv ^js data) :db/id (:db/id data))
@@ -273,7 +307,7 @@
                                    (not= block-title (:block/title block-entity)))
           _ (when (and db-based? page? block-title)
               (outliner-validate/validate-page-title-characters block-title {:node m*}))
-          m* (if (and db-based? page-title-changed? (not (and page? (:block/parent block-entity))))
+          m* (if (and db-based? page-title-changed?)
                (let [_ (outliner-validate/validate-page-title (:block/title m*) {:node m*})
                      page-name (common-util/page-name-sanity-lc (:block/title m*))]
                  (assoc m* :block/name page-name))
@@ -348,18 +382,23 @@
     (assert (ds/outliner-txs-state? *txs-state)
             "db should be satisfied outliner-tx-state?")
     (let [block-id (:block/uuid this)
-          ids (cons (:db/id this) (ldb/get-block-full-children-ids db block-id))
-          txs (map (fn [id] [:db.fn/retractEntity id]) ids)
-          page-tx (let [block (d/entity db [:block/uuid block-id])]
-                    (when (:block/pre-block? block)
-                      (when-let [id (:db/id (:block/page block))]
-                        [[:db/retract id :block/properties]
-                         [:db/retract id :block/properties-order]
-                         [:db/retract id :block/properties-text-values]
-                         [:db/retract id :block/alias]
-                         [:db/retract id :block/tags]])))]
-      (swap! *txs-state concat txs page-tx)
-      block-id)))
+          block (d/entity db [:block/uuid block-id])]
+      (if (ldb/page? block)
+        (swap! *txs-state concat [[:db/retract (:db/id block) :block/parent]
+                                  [:db/retract (:db/id block) :block/order]
+                                  [:db/retract (:db/id block) :block/page]])
+        (let [ids (cons (:db/id this) (ldb/get-block-full-children-ids db block-id))
+              txs (map (fn [id] [:db.fn/retractEntity id]) ids)
+              page-tx (let [block (d/entity db [:block/uuid block-id])]
+                        (when (:block/pre-block? block)
+                          (when-let [id (:db/id (:block/page block))]
+                            [[:db/retract id :block/properties]
+                             [:db/retract id :block/properties-order]
+                             [:db/retract id :block/properties-text-values]
+                             [:db/retract id :block/alias]
+                             [:db/retract id :block/tags]])))]
+          (swap! *txs-state concat txs page-tx)
+          block-id)))))
 
 (defn- assoc-level-aux
   [tree-vec children-key init-level]
@@ -376,19 +415,22 @@
 
 (defn- assign-temp-id
   [blocks replace-empty-target? target-block]
-  (->> (map-indexed (fn [idx block]
-                      (let [replacing-block? (and replace-empty-target? (zero? idx))]
-                        (if replacing-block?
-                          (let [db-id (or (:db/id block) (dec (- idx)))]
-                            (if (seq (:block/_parent target-block)) ; target-block has children
+  (->> blocks
+       (map-indexed
+        (fn [idx block]
+          (let [replacing-block? (and replace-empty-target? (zero? idx))
+                db-id (or (when (:block.temp/use-old-db-id? block)
+                            (:db/id block))
+                          (dec (- idx)))]
+            (if replacing-block?
+              (if (seq (:block/_parent target-block)) ; target-block has children
                               ;; update block properties
-                              [(assoc block
-                                      :db/id (:db/id target-block)
-                                      :block/uuid (:block/uuid target-block))]
-                              [[:db/retractEntity (:db/id target-block)] ; retract target-block first
-                               (assoc block
-                                      :db/id db-id)]))
-                          [(assoc block :db/id (dec (- idx)))]))) blocks)
+                [(assoc block
+                        :db/id (:db/id target-block)
+                        :block/uuid (:block/uuid target-block))]
+                [[:db/retractEntity (:db/id target-block)] ; retract target-block first
+                 (assoc block :db/id db-id)])
+              [(assoc block :db/id db-id)]))))
        (apply concat)))
 
 (defn- get-id
@@ -522,24 +564,28 @@
      block)))
 
 (defn- get-target-block-page
-  [target-block]
+  [target-block sibling?]
   (or
    (:db/id (:block/page target-block))
    ;; target parent is a page
-   (when-let [parent (:block/parent target-block)]
-     (when (ldb/page? parent)
-       (:db/id parent)))
+   (when sibling?
+     (when-let [parent (:block/parent target-block)]
+       (when (ldb/page? parent)
+         (:db/id parent))))
+
    ;; target-block is a page itself
    (:db/id target-block)))
 
 (defn- build-insert-blocks-tx
   [db target-block blocks uuids get-new-id {:keys [sibling? outliner-op replace-empty-target? insert-template? keep-block-order?]}]
-  (let [block-ids (set (map :block/uuid blocks))
-        target-page (get-target-block-page target-block)
+  (let [db-based? (entity-plus/db-based-graph? db)
+        block-ids (set (map :block/uuid blocks))
+        target-page (get-target-block-page target-block sibling?)
         orders (get-block-orders blocks target-block sibling? keep-block-order?)]
     (map-indexed (fn [idx {:block/keys [parent] :as block}]
                    (when-let [uuid' (get uuids (:block/uuid block))]
-                     (let [top-level? (= (:block/level block) 1)
+                     (let [block (if db-based? (remove-inline-page-classes db block) block)
+                           top-level? (= (:block/level block) 1)
                            parent (compute-block-parent block parent target-block top-level? sibling? get-new-id outliner-op replace-empty-target? idx)
 
                            order (nth orders idx)
@@ -549,28 +595,33 @@
                                                       (let [ref-ids (set (map :block/uuid (:block/refs block)))]
                                                         (->> (set/intersection block-ids ref-ids)
                                                              (remove #{(:block/uuid block)})))))
-                           m (cond->
-                              {:db/id (:db/id block)
-                               :block/uuid uuid'
-                               :block/parent parent
-                               :block/order order}
-                               (not (ldb/page? block))
-                               (assoc :block/page target-page))
-                           result (->
-                                   (if (de/entity? block)
-                                     (assoc m :block/level (:block/level block))
-                                     (merge block m))
-                                   (update :block/title (fn [value]
-                                                          (if (seq template-ref-block-ids)
-                                                            (reduce
-                                                             (fn [value id]
-                                                               (string/replace value
-                                                                               (page-ref/->page-ref id)
-                                                                               (page-ref/->page-ref (uuids id))))
-                                                             value
-                                                             template-ref-block-ids)
-                                                            value)))
-                                   (dissoc :db/id))]
+                           m {:db/id (:db/id block)
+                              :block/uuid uuid'
+                              :block/parent parent
+                              :block/order order}
+                           result* (->
+                                    (if (de/entity? block)
+                                      (assoc m :block/level (:block/level block))
+                                      (merge block m))
+                                    (update :block/title (fn [value]
+                                                           (if (seq template-ref-block-ids)
+                                                             (reduce
+                                                              (fn [value id]
+                                                                (string/replace value
+                                                                                (page-ref/->page-ref id)
+                                                                                (page-ref/->page-ref (uuids id))))
+                                                              value
+                                                              template-ref-block-ids)
+                                                             value))))
+                           result* (if (:block.temp/use-old-db-id? result*)
+                                     result*
+                                     (dissoc result* :db/id))
+                           page? (or (ldb/page? block) (:block/name block))
+                           result (cond-> result*
+                                    (not page?)
+                                    (assoc :block/page target-page)
+                                    page?
+                                    (dissoc :block/page))]
                        (update-property-ref-when-paste result uuids))))
                  blocks)))
 
@@ -606,12 +657,13 @@
      :id->new-uuid id->new-uuid}))
 
 (defn- get-target-block
-  [db blocks target-block {:keys [outliner-op indent? sibling? up?]}]
+  [db blocks target-block {:keys [outliner-op bottom? top? indent? sibling? up?]}]
   (when-let [block (if (:db/id target-block)
                      (d/entity db (:db/id target-block))
                      (when (:block/uuid target-block)
                        (d/entity db [:block/uuid (:block/uuid target-block)])))]
     (let [linked (:block/link block)
+          library? (ldb/library? block)
           up-down? (= outliner-op :move-blocks-up-down)
           [block sibling?] (cond
                              up-down?
@@ -634,7 +686,16 @@
                              [block sibling?]
 
                              (contains? #{:insert-blocks :move-blocks} outliner-op)
-                             [block sibling?]
+                             (cond
+                               top?
+                               [block false]
+
+                               bottom?
+                               (if-let [last-child (last (ldb/sort-by-order (:block/_parent block)))]
+                                 [last-child true]
+                                 [block false])
+                               :else
+                               [block (if library? false sibling?)])
 
                              linked
                              (get-last-child-or-self db linked)
@@ -681,6 +742,8 @@
     `target-block`: where `blocks` will be inserted.
     Options:
       `sibling?`: as siblings (true) or children (false).
+      `bottom?`: inserts block to the bottom.
+      `top?`: inserts block to the top.
       `keep-uuid?`: whether to replace `:block/uuid` from the parameter `blocks`.
                     For example, if `blocks` are from internal copy, the uuids
                     need to be changed, but there's no need for internal cut or drag & drop.
@@ -701,15 +764,17 @@
                        (if-let [eid (or (:db/id b)
                                         (when-let [id (:block/uuid b)]
                                           [:block/uuid id]))]
-                         (->
-                          (if-let [e (if (de/entity? b) b (d/entity db eid))]
-                            (merge
-                             (into {} e)
-                             {:db/id (:db/id e)
-                              :block/title (or (:block/raw-title e) (:block/title e))}
-                             b)
-                            b)
-                          (dissoc :block/tx-id :block/refs :block/path-refs))
+                         (let [b' (if-let [e (if (de/entity? b) b (d/entity db eid))]
+                                    (merge
+                                     (into {} e)
+                                     {:db/id (:db/id e)
+                                      :block/title (or (:block/raw-title e) (:block/title e))}
+                                     b)
+                                    b)
+                               dissoc-keys (concat [:block/tx-id]
+                                                   (when (contains? #{:insert-template-blocks :paste} outliner-op)
+                                                     [:block/refs]))]
+                           (apply dissoc b' dissoc-keys))
                          b))
                      blocks)
         [target-block sibling?] (get-target-block db blocks target-block opts)
@@ -745,10 +810,14 @@
                            :tx (vec blocks-tx)
                            :blocks (vec blocks)
                            :target-block target-block}))
-          (let [uuids-tx (->> (map :block/uuid blocks-tx)
+          (let [tx (assign-temp-id blocks-tx replace-empty-target? target-block)
+                old-db-id-blocks (->> (filter :block.temp/use-old-db-id? tx)
+                                      (map :block/uuid)
+                                      (set))
+                uuids-tx (->> (map :block/uuid blocks-tx)
+                              (remove old-db-id-blocks)
                               (remove nil?)
                               (map (fn [uuid'] {:block/uuid uuid'})))
-                tx (assign-temp-id blocks-tx replace-empty-target? target-block)
                 from-property (:logseq.property/created-from-property target-block)
                 many? (= :db.cardinality/many (:db/cardinality from-property))
                 property-values-tx (when (and sibling? from-property many?)
@@ -782,11 +851,6 @@
     (mapcat (fn [[_page blocks]]
               (ldb/sort-page-random-blocks db blocks))
             page-blocks)))
-
-(defn- delete-block
-  [db txs-state node]
-  (otree/-del node txs-state db)
-  @txs-state)
 
 (defn- get-top-level-blocks
   [top-level-blocks non-consecutive?]
@@ -829,9 +893,6 @@
                                       (:db/ident from-property) :logseq.property/empty-placeholder}) datoms)]
             (when (seq tx-data) (swap! txs-state concat tx-data)))
 
-          delete-one-block?
-          (delete-block db txs-state start-block)
-
           :else
           (doseq [id block-ids]
             (let [node (d/entity db id)]
@@ -850,45 +911,55 @@
 (defn- move-block
   [db block target-block sibling?]
   (let [target-block (d/entity db (:db/id target-block))
-        block (d/entity db (:db/id block))
-        first-block-page (:db/id (:block/page block))
-        target-page (get-target-block-page target-block)
-        not-same-page? (not= first-block-page target-page)
-        block-order (if sibling?
-                      (db-order/gen-key (:block/order target-block)
-                                        (:block/order (ldb/get-right-sibling target-block)))
-                      (db-order/gen-key nil
-                                        (:block/order (ldb/get-down target-block))))
+        block (d/entity db (:db/id block))]
+    (if (or
+         ;; target-block doesn't have parent or moving non-page block to library
+         (and sibling? (or (nil? (:block/parent target-block))
+                           (and (not (ldb/page? block))
+                                (ldb/library? (:block/parent target-block)))))
+         ;; move page to be a child of block
+         (and (not sibling?)
+              (not (ldb/page? target-block))
+              (ldb/page? block)))
+      (throw (ex-info "not-allowed-move-block-page" {}))
+      (let [first-block-page (:db/id (:block/page block))
+            target-page (get-target-block-page target-block sibling?)
+            not-same-page? (not= first-block-page target-page)
+            block-order (if sibling?
+                          (db-order/gen-key (:block/order target-block)
+                                            (:block/order (ldb/get-right-sibling target-block)))
+                          (db-order/gen-key nil
+                                            (:block/order (ldb/get-down target-block))))
 
-        tx-data [(cond->
-                  {:db/id (:db/id block)
-                   :block/parent (if sibling?
-                                   (:db/id (:block/parent target-block))
-                                   (:db/id target-block))
-                   :block/order block-order}
-                   (not (ldb/page? block))
-                   (assoc :block/page target-page))]
-        children-page-tx (when (and not-same-page? (not (ldb/page? block)))
-                           (let [children-ids (ldb/get-block-full-children-ids db (:block/uuid block))]
-                             (keep (fn [id]
-                                     (let [child (d/entity db id)]
-                                       (when-not (ldb/page? child)
-                                         {:block/uuid (:block/uuid child)
-                                          :block/page target-page}))) children-ids)))
-        target-from-property (:logseq.property/created-from-property target-block)
-        block-from-property (:logseq.property/created-from-property block)
-        property-tx (let [retract-property-tx (when block-from-property
-                                                [[:db/retract (:db/id (:block/parent block)) (:db/ident block-from-property) (:db/id block)]
-                                                 [:db/retract (:db/id block) :logseq.property/created-from-property]])
-                          add-property-tx (when (and sibling? target-from-property (not block-from-property))
-                                            [[:db/add (:db/id block) :logseq.property/created-from-property (:db/id target-from-property)]
-                                             [:db/add (:db/id (:block/parent target-block)) (:db/ident target-from-property) (:db/id block)]])]
-                      (concat retract-property-tx add-property-tx))]
-    (common-util/concat-without-nil tx-data children-page-tx property-tx)))
+            tx-data [(cond->
+                      {:db/id (:db/id block)
+                       :block/parent (if sibling?
+                                       (:db/id (:block/parent target-block))
+                                       (:db/id target-block))
+                       :block/order block-order}
+                       (not (ldb/page? block))
+                       (assoc :block/page target-page))]
+            children-page-tx (when (and not-same-page? (not (ldb/page? block)))
+                               (let [children-ids (ldb/get-block-full-children-ids db (:block/uuid block))]
+                                 (keep (fn [id]
+                                         (let [child (d/entity db id)]
+                                           (when-not (ldb/page? child)
+                                             {:block/uuid (:block/uuid child)
+                                              :block/page target-page}))) children-ids)))
+            target-from-property (:logseq.property/created-from-property target-block)
+            block-from-property (:logseq.property/created-from-property block)
+            property-tx (let [retract-property-tx (when block-from-property
+                                                    [[:db/retract (:db/id (:block/parent block)) (:db/ident block-from-property) (:db/id block)]
+                                                     [:db/retract (:db/id block) :logseq.property/created-from-property]])
+                              add-property-tx (when (and sibling? target-from-property (not block-from-property))
+                                                [[:db/add (:db/id block) :logseq.property/created-from-property (:db/id target-from-property)]
+                                                 [:db/add (:db/id (:block/parent target-block)) (:db/ident target-from-property) (:db/id block)]])]
+                          (concat retract-property-tx add-property-tx))]
+        (common-util/concat-without-nil tx-data children-page-tx property-tx)))))
 
 (defn- move-blocks
   "Move `blocks` to `target-block` as siblings or children."
-  [_repo conn blocks target-block {:keys [_sibling? _up? outliner-op _indent?]
+  [_repo conn blocks target-block {:keys [_sibling? _top? _bottom? _up? outliner-op _indent?]
                                    :as opts}]
   {:pre [(seq blocks)
          (m/validate block-map-or-entity target-block)]}
@@ -954,9 +1025,7 @@
             last-top-block-right (ldb/get-right-sibling last-top-block)
             right (or
                    last-top-block-right
-                   (let [parent (:block/parent last-top-block)
-                         parent (when (:block/page (d/entity db (:db/id parent)))
-                                  parent)]
+                   (let [parent (:block/parent last-top-block)]
                      (ldb/get-right-sibling parent)))
             sibling? (= (:db/id (:block/parent last-top-block))
                         (:db/id (:block/parent right)))]
@@ -1036,11 +1105,15 @@
 (defn- op-transact!
   [f & args]
   {:pre [(fn? f)]}
-  (let [result (apply f args)]
-    (when result
-      (let [tx-meta (assoc (:tx-meta result) :skip-store? true)]
-        (ldb/transact! (second args) (:tx-data result) tx-meta)))
-    result))
+  (try
+    (let [result (apply f args)]
+      (when result
+        (let [tx-meta (assoc (:tx-meta result) :skip-store? true)]
+          (ldb/transact! (second args) (:tx-data result) tx-meta)))
+      result)
+    (catch :default e
+      (when-not (= "not-allowed-move-block-page" (ex-message e))
+        (throw e)))))
 
 (let [f (fn [repo conn date-formatter block opts]
           (save-block repo @conn date-formatter block opts))]
@@ -1063,9 +1136,10 @@
     (op-transact! f repo conn blocks opts)))
 
 (defn move-blocks!
-  [repo conn blocks target-block sibling?]
-  (op-transact! move-blocks repo conn blocks target-block {:sibling? sibling?
-                                                           :outliner-op :move-blocks}))
+  [repo conn blocks target-block opts]
+  (op-transact! move-blocks repo conn blocks target-block
+                (assoc opts :outliner-op :move-blocks)))
+
 (defn move-blocks-up-down!
   [repo conn blocks up?]
   (op-transact! move-blocks-up-down repo conn blocks up?))

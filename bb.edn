@@ -164,8 +164,11 @@
   dev:lint-and-test
   logseq.tasks.dev/lint-and-test
 
-  dev:rtc-e2e-test
-  logseq.tasks.dev/rtc-e2e-test
+  dev:e2e-basic-test
+  logseq.tasks.dev/e2e-basic-test
+
+  dev:e2e-rtc-extra-test
+  logseq.tasks.dev/e2e-rtc-extra-test
 
   dev:gen-malli-kondo-config
   logseq.tasks.dev/gen-malli-kondo-config
@@ -207,7 +210,10 @@
   logseq.tasks.lang/validate-translations
 
   file-sync:integration-tests
-  logseq.tasks.file-sync/integration-tests}
+  logseq.tasks.file-sync/integration-tests
+
+  ai:check-common-errors
+  logseq.tasks.common-errors/check-common-errors}
 
  :tasks/config
  {:large-vars
